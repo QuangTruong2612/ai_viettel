@@ -300,12 +300,18 @@ def main(argv: list[str] | None = None) -> int:
 
     args.output.mkdir(parents=True, exist_ok=True)
 
-    # Health check: đảm bảo LM Studio server sống và model đang load
+    # Health check: đảm bảo server sống và model đang load
+    # Hỗ trợ cả LM Studio (1234) và Ollama (11434) — auto-detect qua env.
     llm = LLMClient()
+    # Allow CLI override of base_url/model
+    if args.base_url:
+        llm.config.base_url = args.base_url
+    if args.model:
+        llm.config.model = args.model
     try:
         models = llm._client.models.list(timeout=10)  # noqa: SLF001
         loaded = [m.id for m in models.data]
-        logger.info("LM Studio models loaded: %s", loaded)
+        logger.info("Models loaded từ %s: %s", llm.config.base_url, loaded)
         if llm.config.model not in loaded:
             logger.warning(
                 "Model '%s' CHƯA load trong LM Studio. Có: %s. "
