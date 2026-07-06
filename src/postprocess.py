@@ -430,6 +430,7 @@ def rescan_entity_context(
     input_text: str,
     llm_client: Any,
     other_entities: list[dict] | None = None,  # deprecated, kept for signature compat
+    cache: dict[str, str] | None = None,  # batch_rescan cache từ assemble_record
 ) -> str:
     """Dùng LLM dịch/chuẩn hóa entity text sang EN để tra mã.
 
@@ -444,11 +445,17 @@ def rescan_entity_context(
     Args:
         other_entities: DEPRECATED — không còn dùng để thêm vào prompt.
             Giữ để tương thích signature.
+        cache: optional dict {original_text: rescanned_text} từ batch_rescan.
+            Nếu entity_text có trong cache → dùng luôn, KHÔNG gọi LLM.
 
     Returns: câu truy vấn tiếng Anh chuẩn hóa, hoặc entity_text gốc nếu LLM fail.
     """
     if llm_client is None:
         return entity_text
+
+    # Check cache first (từ batch_rescan_entities)
+    if cache and entity_text in cache:
+        return cache[entity_text]
 
     # Validate entity_text trước khi gọi LLM
     if not entity_text or not entity_text.strip():
@@ -506,6 +513,151 @@ def rescan_entity_context(
     except Exception as exc:
         logger.warning("Rescan lỗi (%r): %s", entity_text, exc)
     return entity_text
+
+
+def batch_rescan_entities(
+    entities: list[dict],
+    llm_client: Any,
+) -> dict[str, str]:
+    """Rescan nhiều entities trong 1 LLM call duy nhất.
+
+    Trước đây, mỗi entity được rescan riêng lẻ → note có 30 entities = 30 LLM calls
+    liên tiếp → dễ trigger Ollama 500 crash ("model runner has unexpectedly stopped")
+    do resource pressure tích lũy. Batch này gộp thành 1 call duy nhất.
+
+    Args:
+        entities: list các entity có type 'THUỐC' hoặc 'CHẨN_ĐOÁN'.
+                  Mỗi dict cần 'text' và 'type'.
+        llm_client: LLMClient instance (đã có _client + config).
+
+    Returns:
+        dict mapping {original_text: rescanned_text}.
+        Entities không rescan được (fail, invalid) sẽ KHÔNG có trong dict
+        — caller dùng original_text làm fallback.
+    """
+    if not entities or llm_client is None:
+        return {}
+
+    # Filter & dedup: chỉ THUỐC + CHẨN_ĐOÁN cần rescan
+    to_rescan: list[tuple[int, str]] = []  # (idx, text)
+    seen: set[str] = set()
+    for i, e in enumerate(entities):
+        etype = e.get("type", "")
+        if etype not in ("THUỐC", "CHẨN_ĐOÁN"):
+            continue
+        text = str(e.get("text", "")).strip()
+        if text and text not in seen:
+            seen.add(text)
+            to_rescan.append((len(to_rescan), text))
+
+    if not to_rescan:
+        return {}
+
+    n = len(to_rescan)
+    # Build compact prompt
+    lines = []
+    for idx, (i, t) in enumerate(to_rescan, 1):
+        # Type tag để LLM biết phải xử lý thế nào
+        etype = entities[next(j for j, e in enumerate(entities)
+                              if e.get("text") == t)].get("type")
+        tag = "DRUG" if etype == "THUỐC" else "DIAG"
+        lines.append(f"{i}. [{tag}] {t}")
+
+    entities_list = "\n".join(lines)
+
+    prompt = (
+        "You are a clinical entity refiner. For each entity below, output a "
+        "standardized English ICD/RxNorm-searchable phrase.\n\n"
+        "STRICT RULES:\n"
+        "1. For DRUG: keep generic name + strength + route + frequency "
+        "(e.g., 'metoprolol 25 mg oral bid'). Strip VN parentheticals like '(uống hôm nay)'.\n"
+        "2. For DIAGNOSIS: translate VERBATIM to English clinical phrase "
+        "(e.g., 'suy thận mãn' → 'chronic kidney disease'). Keep ALL modifiers.\n"
+        "3. DO NOT add context that is NOT in the entity text.\n"
+        "4. Keep each output ≤ 100 chars.\n\n"
+        f"Entities (n={n}):\n{entities_list}\n\n"
+        f'Output JSON object: {{"1": "refined_text", "2": "refined_text", ...}}\n'
+        "Use the SAME NUMBERING as input. JSON only, no explanation."
+    )
+
+    # Call LLM once với retry
+    msg = [{"role": "user", "content": prompt}]
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            resp = llm_client._client.chat.completions.create(  # noqa: SLF001
+                model=llm_client.config.model,
+                messages=msg,
+                temperature=0.0,
+                max_tokens=min(2048, 100 * n + 200),  # dynamic: ~100 chars/entity + overhead
+            )
+            content = (resp.choices[0].message.content or "").strip()
+
+            # Extract JSON
+            try:
+                result_map = llm_client._extract_json(content)
+            except Exception:
+                # Fallback: try regex extract JSON object
+                result_map = _regex_extract_json_object(content)
+            if not isinstance(result_map, dict):
+                raise ValueError(f"Expected JSON object, got {type(result_map).__name__}")
+
+            # Map back: key "1" → entity[0].text
+            out: dict[str, str] = {}
+            for i, (_, text) in enumerate(to_rescan, 1):
+                refined = result_map.get(str(i), result_map.get(i, ""))
+                if isinstance(refined, str) and refined.strip():
+                    if _validate_rescan_output(refined, text, entities[next(
+                        j for j, e in enumerate(entities) if e.get("text") == text)].get("type", "")):
+                        out[text] = refined.strip()
+            logger.debug(
+                "Batch rescan: %d/%d entities refined successfully",
+                len(out), n,
+            )
+            return out
+
+        except Exception as exc:
+            last_exc = exc
+            err_str = str(exc).lower()
+            is_transient = (
+                "500" in err_str
+                or "model runner" in err_str
+                or "unexpectedly stopped" in err_str
+                or "connection" in err_str
+                or "timeout" in err_str
+            )
+            if is_transient and attempt < 2:
+                wait = 2 ** (attempt + 2)  # 4s, 8s — longer than per-entity (Ollama needs time to recover)
+                logger.warning(
+                    "Batch rescan lỗi transient (attempt %d/3, wait %ds): %r",
+                    attempt + 1, wait, exc,
+                )
+                import time as _t
+                _t.sleep(wait)
+                continue
+            break
+    if last_exc is not None:
+        logger.warning(
+            "Batch rescan lỗi (%d entities): %s → fallback per-entity",
+            n, last_exc,
+        )
+    return {}
+
+
+def _regex_extract_json_object(content: str) -> dict | None:
+    """Fallback: extract JSON object bằng regex khi _extract_json fail.
+    """
+    import re
+    # Tìm {...} đầu tiên
+    start = content.find("{")
+    end = content.rfind("}")
+    if start < 0 or end < 0 or end <= start:
+        return None
+    candidate = content[start: end + 1]
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
 
 
 def _validate_rescan_output(
@@ -571,6 +723,9 @@ def assemble_record(
         + TRIỆU_CHỨNG → không gán candidates.
     - Chuẩn hoá assertions (unique, sorted).
     - Sắp xếp theo vị trí.
+
+    Rescan strategy: gọi LLM BATCH (1 call) cho tất cả entities có rescan;
+    nếu batch fail → fallback per-entity (giữ backward compat).
     """
     validated = validate_positions(input_text, raw_entities)
     validated = dedupe_entities(validated)
@@ -578,6 +733,10 @@ def assemble_record(
     # Gọi ở đây để dedup duplicate substring (vd: "cảm giác thắt chặt ngực vùng trước tim"
     # và "cảm giác thắt chặt ngực" cùng type → chỉ giữ entity dài hơn).
     validated = _drop_substring_entities(validated)
+
+    # Batch rescan: 1 LLM call cho N entities (giảm load Ollama 10-30x)
+    # → giảm 500 crash do resource pressure.
+    rescan_cache: dict[str, str] = batch_rescan_entities(validated, llm_client)
 
     final: list[dict[str, Any]] = []
     # Track text+type đã emit để dedupe (vd "doxycycline" trùng khi LLM trả 2 lần)
@@ -723,6 +882,7 @@ def assemble_record(
                     rescanned_diag = rescan_entity_context(
                         diag_part, "CHẨN_ĐOÁN", input_text, llm_client,
                         other_entities=other_for_diag,
+                        cache=rescan_cache,
                     )
                     cand2 = icd_retriever.lookup(
                         rescanned_diag, other_entities=other_for_diag,
@@ -753,9 +913,12 @@ def assemble_record(
         if etype == "THUỐC":
             # Rescan để lấy query chuẩn hóa (gom liều, đường dùng từ văn bản)
             # Pass other_entities để LLM có indication context (Fix 6)
+            # Use cache từ batch_rescan để giảm LLM calls
             other_for_drug = [e for e in validated if e.get("text") != text]
             rescanned = rescan_entity_context(
-                text, etype, input_text, llm_client, other_entities=other_for_drug,
+                text, etype, input_text, llm_client,
+                other_entities=other_for_drug,
+                cache=rescan_cache,
             )
             cleaned = sanitize_drug_text(rescanned)
             cand: list[str] = []
@@ -778,9 +941,12 @@ def assemble_record(
             # Rescan để lấy query EN chuẩn hóa (gom mức độ, biến chứng)
             # Pass other_entities để LLM có indication context (Fix 6)
             # KHÔNG truyền context_query cho BGE-M3 (Fix 7 contaminated embeddings)
+            # Use cache từ batch_rescan
             other_for_diag = [e for e in validated if e.get("text") != text]
             rescanned = rescan_entity_context(
-                text, etype, input_text, llm_client, other_entities=other_for_diag,
+                text, etype, input_text, llm_client,
+                other_entities=other_for_diag,
+                cache=rescan_cache,
             )
             cand = icd_retriever.lookup(
                 rescanned, other_entities=other_for_diag,
