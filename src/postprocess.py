@@ -724,10 +724,14 @@ def assemble_record(
                         diag_part, "CHẨN_ĐOÁN", input_text, llm_client,
                         other_entities=other_for_diag,
                     )
-                    cand2 = icd_retriever.lookup(rescanned_diag)
+                    cand2 = icd_retriever.lookup(
+                        rescanned_diag, other_entities=other_for_diag,
+                    )
                     # Fix 13: Fallback cho split ICD
                     if not cand2 and rescanned_diag != diag_part:
-                        cand2 = icd_retriever.lookup(diag_part)
+                        cand2 = icd_retriever.lookup(
+                            diag_part, other_entities=other_for_diag,
+                        )
                     if cand2:
                         item2["candidates"] = cand2
                 final.append(item2)
@@ -778,10 +782,14 @@ def assemble_record(
             rescanned = rescan_entity_context(
                 text, etype, input_text, llm_client, other_entities=other_for_diag,
             )
-            cand = icd_retriever.lookup(rescanned)
+            cand = icd_retriever.lookup(
+                rescanned, other_entities=other_for_diag,
+            )
             # Fix 13: Fallback cho ICD - nếu rescan fail, thử text gốc
             if not cand and rescanned != text:
-                cand = icd_retriever.lookup(text)
+                cand = icd_retriever.lookup(
+                    text, other_entities=other_for_diag,
+                )
                 if cand:
                     logger.debug(
                         "[%d] ICD rescan fallback cho '%s': dùng text gốc → %d candidates",

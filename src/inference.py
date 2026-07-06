@@ -286,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     # VectorSearch: BGE-M3 vector search trên toàn bộ 71k mã ICD-10
     local_search = ICD10VectorSearch()
     icd_retriever = ICDRetriever(
-        translator=translator, use_remote=True, local_search=local_search
+        translator=translator, local_search=local_search
     )
     # Adaptive few-shot cap based on context budget.
     # Tính số few-shot vừa đủ dựa trên: target_ctx - sys_prompt - max_tokens - user_input.
@@ -374,15 +374,7 @@ def main(argv: list[str] | None = None) -> int:
                     logger.exception("Future lỗi: %s", exc)
     # Save caches
     translator.save_cache()
-    icd_retriever.save_remote_cache()
     icd_retriever.save_index()
-    # RxNorm API cache (live API results, populates during inference)
-    try:
-        from .rxnorm_rag import save_rxnorm_cache
-
-        save_rxnorm_cache()
-    except Exception as exc:  # pragma: no cover
-        logger.warning("Save RxNorm API cache fail: %s", exc)
     return 0
 
 

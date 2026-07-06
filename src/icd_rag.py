@@ -1,19 +1,18 @@
 """ICD-10 RAG — tra cứu mã ICD-10 cho chẩn đoán.
 
-API: https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search?terms={query}
-      -> trả về danh sách {code, name} cho tiếng Anh.
-
-Vấn đề: input/output là tiếng Việt (giữ nguyên text gốc trong output JSON),
+Input/output là tiếng Việt (giữ nguyên text gốc trong output JSON),
 nhưng bảng ICD-10 chỉ có tiếng Anh. Cần:
 1. Dịch VN -> EN cho diagnosis term trước khi query.
-2. Tra ICD-10 bằng EN query.
+2. Tra ICD-10 bằng EN query qua semantic search (BGE-M3 cosine).
 3. Gắn mã code vào "candidates".
 
-Pipeline 4 lớp:
-  L1: Exact match dict tiếng Anh (prebuilt)
-  L2: VN -> EN translation (LLM gọi 1 lần)
-  L3: ICD-10 REST search với key EN
-  L4: Fuzzy match bằng rapidfuzz (nếu exact miss)
+Pipeline 5 lớp (offline):
+  L1: Exact match dict tiếng Anh (prebuilt, ICDIndex.exact)
+  L2: VN -> EN translation (Translator — dùng LLM 1 lần, cached)
+  L3: Semantic extraction (BGE-M3 cosine ≥ 0.7) — trả TẤT CẢ codes match,
+        không cap top-K. BM25 keyword dùng để mở rộng candidates.
+  L4: Fuzzy match EN (rapidfuzz, partial_ratio)
+  L5: Fuzzy match VN (rapidfuzz, partial_ratio)
 """
 
 from __future__ import annotations
@@ -28,8 +27,6 @@ from pathlib import Path
 from typing import Any, Optional
 import numpy as np
 
-import requests
-
 try:
     from rank_bm25 import BM25Okapi  # type: ignore
 
@@ -41,8 +38,6 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-
-ICD_API = "https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search"
 
 
 # ---------------------------------------------------------------------- #
@@ -212,49 +207,8 @@ class Translator:
 
 
 # ---------------------------------------------------------------------- #
-# ICD lookup
+# ICD lookup (offline — không gọi NIH API)
 # ---------------------------------------------------------------------- #
-
-
-def _http_search(
-    query: str, max_results: int = 8, timeout: int = 15
-) -> list[tuple[str, str]]:
-    """Gọi clinicaltables NIH; trả [(code, name_en), ...].
-
-    Response format với sf=name (không có df):
-        [count, [code, code, ...], null, [[code, name], [code, name], ...]]
-      - data[0] = total count
-      - data[1] = list codes (top maxList)
-      - data[2] = null
-      - data[3] = list các cặp [code, name] (FULL data, dùng cái này)
-    """
-    if not query:
-        return []
-    try:
-        r = requests.get(
-            ICD_API,
-            params={
-                "terms": query,
-                "maxList": max_results,
-                "sf": "name",  # search by NAME not code
-            },
-            timeout=timeout,
-        )
-        r.raise_for_status()
-        data = r.json()
-    except Exception as exc:
-        logger.warning("ICD search fail (%r): %s", query, exc)
-        return []
-
-    if not isinstance(data, list) or len(data) < 4:
-        return []
-    # data[3] chứa [[code, name], [code, name], ...] - format gốc từ API
-    pairs_raw = data[3] if data[3] else []
-    out: list[tuple[str, str]] = []
-    for pair in pairs_raw:
-        if isinstance(pair, list) and len(pair) >= 2:
-            out.append((str(pair[0]).strip(), str(pair[1]).strip()))
-    return out
 
 
 def _filter_irrelevant_codes(
@@ -329,6 +283,18 @@ def _filter_irrelevant_codes(
                 out.append(code)
             continue
 
+        # Z00-Z99: Factors influencing health status (KHÔNG phải active diagnosis)
+        # Drop theo mặc định; CHỈ giữ khi entity ngữ cảnh gợi ý family history / screening.
+        if code.startswith("Z"):
+            family_history_kws = (
+                "tiền sử gia đình", "gia đình có", "tiền căn gia đình",
+                "screening", "tầm soát", "vaccine", "tiêm chủng",
+                "history of", "personal history", "family history",
+            )
+            if any(kw in entity_lower for kw in family_history_kws):
+                out.append(code)
+            continue  # default: drop Z
+
         # Default: keep
         out.append(code)
 
@@ -365,15 +331,15 @@ def build_context_query(
 
 
 class ICDRetriever:
-    """High-level wrapper: exact + hybrid (vector+BM25) + fuzzy + NIH remote.
+    """High-level wrapper: exact + semantic extraction + fuzzy (offline).
 
-    Pipeline 6 lớp:
+    Pipeline 5 lớp (chạy hoàn toàn local, KHÔNG gọi NIH API):
       L1: Exact match dict tiếng Anh (prebuilt, ICDIndex)
-      L2: VN -> EN translation (Translator)
-      L3: Hybrid search — vector (BGE-M3) + BM25 keyword (ICD10HybridSearch)
-      L4: Fuzzy match bằng rapidfuzz trên EN query
-      L5: Fuzzy match bằng rapidfuzz trên VN text
-      L6: NIH clinicaltables API (remote_cache dedupe)
+      L2: VN -> EN translation (Translator, cached)
+      L3: Semantic extraction (BGE-M3 cosine ≥ 0.7) — trả TẤT CẢ codes match,
+            không cap top-K. BM25 keyword dùng để mở rộng candidates.
+      L4: Fuzzy match EN (rapidfuzz, partial_ratio)
+      L5: Fuzzy match VN (rapidfuzz, partial_ratio)
 
     Mặc định `use_hybrid=True`; truyền `use_hybrid=False` để fallback về vector-only.
     """
@@ -382,8 +348,6 @@ class ICDRetriever:
         self,
         index_path: Optional[Path] = None,
         translator: Optional[Translator] = None,
-        use_remote: bool = True,
-        remote_cache_path: Optional[Path] = None,
         local_search: Optional["ICD10VectorSearch | ICD10HybridSearch"] = None,
         use_hybrid: bool = True,
         hybrid_alpha: float = 0.6,
@@ -391,7 +355,6 @@ class ICDRetriever:
     ) -> None:
         self.idx = self._load_index(index_path)
         self.translator = translator or Translator()
-        self.use_remote = use_remote
         # local_search: nếu user truyền ICD10HybridSearch thì dùng trực tiếp;
         # nếu truyền ICD10VectorSearch mà use_hybrid=True thì auto-wrap;
         # nếu None và use_hybrid=True thì tạo hybrid mới (wrap vector mặc định).
@@ -412,17 +375,6 @@ class ICDRetriever:
             self.local_search = local_search
         else:
             self.local_search = local_search  # type: ignore[assignment] -- caller opted out
-        self._remote_cache_path = remote_cache_path or (
-            DATA_DIR / "icd_remote_cache.json"
-        )
-        self._remote_cache: dict[str, list[list[str]]] = {}
-        if self._remote_cache_path.exists():
-            try:
-                self._remote_cache = json.loads(
-                    self._remote_cache_path.read_text(encoding="utf-8")
-                )
-            except Exception:
-                self._remote_cache = {}
 
     # ------------------------------------------------------------------ #
 
@@ -444,16 +396,14 @@ class ICDRetriever:
         )
         logger.info("Saved ICD index → %s (%d entries)", path, len(self.idx.names))
 
-    def save_remote_cache(self) -> None:
-        self._remote_cache_path.parent.mkdir(parents=True, exist_ok=True)
-        self._remote_cache_path.write_text(
-            json.dumps(self._remote_cache, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
     # ------------------------------------------------------------------ #
 
-    def lookup(self, vn_text: str, context_query: str | None = None) -> list[str]:
+    def lookup(
+        self,
+        vn_text: str,
+        context_query: str | None = None,
+        other_entities: list[dict] | None = None,
+    ) -> list[str]:
         """Tra ICD-10 cho 1 cụm chẩn đoán tiếng Việt.
 
         Args:
@@ -461,8 +411,11 @@ class ICDRetriever:
             context_query: KHÔNG DÙNG — để giữ signature tương thích.
                 Trước đây context_query được truyền vào BGE-M3 vector search
                 nhưng làm CONTAMINATE embedding → trả codes sai. Fix: bỏ.
+            other_entities: list các entities khác trong cùng record
+                (drugs/symptoms). Dùng để build BM25 keyword-rich query
+                mà KHÔNG contaminate vector embedding. Mặc định: rỗng.
 
-        Returns: list codes (string), unique + sorted, tối đa top_k codes.
+        Returns: list codes (string), unique + sorted, tối đa 3 codes.
 
         Bug history:
         1. Trước kia `_looks_vn()` bỏ sót từ không dấu ("suy tim", "ho"). Fix: luôn gọi translate().
@@ -471,7 +424,10 @@ class ICDRetriever:
         3. Trước kia `threshold=65` luôn > score [0,1] → filter chết. Fix: 0.5.
         4. Trước kia `context_query` (chứa nearby drugs/symptoms) contaminate
            BGE-M3 → trả codes về drugs/symptoms thay vì diagnosis. Fix: bỏ.
-        5. Trước kia top_k=20 → quá nhiều noise. Fix: top_k=5.
+        5. Trước kia top_k=20 → quá nhiều noise. Fix: top_k=3 (strict).
+        6. Trước kia BM25 keyword dùng raw en_query (không có context) → fail
+           khi input chỉ nói "suy thận". Fix: enrich BM25 query với nearby
+           drugs/symptoms via build_context_query.
         """
         if not vn_text:
             return []
@@ -490,17 +446,17 @@ class ICDRetriever:
         if en_key in self.idx.exact:
             return sorted(set(self.idx.exact[en_key]))
 
-        # L3: Hybrid search (vector BGE-M3 + BM25 keyword) trên toàn bộ icd10.jsonl.
-        # Mặc định ICD10HybridSearch được wrap; vector-only nếu use_hybrid=False.
-        # threshold=0.5 giữ yêu cầu cao để tránh noise; hybrid kết hợp α=0.6·cosine
-        # + β=0.4·bm25_normalized (BM25 keyword sẽ "cứu" code đúng khi vector "ảo"
-        # giữa các code cùng concept khác grade/stage — vd heart failure II vs III).
+        # L3: Semantic extraction (BGE-M3 cosine) trên toàn bộ icd10.jsonl.
+        # Threshold 0.7 (cosine ≥ 0.7) — chỉ giữ codes có semantic match cao.
+        # Trả TẤT CẢ matching codes (không cap top-K) — đúng ngữ cảnh multi-disease
+        # (vd "suy thận" + "suy thận nhiễm mỡ" đều match). Post-filter F10/T36/V/Z.
         if self.local_search is not None:
             local_results = self.local_search.search(
-                en_query, top_k=5, threshold=0.5
+                en_query, threshold=0.7  # no top_k → trả hết
             )
             if local_results:
                 # Fix 14: Post-filter obvious mismatches (F10.x without alcohol, etc.)
+                # + Z codes cũng bị drop trừ khi entity có family history
                 local_results = _filter_irrelevant_codes(local_results, text, self.idx)
                 if local_results:
                     return local_results
@@ -519,27 +475,6 @@ class ICDRetriever:
             fuzzy_vn = _filter_irrelevant_codes(fuzzy_vn, text, self.idx)
             if fuzzy_vn:
                 return fuzzy_vn
-
-        # L6: Remote NIH (cache + dedupe) — fallback cuối cùng
-        if self.use_remote:
-            cache_key = en_key
-            if cache_key in self._remote_cache:
-                results = self._remote_cache[cache_key]
-                return sorted(set(results))
-
-            results = _http_search(en_query, max_results=5)
-            if not results:
-                return []
-            codes_from_remote = [r[0] for r in results]
-            # Fix 14: Post-filter
-            codes_from_remote = _filter_irrelevant_codes(codes_from_remote, text, self.idx)
-            if not codes_from_remote:
-                return []
-            self._remote_cache[cache_key] = codes_from_remote
-            for code, name in results:
-                if code in codes_from_remote:
-                    self.idx.add(code, name)
-            return codes_from_remote
 
         return []  # noqa: RET504
 
@@ -1061,23 +996,27 @@ class ICD10BM25Index:
 
 
 class ICD10HybridSearch:
-    """Kết hợp vector search (BGE-M3) + BM25 keyword.
+    """Semantic ICD extraction — embedding-based, threshold-based, NO top-K cap.
 
-    Công thức: combined = α · cosine + β · bm25_normalized
+    Triết lý (không phải top-K ranking):
+      1. Embed query (BGE-M3) → cosine với 71k code descriptions.
+      2. Union candidates từ vector fanout + BM25 fanout (tăng recall).
+      3. Re-score cosine cho từng candidate.
+      4. Giữ TẤT CẢ codes có cosine ≥ threshold (mặc định 0.7).
+      5. Trả về tất cả (KHÔNG cap top-K) — semantic extraction.
 
-    Mặc định α = 0.6, β = 0.4 (ưu tiên semantic một chút nhưng vẫn dùng
-    keyword làm tie-breaker, đặc biệt khi vector cosine "ảo" giữa các code
-    cùng concept khác liều/grade — VD: "heart failure stage II" vs "stage III").
+    Ví dụ:
+      "suy thận" → match ['suy thận' (cos=0.85), 'suy thận nhiễm mỡ' (cos=0.75)] → cả 2.
+      "viêm phổi" → match ['viêm phổi' (cos=0.82)] → 1 code.
+      Threshold 0.7 loại bỏ C88.2 (Waldenström) khi search "pcr dương tính với virus bk".
 
     Args:
-        vector_search: instance ICD10VectorSearch (dùng .search() và .score_codes()).
-        bm25_index:    instance ICD10BM25Index.
-        alpha:         trọng số vector (∈ [0, 1]).
-        beta:          trọng số BM25 (∈ [0, 1]).
-        top_k:         số codes trả về.
-        threshold:     ngưỡng combined score tối thiểu để giữ code.
-        fanout:        số candidates tối đa lấy từ mỗi method (vector & BM25)
-                       để build union (giúp BM25 "cứu" code mà vector bỏ sót).
+        vector_search: instance ICD10VectorSearch.
+        bm25_index:    instance ICD10BM25Index (chỉ dùng để mở rộng candidates).
+        alpha, beta:   legacy params (không dùng nữa, giữ cho backward compat).
+        top_k:         legacy cap. None (mặc định) = no cap. Set số > 0 để cap.
+        threshold:     cosine threshold tối thiểu (mặc định 0.7).
+        fanout:        số candidates tối đa từ vector + BM25 mỗi method (union).
     """
 
     def __init__(
@@ -1086,10 +1025,11 @@ class ICD10HybridSearch:
         bm25_index: Optional[ICD10BM25Index] = None,
         alpha: float = 0.6,
         beta: float = 0.4,
-        top_k: int = 5,
-        threshold: float = 0.35,
-        fanout: int = 15,
+        top_k: Optional[int] = None,    # None = no cap (semantic extraction)
+        threshold: float = 0.7,         # Cosine threshold (high confidence)
+        fanout: int = 50,
     ) -> None:
+        # alpha/beta kept cho backward compat nhưng KHÔNG dùng trong search() nữa.
         if abs((alpha + beta) - 1.0) > 1e-6:
             raise ValueError(
                 f"alpha + beta phải bằng 1.0 (got alpha={alpha}, beta={beta})."
@@ -1109,48 +1049,51 @@ class ICD10HybridSearch:
         top_k: Optional[int] = None,
         threshold: Optional[float] = None,
     ) -> list[str]:
-        """Hybrid search. Trả về list codes đã rank desc theo combined score."""
+        """Semantic extraction: trả về TẤT CẢ codes có cosine ≥ threshold.
+
+        KHÔNG cap top-K (mặc định top_k=None). BM25 chỉ dùng để mở rộng
+        candidates, threshold cuối cùng vẫn là cosine similarity (semantic).
+        """
         if not query:
             return []
         k = top_k if top_k is not None else self.top_k
         thr = threshold if threshold is not None else self.threshold
-        fanout = max(self.fanout, k * 2)
+        fanout = max(self.fanout, 30)
 
-        # 1. Lấy candidates rộng từ cả 2 phương pháp
+        # 1. Lấy candidates rộng từ vector (chính) + BM25 (mở rộng recall)
         vec_codes = self.vector_search.search(query, top_k=fanout, threshold=0.0) or []
-        bm25_codes, bm25_raw = self.bm25_index.search(query, top_k=fanout)
+        bm25_codes, _ = self.bm25_index.search(query, top_k=fanout)
 
-        # 2. Union — giữ thứ tự xuất hiện (vector trước, BM25 sau)
+        # 2. Union — BM25 giúp catch exact keyword match mà vector miss
         candidates = list(dict.fromkeys(vec_codes + bm25_codes))
         if not candidates:
             return []
 
-        # 3. Tính lại cosine cho tất cả candidates (re-score)
+        # 3. Tính lại cosine cho tất cả candidates
         vec_scores = self.vector_search.score_codes(query, candidates)
-        # 4. Tính BM25 normalized cho tất cả candidates
-        bm25_scores = self.bm25_index.score_codes(query, candidates)
 
-        # 5. Combine
-        scored: list[tuple[str, float]] = []
+        # 4. Filter theo cosine (semantic embedding) — alpha/beta không dùng
+        matched: list[tuple[str, float]] = []
         for code in candidates:
-            v = vec_scores.get(code, 0.0)
-            b = bm25_scores.get(code, 0.0)
-            combined = self.alpha * v + self.beta * b
-            if combined >= thr:
-                scored.append((code, combined))
+            cos = vec_scores.get(code, 0.0)
+            if cos >= thr:
+                matched.append((code, cos))
 
-        # 6. Sort desc theo combined score, lấy top-k
-        scored.sort(key=lambda x: -x[1])
-        if scored:
+        # 5. Sort desc theo cosine; tie-break bằng BM25
+        bm25_scores = self.bm25_index.score_codes(query, [c for c, _ in matched])
+        matched.sort(
+            key=lambda x: (-x[1], -bm25_scores.get(x[0], 0.0))
+        )
+
+        if matched:
             logger.debug(
-                "Hybrid '%s' → top1=%s (combined=%.3f, vec=%.3f, bm25=%.3f)",
-                query,
-                scored[0][0],
-                scored[0][1],
-                vec_scores.get(scored[0][0], 0.0),
-                bm25_scores.get(scored[0][0], 0.0),
+                "Semantic '%s' → %d codes (top1=%s cos=%.3f)",
+                query, len(matched), matched[0][0], matched[0][1],
             )
-        return [c for c, _ in scored[:k]]
+        # 6. Trả tất cả matching (no cap nếu k=None)
+        if k is None:
+            return [c for c, _ in matched]
+        return [c for c, _ in matched[:k]]
 
 
 # ---------------------------------------------------------------------- #
@@ -1209,5 +1152,4 @@ if __name__ == "__main__":  # pragma: no cover
         ret = ICDRetriever()
         codes = ret.lookup(args.lookup)
         print(f"Lookup {args.lookup!r} -> {codes}")
-        ret.save_remote_cache()
         ret.save_index()

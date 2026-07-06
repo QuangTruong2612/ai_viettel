@@ -45,25 +45,34 @@ uv run scripts/test_inference.py --out output/smoke_test.json
 
 ## 🆕 Cải tiến mới nhất
 
-### Hybrid ICD Search (Vector + BM25)
+### ICD Semantic Extraction (no top-K, cosine threshold)
 
-- Kết hợp BGE-M3 cosine similarity với BM25 keyword ranking
-- Công thức: `combined = α·cosine + β·bm25_normalized` (mặc định α=0.6, β=0.4)
-- Khắc phục "vector ảo" giữa các code cùng concept khác grade/stage (heart failure II vs III)
+- **Embedding-based extraction** thay vì top-K ranking
+- Threshold `cosine ≥ 0.7` (mặc định) — chỉ giữ codes có semantic match cao
+- Trả **TẤT CẢ** codes matching threshold (không cap top-K) → đúng ngữ cảnh multi-disease
+  - Vd: `suy thận` → cả `N18.9` + `N18.4` + `N19` thay vì chỉ top 1
+- BM25 keyword dùng để mở rộng candidates (fanout), threshold vẫn là cosine
 - Files: [src/icd_rag.py](src/icd_rag.py) — `ICD10VectorSearch`, `ICD10BM25Index`, `ICD10HybridSearch`
 
-### Prompt Engineering Improvements
+### RxNorm Structured Index (offline, 1 code / drug)
 
-- **XML structure**: SYSTEM_PROMPT wrap trong các `<role>`, `<instructions>`, `<workflow>`, `<entity_types>`, `<extraction_rules>`, `<special_cases_ecg>`, `<assertions>`, `<output_format>`, `<final_rules>` — giúp LLM phân biệt rõ từng phần chỉ thị.
-- **Few-shot examples**: 32 ví dụ chất lượng cao trong [data/examples.jsonl](data/examples.jsonl) (đã fix 132/151 positions sai). Auto-budget theo `target_ctx`.
-- **Positive framing**: các rule "BỎ lifestyle / BỎ đại từ chung" được refactor thành "TEXT ENTITY = TÊN CỤ THỂ", tránh paradoxical attention khi LLM đọc từ cấm.
+- **Bỏ NIH API live** hoàn toàn → pipeline chạy 100% offline
+- Structured index `(ingredient, strength) → list[rxcui]` từ [data/rxnorm.jsonl](data/rxnorm.jsonl) (46k rows)
+- **Return 1 rxcui duy nhất** (mỗi thuốc đúng 1 code, không list)
+- Compound drugs (vd `lisinopril 10 mg / hydrochlorothiazide`) split by ` / ` → match component
+- Strength normalization: `"25 mg"`, `"25MG"`, `"25.0 MG"` đều → key chung
+- Files: [src/rxnorm_rag.py](src/rxnorm_rag.py) — `RxNormIndex`, `RxNormRetriever`
 
-### Context-Aware ICD/RxNorm Pipeline
+### ICD Z-Code Filter
 
-- 6 lớp: Exact match → Translate VN→EN → Hybrid search → Fuzzy EN → Fuzzy VN → Remote NIH fallback
-- LLM đọc TOÀN BỘ input trước khi extract (3-step reasoning)
-- Context-aware query cho BGE-M3 (drugs + symptoms → disambiguate diagnosis)
-- Drug→Diagnosis inference table (amlodipine → THA, etc.)
+- Drop Z00-Z99 (Factors influencing health status) cho active diagnosis lookup
+- Whitelist: giữ Z codes nếu entity có `tiền sử gia đình`, `screening`, `vaccine`
+
+### Prompt Engineering (3 phases)
+
+- **XML structure**: SYSTEM_PROMPT wrap trong các `<role>`, `<instructions>`, `<workflow>`, `<entity_types>`, `<extraction_rules>`, `<special_cases_ecg>`, `<assertions>`, `<output_format>`, `<final_rules>`.
+- **Few-shot examples**: 32 ví dụ trong [data/examples.jsonl](data/examples.jsonl) (đã fix 132/151 positions sai). Auto-budget theo `target_ctx`.
+- **Positive framing**: refactor `BỎ lifestyle` → `TEXT ENTITY = TÊN CỤ THỂ`.
 
 ---
 
@@ -82,10 +91,10 @@ Model: qwen2.5:7b / gemma2:9b (qua Ollama OpenAI-compatible API).
 - **THUỐC**: gom tên gốc + strength + route + frequency (vd `Amlodipine 10mg uống daily`).
 - **CHẨN_ĐOÁN**: gom severity/location/complication (vd `Trào ngược dạ dày` + `không viêm thực quản` → `GERD without esophagitis`).
 
-### Giai đoạn 3 — Medical RAG
+### Giai đoạn 3 — Medical RAG (100% offline)
 
-- **RxNorm**: Local index + NIH REST API + cache.
-- **ICD-10**: Hybrid search (BGE-M3 vector + BM25 keyword) trên 71,705 codes (`data/icd10.jsonl`).
+- **RxNorm**: Structured index từ [data/rxnorm.jsonl](data/rxnorm.jsonl) → [data/rxnorm_index.json](data/rxnorm_index.json). Lookup 1 rxcui mỗi thuốc.
+- **ICD-10**: Hybrid (BGE-M3 vector + BM25 keyword) trên 71,705 codes. Semantic extraction cosine ≥ 0.7, không cap top-K.
 
 ---
 
@@ -97,23 +106,24 @@ AI_VIETTEL/
 │   ├── llm_client.py       # OpenAI-compatible client (timeout, retry, JSON parser)
 │   ├── prompts.py          # SYSTEM_PROMPT (XML-wrapped) + few-shot loader
 │   ├── icd_rag.py          # Translator + ICD10HybridSearch (vector + BM25)
-│   ├── rxnorm_rag.py       # RxNorm lookup + NIH API
+│   ├── rxnorm_rag.py       # RxNorm structured index (offline, no NIH API)
 │   ├── postprocess.py      # Position auto-fix, LLM rescan, dedupe
-│   └── inference.py        # Main driver — orchestrate pipeline
+│   └── inference.py        # Main driver — orchestrate pipeline (offline)
 │
 ├── scripts/
 │   ├── build_icd_embeddings.py  # Generate icd10_embeddings.npy (BGE-M3)
+│   ├── build_rxnorm_index.py   # Build rxnorm_index.json từ rxnorm.jsonl
 │   ├── test_inference.py        # Smoke test 1 record
 │   └── validate_outputs.py      # Schema validation
 │
 ├── data/
 │   ├── icd10.jsonl              # 71,705 ICD-10 codes (full)
 │   ├── icd10_embeddings.npy     # BGE-M3 matrix ~280 MB (build 1 lần)
-│   ├── icd10_bm25_tokens.jsonl.gz  # BM25 token cache ~1 MB (build 1 lần)
+│   ├── icd10_bm25_tokens.jsonl.gz  # BM25 token cache ~1 MB (auto build)
 │   ├── examples.jsonl           # 32 few-shot examples (verified positions)
-│   ├── rxnorm_index.json        # Local RxNorm exact-match dict
-│   ├── translation_cache.json   # VN→EN translation cache
-│   └── icd_remote_cache.json    # NIH ICD API cache
+│   ├── rxnorm.jsonl             # 46k RxNorm entries (user-provided)
+│   ├── rxnorm_index.json        # Structured index (build 1 lần)
+│   └── translation_cache.json   # VN→EN translation cache
 │
 ├── requirements.txt             # openai, rapidfuzz, sentence-transformers, rank-bm25, ...
 └── README.md                    # File này
@@ -213,9 +223,19 @@ export OLLAMA_MODEL=qwen2.5:7b     # bash
 uv run scripts/test_inference.py --out output/smoke_test.json
 ```
 
-Expected: 1 file `output/smoke_test.json` chứa entities + ICD codes + RxNorm candidates.
+Expected: 1 file `output/smoke_test.json` chứa entities + ICD codes (semantic extraction) + RxNorm candidates.
 
 ### 2. Inference toàn bộ data
+
+Trước khi chạy, đảm bảo data files đã sẵn:
+
+```bash
+# Build ICD embeddings lần đầu (~5 phút GPU, ~30 phút CPU)
+uv run python scripts/build_icd_embeddings.py
+
+# Build RxNorm structured index lần đầu (~1s)
+uv run python scripts/build_rxnorm_index.py
+```
 
 Đặt file bệnh án vào `data/input/` (đặt tên `1.txt`, `2.txt`, ... hoặc `1.json` với field `"text"`):
 
@@ -334,46 +354,72 @@ uv run python -m src.inference --input data/input --output output/ --limit 3 2>&
 
 ---
 
-## 📦 Data setup (nếu thiếu file)
+## 📦 Data setup
 
 ```bash
-# Khôi phục data files (translation_cache, ICD index, etc.)
+# 1. Khôi phục data files nếu thiếu
 git checkout HEAD -- data/
 
-# Generate ICD-10 embeddings (1 lần, ~5 phút GPU)
+# 2. ICD-10 embeddings (1 lần, ~5 phút GPU)
 uv run python scripts/build_icd_embeddings.py
 
-# (Optional) Download RxNorm raw data
-uv run python scripts/download_rxnorm.py   # → data/rxnorm_raw.json
-uv run python scripts/build_vn_dict.py     # → data/vn_drug_names.csv
+# 3. RxNorm structured index (1 lần, ~1s từ data/rxnorm.jsonl)
+uv run python scripts/build_rxnorm_index.py
 
 # Verify
 ls data/
 # Expect:
 #   icd10.jsonl                          (71k codes)
 #   icd10_embeddings.npy                 (~280 MB, BGE-M3 matrix)
-#   icd10_bm25_tokens.jsonl.gz           (~1 MB, BM25 token cache)
+#   icd10_bm25_tokens.jsonl.gz           (~1 MB, BM25 token cache, auto-build)
+#   rxnorm.jsonl                         (46k RxNorm entries — user-provided)
+#   rxnorm_index.json                    (~7 MB structured index)
 #   examples.jsonl                       (32 few-shot examples)
-#   translation_cache.json, icd_*.json   (auto-built on first inference)
+#   translation_cache.json               (auto-built on first translation)
 ```
 
 ---
 
 ## 🌐 Kiến trúc chi tiết
 
-### Hybrid Search (Vector + BM25)
+### ICD-10 Semantic Extraction
 
-Để giải quyết vấn đề vector "ảo" giữa các code cùng concept (vd `Paracetamol 500mg` vs `Paracetamol 250mg` có cosine > 0.95 nhưng khác mã RxNorm), pipeline dùng công thức:
+Pipeline ICD query (offline):
 
 ```
-combined_score = α · cosine_similarity + β · bm25_normalized
-                 (α = 0.6, β = 0.4 mặc định)
+Query (EN) → BGE-M3 embed → cosine vs 71k ICD desc vectors
+           → Filter cosine ≥ 0.7
+           → Return ALL matching codes (không cap top-K)
+           → Post-filter: F10/T36/V/W/X/Y + Z00-Z99 (trừ family history)
 ```
 
-- **Vector**: BAAI/bge-m3 (đa ngôn ngữ VN/EN), 71k code × 1024-dim, normalized L2.
-- **BM25**: rank_bm25 trên multi-field text (desc_en × 2 + desc_vi + code), cache gzip ~1 MB.
+- **Cosine threshold 0.7**: balance giữa precision (loại noise) và recall (catch variants).
+  - `pcr dương tính với virus bk` → match BK nephropathy, drug-induced, viral NOS. C88.2 (Waldenström) bị drop vì cosine 0.4 < 0.7.
+  - `suy thận` → match N18.9, N18.4, N18.5, N18.6, N19 (renal failure variants).
+- **Bỏ top-K cap**: `suy thận + suy thận nhiễm mỡ` đều match → trả cả 2 codes thay vì chỉ top 1.
+- **Z-code filter**: Z00-Z99 (Factors influencing health status) bị drop theo mặc định, trừ khi entity có `tiền sử gia đình` / `screening` / `vaccine`.
 
 Xem [src/icd_rag.py](src/icd_rag.py) — class `ICD10HybridSearch`.
+
+### RxNorm Structured Index
+
+Pipeline RxNorm lookup (offline):
+
+```
+Drug text → strip parentheticals, route/freq
+           → Parse: (ingredient, strength)
+           → L1: Exact (ing, str) tuple → top-1 rxcui
+           → L2: Compound drug (split " / ") → match component
+           → L3: Ingredient-only → top-1 rxcui
+           → Return 1 rxcui duy nhất
+```
+
+- **Structured index**: 12114 unique `(ingredient, strength)` keys + 8841 ingredients từ 46k RxNorm rows.
+- **Strength normalization**: `"25 mg"`, `"25mg"`, `"25MG"` → cùng key `"25MG"` → cùng rxcui.
+- **Compound drugs**: `lisinopril 10 mg / hydrochlorothiazide` → match với 1 trong 2 components.
+- **1 code / drug** (không list 5 codes như NIH API) — chính xác cho Jaccard metric.
+
+Xem [src/rxnorm_rag.py](src/rxnorm_rag.py) — class `RxNormIndex`, `RxNormRetriever`.
 
 ### Prompt Engineering (3 phases)
 
@@ -423,4 +469,4 @@ uv run python -m src.inference --input data/input --output output/ --target-ctx 
 - ICD-10 data: từ [kamillamagna/ICD-10-CSV](https://github.com/kamillamagna/ICD-10-CSV) (CC0 public domain).
 - BGE-M3 embedding: [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3) (MIT).
 - Ollama: [ollama.com](https://ollama.com/) (MIT).
-- RxNorm: NIH NLM [RxNav REST API](https://rxnav.nlm.nih.gov/RxNormAPIs.html).
+- RxNorm: [NIH NLM RxNorm Current Prescribable Content](https://www.nlm.nih.gov/research/umls/rxnorm/) (offline JSONL dump).
