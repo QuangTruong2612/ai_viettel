@@ -32,31 +32,34 @@ uv run scripts/test_inference.py --out output/smoke_test.json
 
 ## 📋 Yêu cầu hệ thống
 
-| Thành phần | Tối thiểu | Khuyến nghị |
-|---|---|---|
-| Python | 3.10+ | 3.11 |
-| RAM | 16 GB | 32 GB |
-| GPU | NVIDIA RTX 3060 (12GB) | RTX 4090 (24GB) hoặc A100 |
-| VRAM | 8 GB (qwen2.5:7b) | 16 GB (gemma2:9b / qwen2.5:14b) |
-| Disk | 10 GB | 20 GB |
-| OS | Windows / Linux / macOS | Linux + NVIDIA |
+| Thành phần | Tối thiểu             | Khuyến nghị                   |
+| ------------ | ----------------------- | ------------------------------- |
+| Python       | 3.10+                   | 3.11                            |
+| RAM          | 16 GB                   | 32 GB                           |
+| GPU          | NVIDIA RTX 3060 (12GB)  | RTX 4090 (24GB) hoặc A100      |
+| VRAM         | 8 GB (qwen2.5:7b)       | 16 GB (gemma2:9b / qwen2.5:14b) |
+| Disk         | 10 GB                   | 20 GB                           |
+| OS           | Windows / Linux / macOS | Linux + NVIDIA                  |
 
 ---
 
 ## 🆕 Cải tiến mới nhất
 
 ### Hybrid ICD Search (Vector + BM25)
+
 - Kết hợp BGE-M3 cosine similarity với BM25 keyword ranking
 - Công thức: `combined = α·cosine + β·bm25_normalized` (mặc định α=0.6, β=0.4)
 - Khắc phục "vector ảo" giữa các code cùng concept khác grade/stage (heart failure II vs III)
 - Files: [src/icd_rag.py](src/icd_rag.py) — `ICD10VectorSearch`, `ICD10BM25Index`, `ICD10HybridSearch`
 
 ### Prompt Engineering Improvements
+
 - **XML structure**: SYSTEM_PROMPT wrap trong các `<role>`, `<instructions>`, `<workflow>`, `<entity_types>`, `<extraction_rules>`, `<special_cases_ecg>`, `<assertions>`, `<output_format>`, `<final_rules>` — giúp LLM phân biệt rõ từng phần chỉ thị.
 - **Few-shot examples**: 32 ví dụ chất lượng cao trong [data/examples.jsonl](data/examples.jsonl) (đã fix 132/151 positions sai). Auto-budget theo `target_ctx`.
 - **Positive framing**: các rule "BỎ lifestyle / BỎ đại từ chung" được refactor thành "TEXT ENTITY = TÊN CỤ THỂ", tránh paradoxical attention khi LLM đọc từ cấm.
 
 ### Context-Aware ICD/RxNorm Pipeline
+
 - 6 lớp: Exact match → Translate VN→EN → Hybrid search → Fuzzy EN → Fuzzy VN → Remote NIH fallback
 - LLM đọc TOÀN BỘ input trước khi extract (3-step reasoning)
 - Context-aware query cho BGE-M3 (drugs + symptoms → disambiguate diagnosis)
@@ -69,15 +72,18 @@ uv run scripts/test_inference.py --out output/smoke_test.json
 Pipeline 3 giai đoạn:
 
 ### Giai đoạn 1 — Clinical NER (LLM)
+
 Input: hồ sơ bệnh án tiếng Việt.
 Output: JSON array các entity thô (`THUỐC`, `CHẨN_ĐOÁN`, `TRIỆU_CHỨNG`, `TÊN_XÉT_NGHIỆM`, `KẾT_QUẢ_XÉT_NGHIỆM`) với `position` và `assertions`.
 Model: qwen2.5:7b / gemma2:9b (qua Ollama OpenAI-compatible API).
 
 ### Giai đoạn 2 — LLM Context Rescanning
+
 - **THUỐC**: gom tên gốc + strength + route + frequency (vd `Amlodipine 10mg uống daily`).
 - **CHẨN_ĐOÁN**: gom severity/location/complication (vd `Trào ngược dạ dày` + `không viêm thực quản` → `GERD without esophagitis`).
 
 ### Giai đoạn 3 — Medical RAG
+
 - **RxNorm**: Local index + NIH REST API + cache.
 - **ICD-10**: Hybrid search (BGE-M3 vector + BM25 keyword) trên 71,705 codes (`data/icd10.jsonl`).
 
@@ -141,16 +147,17 @@ curl -fsSL https://ollama.com/install.sh | sh
 # Pull model (chọn 1)
 ollama pull qwen2.5:7b          # Default — nhanh, chất lượng OK
 ollama pull gemma2:9b           # Tốt hơn cho JSON output (Recommend)
-ollama pull qwen2.5:14b         # Mạnh nhưng cần 16GB VRAM
 ```
 
 Kiểm tra:
+
 ```bash
 ollama list                     # Models đã pull
 ollama serve                    # Khởi server (default port 11434)
 ```
 
 **Model test nhanh**:
+
 ```bash
 curl http://127.0.0.1:11434/v1/models
 # → {"data": [{"id": "qwen2.5:7b", ...}]}
@@ -222,11 +229,13 @@ uv run python -m src.inference `
 ```
 
 Tham số quan trọng:
+
 - `--workers 1` — Ollama thường chỉ serve 1 request tại 1 thời điểm, parallel không giúp được.
 - `--target-ctx 8192` — context window (qwen2.5:7b default 4096, cần set 8192 để fit few-shot).
 - `--max-few-shot 10` — giới hạn số few-shot example (auto-budget theo context).
 
 Đổi model qua env hoặc CLI:
+
 ```bash
 $env:OLLAMA_MODEL = "gemma2:9b"   # switch model
 uv run python -m src.inference --input data/input --output output/ --model gemma2:9b
@@ -292,18 +301,18 @@ os.environ["OLLAMA_BASE_URL"] = "http://127.0.0.1:11434/v1"
 
 ## 🛠 Troubleshooting
 
-| Lỗi | Nguyên nhân | Cách khắc phục |
-|---|---|---|
-| `Connection refused` ở `127.0.0.1:11434` | Ollama chưa chạy | `ollama serve` trong terminal khác |
-| `Model 'qwen2.5:7b' not found` | Chưa pull model | `ollama pull qwen2.5:7b` |
-| Output `[]` rỗng | Ollama trả JSON sai format / timeout | Xem `predictions.log`. Tăng timeout: `OLLAMA_TIMEOUT=300` env |
-| LLM chậm (>2 phút/record) | Chưa tận dụng GPU | Set `num_gpu` trong Modelfile |
-| `FileNotFoundError: icd10_embeddings.npy` | Chưa build embedding | `uv run python scripts/build_icd_embeddings.py` |
-| Lỗi font tiếng Việt trên Windows Terminal | CMD/PowerShell mặc định non-UTF8 | `$env:PYTHONIOENCODING = "utf-8"` trước khi chạy |
-| ICD lookup trả code irrelevant | Hybrid search chưa bật | Verify trong code: `use_hybrid=True` (default) |
-| Drug candidates có parenthetical `(uống)` bị mất | VN paren chưa strip | Đã fix: `_strip_paren_keep_dose()` trong `src/rxnorm_rag.py` |
-| ECG findings → 0 ICD candidates | NER phân loại sai | Đã fix: SYSTEM_PROMPT có rule + few-shot examples #5, #20, #26-28, #31 |
-| Few-shot overflow context | target_ctx quá nhỏ | Tăng `--target-ctx 8192` hoặc giảm `--max-few-shot` |
+| Lỗi                                                  | Nguyên nhân                         | Cách khắc phục                                                        |
+| ----------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------ |
+| `Connection refused` ở `127.0.0.1:11434`         | Ollama chưa chạy                    | `ollama serve` trong terminal khác                                    |
+| `Model 'qwen2.5:7b' not found`                      | Chưa pull model                      | `ollama pull qwen2.5:7b`                                               |
+| Output`[]` rỗng                                    | Ollama trả JSON sai format / timeout | Xem`predictions.log`. Tăng timeout: `OLLAMA_TIMEOUT=300` env        |
+| LLM chậm (>2 phút/record)                           | Chưa tận dụng GPU                  | Set`num_gpu` trong Modelfile                                           |
+| `FileNotFoundError: icd10_embeddings.npy`           | Chưa build embedding                 | `uv run python scripts/build_icd_embeddings.py`                        |
+| Lỗi font tiếng Việt trên Windows Terminal         | CMD/PowerShell mặc định non-UTF8   | `$env:PYTHONIOENCODING = "utf-8"` trước khi chạy                    |
+| ICD lookup trả code irrelevant                       | Hybrid search chưa bật              | Verify trong code:`use_hybrid=True` (default)                          |
+| Drug candidates có parenthetical`(uống)` bị mất | VN paren chưa strip                  | Đã fix:`_strip_paren_keep_dose()` trong `src/rxnorm_rag.py`        |
+| ECG findings → 0 ICD candidates                      | NER phân loại sai                   | Đã fix: SYSTEM_PROMPT có rule + few-shot examples#5, #20, #26-28, #31 |
+| Few-shot overflow context                             | target_ctx quá nhỏ                  | Tăng`--target-ctx 8192` hoặc giảm `--max-few-shot`                |
 
 ### Verify Ollama đang chạy
 
@@ -368,19 +377,19 @@ Xem [src/icd_rag.py](src/icd_rag.py) — class `ICD10HybridSearch`.
 
 ### Prompt Engineering (3 phases)
 
-| Phase | Nội dung |
-|---|---|
-| 1 | XML structure: wrap SYSTEM_PROMPT thành `<role>`, `<instructions>`, `<workflow>`, `<entity_types>`, ... |
-| 2 | Few-shot: 32 examples trong `data/examples.jsonl` (đã verify positions 100% đúng) |
-| 3 | Positive framing: refactor rules "BỎ lifestyle" → "TEXT ENTITY = TÊN CỤ THỂ" |
+| Phase | Nội dung                                                                                                       |
+| ----- | --------------------------------------------------------------------------------------------------------------- |
+| 1     | XML structure: wrap SYSTEM_PROMPT thành`<role>`, `<instructions>`, `<workflow>`, `<entity_types>`, ... |
+| 2     | Few-shot: 32 examples trong`data/examples.jsonl` (đã verify positions 100% đúng)                          |
+| 3     | Positive framing: refactor rules "BỎ lifestyle" → "TEXT ENTITY = TÊN CỤ THỂ"                               |
 
 ### Token budget
 
 | target_ctx | max_tokens | budget cho few-shot | estimated examples |
-|---|---|---|---|
-| 4096 | 2048 | -2108 | 0 ❌ |
-| 8192 | 2048 | 1932 | ~9 |
-| 16384 | 2048 | 10132 | ~10 (capped) |
+| ---------- | ---------- | ------------------- | ------------------ |
+| 4096       | 2048       | -2108               | 0 ❌               |
+| 8192       | 2048       | 1932                | ~9                 |
+| 16384      | 2048       | 10132               | ~10 (capped)       |
 
 → Với gemma2:9b (context 8192 default), fit ~9 few-shot examples.
 
