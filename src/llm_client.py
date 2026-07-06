@@ -32,9 +32,9 @@ class LLMConfig:
     temperature: float = 0.0
     top_p: float = 1.0
 
-    # max_tokens=2048 đủ chứa JSON ~20 entities (~80 chars mỗi).
-    # Giữ thấp để tránh context overflow khi input dài + few-shot nhiều.
-    max_tokens: int = 2048
+    # max_tokens=4096 đủ chứa JSON ~40 entities (~80 chars mỗi).
+    # Tăng từ 2048 → 4096 để tránh JSON bị truncate giữa chừng → parse fail.
+    max_tokens: int = 4096
     timeout: int = 180
     max_retries: int = 1  # giảm retry để fail fast
 
@@ -90,27 +90,150 @@ class LLMClient:
 
     @staticmethod
     def _extract_json(content: str) -> Any:
-        """Trích JSON ra khỏi content.
+        """Trích JSON ra khỏi content LLM.
 
         LLM có thể trả:
         - JSON thuần (lý tưởng)
-        - JSON trong ```json ... ```
-        - Có text thừa quanh JSON
-        Hàm này cố gắng robust với cả 3 trường hợp.
+        - JSON trong ```json ... ``` code fence
+        - Markdown có text thừa quanh JSON
+        - JSON lỗi nhẹ (trailing comma, missing comma, v.v.)
+
+        Hàm này robust:
+          1. Strip code fence (```json ... ``` hoặc ``` ... ```)
+          2. Tìm [ đầu + ] cuối (nếu có text thừa)
+          3. Thử parse strict
+          4. Nếu fail, thử JSON repair (trailing commas, single quotes)
+          5. Nếu vẫn fail, raise để caller retry/log
         """
         text = content.strip()
-        # Bỏ code fence nếu có
+
+        # 1. Strip code fence (```json hoặc ```)
         if text.startswith("```"):
-            # cắt đến khối ``` đầu tiên đóng
             parts = text.split("```")
             if len(parts) >= 3:
-                text = "```".join(parts[1:-1]).strip()
-                if text.lower().startswith("json"):
-                    text = text[4:].strip()
-        # Nếu có text thừa, thử tìm [ đầu tiên và ] cuối cùng
-        if not text.startswith("[") and not text.startswith("{"):
-            first = text.find("[")
-            last = text.rfind("]")
-            if first != -1 and last != -1 and last > first:
-                text = text[first : last + 1]
-        return json.loads(text)
+                inner = "```".join(parts[1:-1]).strip()
+                if inner.lower().startswith("json"):
+                    inner = inner[4:].strip()
+                if inner.startswith(("[", "{")):
+                    text = inner
+
+        # 2. Nếu có text thừa quanh JSON, tìm [ đầu + ] cuối
+        if not text.startswith(("[", "{")):
+            first_bracket = text.find("[")
+            last_bracket = text.rfind("]")
+            if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+                text = text[first_bracket: last_bracket + 1]
+            else:
+                first_brace = text.find("{")
+                last_brace = text.rfind("}")
+                if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                    text = text[first_brace: last_brace + 1]
+
+        # 3. Thử parse strict
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # 4. Thử repair: trailing commas + close brackets nếu bị truncate
+        repaired_text = _repair_json_text(text)
+        if repaired_text is not None:
+            try:
+                return json.loads(repaired_text)
+            except json.JSONDecodeError:
+                pass
+
+        # 5. Fallback cuối: extract từng {} riêng lẻ (khi array bị truncate giữa)
+        objects = _extract_partial_objects(text)
+        if objects:
+            logger.warning(
+                "JSON truncated; recovered %d entities (partial result)",
+                len(objects),
+            )
+            return objects
+
+        # 6. Fail — log full content rồi raise
+        logger.error(
+            "JSON extract fail. Full content (%d chars):\n%s",
+            len(content),
+            content if len(content) <= 2000 else content[:2000] + "\n...[truncated]",
+        )
+        raise json.JSONDecodeError(
+            "Không parse được JSON từ LLM response",
+            content[:200],
+            0,
+        )
+
+
+def _repair_json_text(text: str) -> str | None:
+    """Repair JSON lỗi nhẹ: trailing commas + close brackets nếu bị truncate.
+
+    Returns text đã sửa, hoặc None nếu không sửa được.
+    Caller tự parse lại sau.
+    """
+    import re
+
+    repaired = text
+    # 1. Strip trailing commas trước ] hoặc }
+    repaired = re.sub(r",(\s*[\]}])", r"\1", repaired)
+
+    # 2. Nếu text bị truncate (thiếu closing ] hoặc }), cân đối lại
+    # Đếm số { và } — nếu lệch thì thêm } hoặc ]
+    open_braces = repaired.count("{") - repaired.count("}")
+    open_brackets = repaired.count("[") - repaired.count("]")
+    if open_braces > 0:
+        repaired += "}" * open_braces
+    if open_brackets > 0:
+        repaired += "]" * open_brackets
+
+    return repaired if (repaired != text or open_braces or open_brackets) else None
+
+
+def _extract_partial_objects(text: str) -> list[Any]:
+    """Extract từng {} object parse được từ text bị truncate.
+
+    Dùng regex để match các complete JSON object { ... } trong text.
+    Thử parse từng cái — bỏ qua cái lỗi.
+    """
+    import re
+
+    # Match các {...} objects (không nested quá sâu)
+    objects: list[Any] = []
+    # Greedy match balanced braces
+    i = 0
+    while i < len(text):
+        if text[i] == "{":
+            depth = 1
+            j = i + 1
+            in_str = False
+            escape = False
+            while j < len(text) and depth > 0:
+                ch = text[j]
+                if in_str:
+                    if escape:
+                        escape = False
+                    elif ch == "\\":
+                        escape = True
+                    elif ch == '"':
+                        in_str = False
+                else:
+                    if ch == '"':
+                        in_str = True
+                    elif ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                j += 1
+            if depth == 0:
+                candidate = text[i:j]
+                try:
+                    obj = json.loads(candidate)
+                    objects.append(obj)
+                except json.JSONDecodeError:
+                    pass
+                i = j
+            else:
+                i += 1
+        else:
+            i += 1
+    return objects

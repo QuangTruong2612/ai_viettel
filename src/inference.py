@@ -168,7 +168,19 @@ def process_record(
             history=few_shot,
         )
     except Exception as exc:
+        # Save debug info khi LLM fail để debug sau
         logger.error("[%d] LLM fail hết retry: %s → ghi []", rec_id, exc)
+        debug_path = output_dir / f"{rec_id}.debug.txt"
+        try:
+            with debug_path.open("w", encoding="utf-8") as f:
+                f.write(f"RECORD {rec_id}\n")
+                f.write(f"INPUT (len={len(input_text)}):\n{input_text}\n\n")
+                f.write(f"RAW LLM RESPONSE ({len(_LAST_RAW_RESPONSE)} chars):\n")
+                f.write(_LAST_RAW_RESPONSE if _LAST_RAW_RESPONSE
+                        else "(empty)")
+            logger.info("[%d] Saved debug → %s", rec_id, debug_path.name)
+        except Exception as write_exc:
+            logger.warning("[%d] Cannot write debug file: %s", rec_id, write_exc)
         write_output(output_dir / f"{rec_id}.json", [])
         return
 
