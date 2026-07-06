@@ -35,7 +35,9 @@ def main() -> int:
         else:
             n_drug = sum(1 for e in data if e.get("type") == "THUỐC")
             n_symp = sum(1 for e in data if e.get("type") == "TRIỆU_CHỨNG")
-            has_hist = sum(1 for e in data if "isHistorical" in (e.get("assertions") or []))
+            has_hist = sum(
+                1 for e in data if "isHistorical" in (e.get("assertions") or [])
+            )
             print(f"✅ {f.name}: drugs={n_drug} symp={n_symp} historical={has_hist}")
     if bad:
         print(f"\n{bad} file không hợp lệ.")

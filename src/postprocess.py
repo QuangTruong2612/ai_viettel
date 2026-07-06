@@ -13,9 +13,9 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
-from .icd_rag import ICDRetriever
+from .icd_rag import ICDRetriever, build_context_query
 from .rxnorm_rag import RxNormRetriever
 
 logger = logging.getLogger(__name__)
@@ -110,6 +110,272 @@ _DRUG_NAME_BAD_PATTERNS = re.compile(
 )
 
 
+# Note: _LIFESTYLE_BLACKLIST removed — LLM đã được dạy qua SYSTEM_PROMPT
+# để không extract các non-medical terms (lifestyle/social/sự kiện xã hội).
+
+
+# Patterns chỉ định isFamily (dùng để verify)
+_IS_FAMILY_PATTERNS = [
+    # Direct family member references
+    r"b[ốo]\s+(b[ệe]nh\s+)?nh[âa]n",
+    r"m[ẹe]\s+(b[ệe]nh\s+)?nh[âa]n",
+    r"anh\s+(trai\s+)?b[ệe]nh\s+nh[âa]n",
+    r"ch[ịi]\s+(g[áa]i\s+)?b[ệe]nh\s+nh[âa]n",
+    r"em\s+(trai\s+|g[áa]i\s+)?b[ệe]nh\s+nh[âa]n",
+    r"con\s+(trai\s+|g[áa]i\s+)?b[ệe]nh\s+nh[âa]n",
+    r"b[ốo]\s+ch[ồồ]ng\s+b[ệe]nh\s+nh[âa]n",
+    r"g[ia]\s+[đd][ìi]nh",
+    r"ti[eề]n\s+s[ử]?\s*gia\s+[đd][ìi]nh",
+    r"ng[ưu]ờ[i]\s+th[âa]n",
+    r"h[ọo]\s+h[âa]ng",
+    # Family-style markers that ONLY indicate isFamily (not isHistorical)
+    r"(?:cha|mẹ|anh|chị|em|ông|bà|cô|dì|chú|bác)",
+]
+
+_IS_FAMILY_RE = re.compile("|".join(_IS_FAMILY_PATTERNS), re.IGNORECASE | re.UNICODE)
+
+
+# Counter cho logging
+_seen_count: int = 0
+
+
+# Bug history: LLM 7B hay gán nhầm tên thuốc thành TÊN_XÉT_NGHIỆM
+# hoặc TRIỆU_CHỪNG (vd "guaifenesin ml" bị gán "TÊN_XÉT_NGHIỆM").
+# Fix: rescue - nếu first_word của text khớp common drug name → ép về THUỐC.
+_COMMON_DRUG_NAMES: set[str] = {
+    # Cough / expectorant
+    "guaifenesin",
+    "dextromethorphan",
+    "codeine",
+    "ephedrine",
+    "phenylephrine",
+    "diphenhydramine",
+    "chlorpheniramine",
+    "loratadine",
+    "cetirizine",
+    "fexofenadine",
+    "desloratadine",
+    "levocetirizine",
+    "promethazine",
+    # Antibiotics
+    "amoxicillin",
+    "ampicillin",
+    "azithromycin",
+    "ciprofloxacin",
+    "levofloxacin",
+    "moxifloxacin",
+    "cefixime",
+    "ceftriaxone",
+    "cefuroxime",
+    "cefepime",
+    "cefazolin",
+    "cephalexin",
+    "doxycycline",
+    "minocycline",
+    "tetracycline",
+    "erythromycin",
+    "metronidazole",
+    "tinidazole",
+    "nitrofurantoin",
+    "trimethoprim",
+    "vancomycin",
+    "linezolid",
+    "meropenem",
+    "imipenem",
+    # Cardiovascular
+    "amlodipine",
+    "nifedipine",
+    "felodipine",
+    "diltiazem",
+    "verapamil",
+    "atenolol",
+    "metoprolol",
+    "bisoprolol",
+    "carvedilol",
+    "propranolol",
+    "lisinopril",
+    "enalapril",
+    "ramipril",
+    "losartan",
+    "valsartan",
+    "irbesartan",
+    "candesartan",
+    "olmesartan",
+    "telmisartan",
+    "hydrochlorothiazide",
+    "furosemide",
+    "spironolactone",
+    "eplerenone",
+    "atorvastatin",
+    "rosuvastatin",
+    "simvastatin",
+    "pravastatin",
+    "clopidogrel",
+    "aspirin",
+    "warfarin",
+    "apixaban",
+    "rivaroxaban",
+    "dabigatran",
+    "digoxin",
+    "amiodarone",
+    "sotalol",
+    # Diabetes
+    "metformin",
+    "glipizide",
+    "gliclazide",
+    "glyburide",
+    "glimepiride",
+    "sitagliptin",
+    "linagliptin",
+    "vildagliptin",
+    "empagliflozin",
+    "dapagliflozin",
+    "liraglutide",
+    "semaglutide",
+    "insulin",
+    "insulin-glargine",
+    "insulin-aspart",
+    "insulin-lispro",
+    # GI
+    "omeprazole",
+    "pantoprazole",
+    "lansoprazole",
+    "esomeprazole",
+    "rabeprazole",
+    "ranitidine",
+    "famotidine",
+    "cimetidine",
+    "ondansetron",
+    "metoclopramide",
+    "domperidone",
+    "loperamide",
+    "lactulose",
+    "bisacodyl",
+    "senna",
+    "docusate",
+    # Respiratory
+    "salbutamol",
+    "albuterol",
+    "ipratropium",
+    "tiotropium",
+    "formoterol",
+    "salmeterol",
+    "budesonide",
+    "fluticasone",
+    "beclomethasone",
+    "montelukast",
+    "theophylline",
+    # CNS
+    "paracetamol",
+    "acetaminophen",
+    "ibuprofen",
+    "naproxen",
+    "diclofenac",
+    "meloxicam",
+    "celecoxib",
+    "etoricoxib",
+    "piroxicam",
+    "tramadol",
+    "morphine",
+    "fentanyl",
+    "oxycodone",
+    "gabapentin",
+    "pregabalin",
+    "carbamazepine",
+    "lamotrigine",
+    "topiramate",
+    "sertraline",
+    "fluoxetine",
+    "escitalopram",
+    "venlafaxine",
+    "duloxetine",
+    "amitriptyline",
+    "mirtazapine",
+    "haloperidol",
+    "risperidone",
+    "olanzapine",
+    "quetiapine",
+    "aripiprazole",
+    "diazepam",
+    "lorazepam",
+    "alprazolam",
+    "clonazepam",
+    "midazolam",
+    "zopiclone",
+    "zolpidem",
+    # Other
+    "methotrexate",
+    "azathioprine",
+    "cyclophosphamide",
+    "hydroxychloroquine",
+    "allopurinol",
+    "febuxostat",
+    "colchicine",
+    "prednisone",
+    "prednisolone",
+    "methylprednisolone",
+    "dexamethasone",
+    "hydrocortisone",
+    "thyroxine",
+    "levothyroxine",
+    "methimazole",
+    "calcium",
+    "iron",
+    "folic-acid",
+    "nystatin",
+    "fluconazole",
+    "itraconazole",
+    "amphotericin",
+    "acyclovir",
+    "valacyclovir",
+    "oseltamivir",
+}
+
+
+def _drop_substring_entities(entities: list[dict]) -> list[dict]:
+    """Drop entities whose text is fully contained in another entity's text
+    (cùng type, cùng text substring).
+
+    Ví dụ:
+        ["khó thở nhẹ" (idx=0), "khó thở" (idx=1)]
+        → drop idx=1 ("khó thở" là substring của "khó thở nhẹ")
+
+        ["đau ngực trái" (idx=0), "đau ngực" (idx=1)]
+        → drop idx=1
+
+    Returns: list entities sau khi drop các entity bị overlap.
+    """
+    if len(entities) < 2:
+        return entities
+
+    # Find indices cần drop (text_j là substring của text_i, cùng type)
+    drop_indices: set[int] = set()
+    for i, ent_i in enumerate(entities):
+        if i in drop_indices:
+            continue
+        type_i = ent_i.get("type", "")
+        text_i = str(ent_i.get("text", "")).strip()
+        if not text_i:
+            continue
+        for j, ent_j in enumerate(entities):
+            if i == j or j in drop_indices:
+                continue
+            if ent_j.get("type", "") != type_i:
+                continue
+            text_j = str(ent_j.get("text", "")).strip()
+            if not text_j or len(text_j) >= len(text_i):
+                continue
+            # text_j ngắn hơn text_i: check substring
+            if text_j in text_i:
+                drop_indices.add(j)
+                logger.debug(
+                    "Drop substring entity '%s' (subset of '%s')",
+                    text_j, text_i,
+                )
+
+    return [ent for idx, ent in enumerate(entities) if idx not in drop_indices]
+
+
 def sanitize_drug_text(text: str) -> str:
     """Bỏ một số chuỗi giả thuốc rõ ràng (placeholder)."""
     if _DRUG_NAME_BAD_PATTERNS.match(text.strip()):
@@ -119,9 +385,11 @@ def sanitize_drug_text(text: str) -> str:
 
 # VN/Vietnamese-English connectors between drug name and disease.
 _DRUG_FOR_DISEASE_RE = re.compile(
-    r"^(?P<drug>[A-Za-zÀ-ỹ][\w\s\-\.]*?)"
-    r"\s+(?:cho|đ[eế]?u\s*tr[ịi]|treats?|for|to)\s+"
-    r"(?P<disease>[A-Za-zÀ-ỹ][\w\s\-\.àáạảãăắằẳẵặâấầẩẫậèéẹẻẽêếềểễệìíịỉĩòóọỏõôốồổỗộơớờởỡợùúụủũưứừửữựỳýỷỹỵđ]+)$",
+    # .+? (non-greedy any-char) thay vì [\w\s\-\.]*? để match được cả
+    # dấu ':' trong 'q6h:prn', dấu ',' trong 'bid, prn', v.v.
+    r"^(?P<drug>.+?)"
+    r"\s+(?:cho|đi[eếề]?u\s*tr[ịiị]|treats?|for|to)\s+"
+    r"(?P<disease>.+)$",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -145,9 +413,140 @@ def _split_drug_cho_pattern(text: str) -> tuple[str, str | None]:
         return (s, None)
     drug = m.group("drug").strip()
     disease = m.group("disease").strip()
-    if not drug or not disease or len(drug) < 3 or len(disease) < 3:
+    # Min length 1 (cho "ho", "sốt", ...) thay vì 3
+    if not drug or not disease or len(drug) < 2 or len(disease) < 1:
         return (s, None)
     return (drug, disease)
+
+
+# ---------------------------------------------------------------------- #
+# LLM Context Rescanning — rà soát ngữ cảnh để tối ưu câu truy vấn
+# ---------------------------------------------------------------------- #
+
+
+def rescan_entity_context(
+    entity_text: str,
+    entity_type: str,
+    input_text: str,
+    llm_client: Any,
+    other_entities: list[dict] | None = None,  # deprecated, kept for signature compat
+) -> str:
+    """Dùng LLM dịch/chuẩn hóa entity text sang EN để tra mã.
+
+    Với THUỐC: chuẩn hóa tên thuốc + liều + đường dùng + tần suất.
+    Với CHẨN_ĐOÁN: dịch sang EN clinical phrase (giữ nguyên modifier có trong text).
+
+    General principles (Fix 14 — applies to ALL entity types):
+    1. Translate VERBATIM — không thêm modifier không có trong entity text.
+    2. KHÔNG dùng nearby entities để infer context (đã gây bug ICD sai).
+    3. Output phải ngắn gọn (< 100 chars), chỉ chứa thông tin y khoa.
+
+    Args:
+        other_entities: DEPRECATED — không còn dùng để thêm vào prompt.
+            Giữ để tương thích signature.
+
+    Returns: câu truy vấn tiếng Anh chuẩn hóa, hoặc entity_text gốc nếu LLM fail.
+    """
+    if llm_client is None:
+        return entity_text
+
+    # Validate entity_text trước khi gọi LLM
+    if not entity_text or not entity_text.strip():
+        return entity_text
+
+    if entity_type == "THUỐC":
+        prompt = (
+            "You are a clinical pharmacology expert. Translate the following Vietnamese drug name "
+            "into a standardized English RxNorm-searchable phrase.\n\n"
+            "STRICT RULES:\n"
+            "1. Translate the drug entity VERBATIM — keep generic name, strength, route, frequency.\n"
+            "2. DO NOT add indications or modifiers not in the entity text.\n"
+            "3. Strip VN parentheticals like '(uống hôm nay)', '(sau ăn)'.\n"
+            "4. Convert Vietnamese abbreviations: 'thuốc kháng sinh' → 'antibiotic'.\n"
+            "Output format: 'drug_name strength route frequency' (e.g., 'amlodipine 10 mg oral daily').\n"
+            "Output ONLY the phrase. No explanation.\n\n"
+            f'Drug entity: "{entity_text}"\n\n'
+            "Standardized English drug query:"
+        )
+    elif entity_type == "CHẨN_ĐOÁN":
+        prompt = (
+            "You are a clinical coding expert. Translate the following Vietnamese diagnosis "
+            "into a precise English clinical phrase that can be used to search ICD-10-CM codes.\n\n"
+            "STRICT RULES:\n"
+            "1. Translate the entity text VERBATIM — keep ALL modifiers (severity, location, cause) "
+            "that are present in the entity text.\n"
+            "2. DO NOT add modifiers that are NOT in the entity text. "
+            "E.g., entity='hepatic encephalopathy' → output 'hepatic encephalopathy' "
+            "(NOT 'alcohol-induced hepatic encephalopathy' even if note has alcohol history).\n"
+            "3. If the entity text includes cause (e.g., 'xơ gan do rượu' = 'alcoholic cirrhosis'), "
+            "keep the cause in the translation.\n"
+            "4. DO NOT use nearby entities (drugs/symptoms) to ADD context to the diagnosis. "
+            "Nearby entities are for context awareness only — keep diagnosis translation literal.\n\n"
+            "Output ONLY the English clinical phrase. No explanation, no ICD code.\n\n"
+            f'Diagnosis entity: "{entity_text}"\n\n'
+            "Standardized English diagnosis query:"
+        )
+    else:
+        return entity_text
+
+    try:
+        msg = [{"role": "user", "content": prompt}]
+        resp = llm_client._client.chat.completions.create(  # noqa: SLF001
+            model=llm_client.config.model,
+            messages=msg,
+            temperature=0.0,
+            max_tokens=128,
+        )
+        result = (resp.choices[0].message.content or "").strip().strip('"').strip("'")
+        # Fix 14: Validate rescan output — reject suspicious results
+        if result and _validate_rescan_output(result, entity_text, entity_type):
+            logger.debug("Rescan '%s' (%s) → '%s'", entity_text, entity_type, result)
+            return result
+        logger.debug("Rescan '%s' rejected (invalid output): %r", entity_text, result)
+    except Exception as exc:
+        logger.warning("Rescan lỗi (%r): %s", entity_text, exc)
+    return entity_text
+
+
+def _validate_rescan_output(
+    result: str,
+    entity_text: str,
+    entity_type: str,
+) -> bool:
+    """Validate rescan LLM output. Return False nếu output đáng ngờ.
+
+    Reject nếu:
+    - Output quá dài (>200 chars) — có thể chứa explanation
+    - Output chứa nhiều câu (có dấu . nhiều) — LLM đang explain
+    - Output chứa "I cannot", "I don't", "Note:", "The patient" — LLM nói nhảm
+    - Output chứa "Note that", "Please note" — LLM giải thích
+    - Cho THUỐC: output phải chứa first word (drug name) của entity
+    """
+    if not result:
+        return False
+    if len(result) > 200:
+        return False
+    if result.count(".") > 2:
+        return False
+    bad_starts = (
+        "i cannot", "i don't", "i'm sorry", "note:", "the patient",
+        "please note", "note that", "as an ai", "as a language",
+    )
+    lower = result.lower()
+    for bad in bad_starts:
+        if lower.startswith(bad):
+            return False
+    # Drug-specific check: first word of entity_text should appear in result
+    if entity_type == "THUỐC" and entity_text:
+        first_word = entity_text.strip().split()[0].lower() if entity_text.strip() else ""
+        # Loại bỏ common prefix như "thuốc"
+        if first_word in ("thuốc", "drug", "medicine"):
+            first_word = (
+                entity_text.strip().split()[1].lower() if len(entity_text.strip().split()) > 1 else ""
+            )
+        if first_word and len(first_word) > 2 and first_word not in lower:
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------- #
@@ -160,6 +559,7 @@ def assemble_record(
     raw_entities: Iterable[dict[str, Any]],
     retriever: RxNormRetriever,
     icd_retriever: Optional[ICDRetriever] = None,
+    llm_client: Any = None,
 ) -> list[dict[str, Any]]:
     """Build list thực thể cuối cùng cho một record.
 
@@ -174,6 +574,10 @@ def assemble_record(
     """
     validated = validate_positions(input_text, raw_entities)
     validated = dedupe_entities(validated)
+    # Fix: _drop_substring_entities đã được định nghĩa nhưng KHÔNG BAO GIỜ được gọi.
+    # Gọi ở đây để dedup duplicate substring (vd: "cảm giác thắt chặt ngực vùng trước tim"
+    # và "cảm giác thắt chặt ngực" cùng type → chỉ giữ entity dài hơn).
+    validated = _drop_substring_entities(validated)
 
     final: list[dict[str, Any]] = []
     # Track text+type đã emit để dedupe (vd "doxycycline" trùng khi LLM trả 2 lần)
@@ -205,6 +609,42 @@ def assemble_record(
         assertions = sorted(
             {a for a in assertions if a in {"isNegated", "isFamily", "isHistorical"}}
         )
+
+        # Bug history: LLM 7B hay gán nhầm tên thuốc → TÊN_XÉT_NGHIỆM.
+        # Fix: nếu text khớp common drug name → ép về THUỐC.
+        first_word = text.strip().split()[0].lower() if text.strip() else ""
+        if (
+            etype in ("TÊN_XÉT_NGHIỆM", "KẾT_QUẢ_XÉT_NGHIỆM", "TRIỆU_CHỨNG")
+            and first_word in _COMMON_DRUG_NAMES
+        ):
+            logger.debug(
+                "[%d] Rescue: '%s' %s → THUỐC (matches drug name)",
+                _seen_count,
+                text,
+                etype,
+            )
+            etype = "THUỐC"
+
+        # Rescue: Skip - dạy LLM qua prompt thay vì hardcode set.
+        # (LLM đã được dạy để phân biệt triệu chứng phổ biến vs chẩn đoán qua examples.)
+
+        # Bug history: LLM 7B gán isFamily cho mọi thứ trong "tiền sử",
+        # kể cả bệnh của bệnh nhân. Fix: verify family-context GẦN entity (window 200 chars).
+        if "isFamily" in assertions:
+            start_pos = int(ent["position"][0])
+            window_start = max(0, start_pos - 200)
+            window_end = start_pos  # check trước entity
+            nearby = input_text[window_start:window_end]
+            if not _IS_FAMILY_RE.search(nearby):
+                assertions = [a for a in assertions if a != "isFamily"]
+                logger.debug(
+                    "[%d] Drop isFamily: '%s' (no family-context nearby)",
+                    _seen_count,
+                    text,
+                )
+
+        # Lifestyle/behavior entities đã được dạy cho LLM qua SYSTEM_PROMPT
+        # để không extract. Nếu LLM vẫn extract → tin tưởng LLM (general standard).
 
         # Bug history: LLM trả ra "A cho B" (drug cho disease) gán nhầm type THUỐC
         # cho cả cụm. Fix: tách thành 2 entities nếu match. CHỈ emit mỗi phần nếu
@@ -239,19 +679,59 @@ def assemble_record(
                 seen_signatures.add((drug_part, "THUỐC"))
                 emitted_any = True
             # Emit diagnosis part nếu chưa thấy
-            if (diag_part, "CHẨN_ĐOÁN") not in seen_signatures:
+            diag_type = "CHẨN_ĐOÁN"
+            diag_lower = diag_part.lower().strip()
+            symptom_keywords = {
+                "ho",
+                "sốt",
+                "đau",
+                "nhức",
+                "khó thở",
+                "buồn nôn",
+                "nôn",
+                "táo bón",
+                "tiêu chảy",
+                "mất ngủ",
+                "lú lẫn",
+                "nói nhảm",
+                "sụt cân",
+                "chóng mặt",
+                "mệt mỏi",
+                "lo âu",
+                "tê",
+                "ngứa",
+                "khó nuốt",
+                "yếu nửa người",
+            }
+            if any(kw in diag_lower for kw in symptom_keywords):
+                diag_type = "TRIỆU_CHỨNG"
+
+            if (diag_part, diag_type) not in seen_signatures:
                 item2: dict[str, Any] = {
                     "text": diag_part,
-                    "type": "CHẨN_ĐOÁN",
+                    "type": diag_type,
                     "position": [diag_pos_start, diag_pos_end],
                     "assertions": list(assertions),
                 }
-                if icd_retriever is not None:
-                    cand2 = icd_retriever.lookup(diag_part)
+                # Candidates chỉ cho CHẨN_ĐOÁN (Fix 3: apply rescan cho split diagnosis)
+                if diag_type == "CHẨN_ĐOÁN" and icd_retriever is not None:
+                    # Build other_entities list (đã loại bỏ chính diag_part)
+                    other_for_diag = [
+                        e for e in validated
+                        if e.get("text") != diag_part and e.get("type") != diag_type
+                    ]
+                    rescanned_diag = rescan_entity_context(
+                        diag_part, "CHẨN_ĐOÁN", input_text, llm_client,
+                        other_entities=other_for_diag,
+                    )
+                    cand2 = icd_retriever.lookup(rescanned_diag)
+                    # Fix 13: Fallback cho split ICD
+                    if not cand2 and rescanned_diag != diag_part:
+                        cand2 = icd_retriever.lookup(diag_part)
                     if cand2:
                         item2["candidates"] = cand2
                 final.append(item2)
-                seen_signatures.add((diag_part, "CHẨN_ĐOÁN"))
+                seen_signatures.add((diag_part, diag_type))
                 emitted_any = True
             # Nếu không emit gì thì skip (đã có từ entity trước)
             if not emitted_any:
@@ -265,18 +745,121 @@ def assemble_record(
             "assertions": assertions,
         }
         # Candidates CHỈ cho THUỐC và CHẨN_ĐOÁN (per spec)
+        # Bước rescan: dùng LLM rà soát ngữ cảnh để sinh câu truy vấn tối ưu
         if etype == "THUỐC":
-            cleaned = sanitize_drug_text(text)
+            # Rescan để lấy query chuẩn hóa (gom liều, đường dùng từ văn bản)
+            # Pass other_entities để LLM có indication context (Fix 6)
+            other_for_drug = [e for e in validated if e.get("text") != text]
+            rescanned = rescan_entity_context(
+                text, etype, input_text, llm_client, other_entities=other_for_drug,
+            )
+            cleaned = sanitize_drug_text(rescanned)
+            cand: list[str] = []
             if cleaned:
                 cand = retriever.lookup(cleaned)
-                if cand:
-                    item["candidates"] = cand
-        elif etype == "CHẨN_ĐOÁN" and icd_retriever is not None:
-            cand = icd_retriever.lookup(text)
+            # Fix 13: Fallback strategy - nếu LLM rescan trả [] (do LLM confused hoặc
+            # API fail), thử lại với text gốc.
+            if not cand:
+                cleaned_orig = sanitize_drug_text(text)
+                if cleaned_orig and cleaned_orig != cleaned:
+                    cand = retriever.lookup(cleaned_orig)
+                    if cand:
+                        logger.debug(
+                            "[%d] Rescan fallback cho '%s': dùng text gốc → %d candidates",
+                            _seen_count, text, len(cand),
+                        )
             if cand:
                 item["candidates"] = cand
+        elif etype == "CHẨN_ĐOÁN" and icd_retriever is not None:
+            # Rescan để lấy query EN chuẩn hóa (gom mức độ, biến chứng)
+            # Pass other_entities để LLM có indication context (Fix 6)
+            # KHÔNG truyền context_query cho BGE-M3 (Fix 7 contaminated embeddings)
+            other_for_diag = [e for e in validated if e.get("text") != text]
+            rescanned = rescan_entity_context(
+                text, etype, input_text, llm_client, other_entities=other_for_diag,
+            )
+            cand = icd_retriever.lookup(rescanned)
+            # Fix 13: Fallback cho ICD - nếu rescan fail, thử text gốc
+            if not cand and rescanned != text:
+                cand = icd_retriever.lookup(text)
+                if cand:
+                    logger.debug(
+                        "[%d] ICD rescan fallback cho '%s': dùng text gốc → %d candidates",
+                        _seen_count, text, len(cand),
+                    )
+            if cand:
+                item["candidates"] = cand
+        elif etype == "TÊN_XÉT_NGHIỆM":
+            # Fix 17: Link TÊN_XÉT_NGHIỆM với KẾT_QUẢ_XÉT_NGHIỆM gần nhất
+            # Tìm KẾT_QUẢ_XÉT_NGHIỆM entity nằm trong cùng "đoạn test" (window 200 chars).
+            linked_results = _link_test_results(
+                text, int(ent["position"][0]), int(ent["position"][1]), validated,
+            )
+            if linked_results:
+                item["result"] = linked_results
+                logger.debug(
+                    "[%d] TÊN_XÉT_NGHIỆM '%s' linked to %d KQ",
+                    _seen_count, text, len(linked_results),
+                )
         final.append(item)
     return final
+
+
+def _link_test_results(
+    test_name: str,
+    test_start: int,
+    test_end: int,
+    validated: list[dict],
+    window: int = 250,
+) -> list[str]:
+    """Tìm các KẾT_QUẢ_XÉT_NGHIỆM gần TÊN_XÉT_NGHIỆM và trả về list giá trị SỐ.
+
+    Fix 17: result chỉ chứa SỐ thuần (vd "12.5", "180") — bỏ tên test + đơn vị.
+
+    Logic:
+    - Tìm KẾT_QUẢ_XÉT_NGHIỆM có position nằm trong window (test_end, test_end + window)
+      (sau tên test, trong cùng dòng/đoạn).
+    - Hoặc trong window (test_start - window, test_start) (trước tên test).
+    - Extract số từ KQ text (regex).
+    - Trả về list số (string), giữ nguyên format (string để không mất precision).
+    """
+    results: list[str] = []
+    seen: set[str] = set()
+    number_re = re.compile(r"-?\d+(?:[.,]\d+)?")
+    for e in validated:
+        if e.get("type") != "KẾT_QUẢ_XÉT_NGHIỆM":
+            continue
+        pos = e.get("position", [0, 0])
+        if not isinstance(pos, list) or len(pos) != 2:
+            continue
+        e_start = int(pos[0])
+        e_end = int(pos[1])
+        # Check nếu KQ nằm trong window sau tên test (preferred)
+        in_forward = e_start >= test_end and e_start - test_end <= window
+        # Check nếu KQ nằm trong window trước tên test
+        in_backward = e_end <= test_start and test_start - e_end <= window
+        if not (in_forward or in_backward):
+            continue
+        text = e.get("text", "").strip()
+        if not text:
+            continue
+        # Extract SỐ từ text (Fix 17: chỉ lấy số thuần)
+        # Ví dụ: "WBC 12.5 K/uL" → "12.5"
+        #         "glucose 180 mg/dL" → "180"
+        #         "SpO2 96%" → "96"
+        #         "AST 45 U/L" → "45"
+        #         "Hgb 13.2 g/dL" → "13.2"
+        numbers = number_re.findall(text)
+        if not numbers:
+            # Nếu không tìm được số, fallback lưu full text
+            extracted = text
+        else:
+            # Lấy số đầu tiên (hoặc số lớn nhất cho range như "12-15")
+            extracted = numbers[0]
+        if extracted and extracted not in seen:
+            results.append(extracted)
+            seen.add(extracted)
+    return results
 
 
 # ---------------------------------------------------------------------- #
@@ -309,10 +892,10 @@ def write_output(path: Path, payload: list[dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------- #
 
 if __name__ == "__main__":  # pragma: no cover
-    import sys
-
     logging.basicConfig(level=logging.DEBUG)
-    sample_text = "Bệnh nhân dùng aspirin 81 mg po daily trước nhập viện điều trị nhức đầu."
+    sample_text = (
+        "Bệnh nhân dùng aspirin 81 mg po daily trước nhập viện điều trị nhức đầu."
+    )
     sample_ents = [
         {
             "text": "aspirin 81 mg po daily",

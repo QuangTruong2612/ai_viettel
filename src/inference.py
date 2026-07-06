@@ -15,13 +15,14 @@ import argparse
 import concurrent.futures as cf
 import json
 import logging
+import re
 import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .llm_client import LLMClient, LLMConfig
-from .icd_rag import ICDRetriever, Translator
+from .llm_client import LLMClient
+from .icd_rag import ICDRetriever, ICD10VectorSearch, Translator
 from .postprocess import assemble_record, validate_output, write_output
 from .prompts import (
     SYSTEM_PROMPT,
@@ -30,73 +31,6 @@ from .prompts import (
     load_few_shot,
 )
 from .rxnorm_rag import RxNormRetriever
-
-# Bộ từ điển VN -> EN cho diagnosis — cập nhật thủ công khi cần
-DIAGNOSIS_VN_TO_EN_PRESET: dict[str, str] = {
-    "đái tháo đường": "type 2 diabetes mellitus",
-    "đái tháo đường type 2": "type 2 diabetes mellitus",
-    "đái tháo đường type ii": "type 2 diabetes mellitus",
-    "tăng huyết áp": "essential hypertension",
-    "cao huyết áp": "essential hypertension",
-    "suy tim": "heart failure",
-    "nhồi máu cơ tim": "myocardial infarction",
-    "viêm phổi": "pneumonia",
-    "hen phế quản": "asthma",
-    "hen suyễn": "asthma",
-    "lo âu": "anxiety disorder",
-    "trầm cảm": "depression",
-    "mất ngủ": "insomnia",
-    "táo bón": "constipation",
-    "tiêu chảy": "diarrhea",
-    "đau đầu": "headache",
-    "nhức đầu": "headache",
-    "đau nửa đầu": "migraine",
-    "sốt": "fever",
-    "ho": "cough",
-    "đau": "pain",
-    "đau nhức": "pain",
-    "đau ngực": "chest pain",
-    "khó thở": "dyspnea",
-    "buồn nôn": "nausea",
-    "nôn": "vomiting",
-    "chóng mặt": "dizziness",
-    "rối loạn lipid máu": "hyperlipidemia",
-    "mỡ máu": "hyperlipidemia",
-    "loãng xương": "osteoporosis",
-    "béo phì": "obesity",
-    "rung nhĩ": "atrial fibrillation",
-    "viêm dạ dày": "gastritis",
-    "viêm bao tử": "gastritis",
-    "viêm đường tiết niệu": "urinary tract infection",
-    "viêm phế quản": "bronchitis",
-    "copd": "copd",
-    "bệnh phổi tắc nghẽn mạn tính": "copd",
-    "trào ngược dạ dày": "gastroesophageal reflux",
-    # Viết tắt VN thường gặp trong bệnh án
-    "THA": "essential hypertension",
-    "ĐTĐ": "type 2 diabetes mellitus",
-    "ĐTĐ type 2": "type 2 diabetes mellitus",
-    "ĐTĐ type II": "type 2 diabetes mellitus",
-    "CVA": "cerebrovascular accident",
-    "NMCT": "myocardial infarction",
-    "ST": "heart failure",
-    "VP": "pneumonia",
-    "VPQ": "bronchopneumonia",
-    "HPQ": "asthma",
-    "COPD": "chronic obstructive pulmonary disease",
-    # Multi-word / severity qualifiers
-    "tăng huyết áp type II": "essential hypertension",
-    "tăng huyết áp độ III": "essential hypertension",
-    "suy tim độ III": "heart failure",
-    "viêm phổi cộng đồng": "community acquired pneumonia",
-    "nhồi máu cơ tim cấp": "acute myocardial infarction",
-    "viêm gan B": "hepatitis B",
-    "viêm gan C": "hepatitis C",
-    "tai biến mạch máu não": "cerebrovascular accident",
-    "loét dạ dày tá tràng": "gastric ulcer",
-    "ung thư dạ dày": "gastric cancer",
-    "ung thư phổi": "lung cancer",
-}
 
 logger = logging.getLogger(__name__)
 
@@ -132,16 +66,17 @@ def list_input_files(input_dir: Path) -> list[Path]:
     """Liệt kê file input theo thứ tự index."""
     files = sorted(
         input_dir.glob("*.txt"),
-        key=lambda p: int(re.findall(r"\d+", p.stem)[0]) if re.findall(r"\d+", p.stem) else 0,
+        key=lambda p: (
+            int(re.findall(r"\d+", p.stem)[0]) if re.findall(r"\d+", p.stem) else 0
+        ),
     )
     files += sorted(
         input_dir.glob("*.json"),
-        key=lambda p: int(re.findall(r"\d+", p.stem)[0]) if re.findall(r"\d+", p.stem) else 0,
+        key=lambda p: (
+            int(re.findall(r"\d+", p.stem)[0]) if re.findall(r"\d+", p.stem) else 0
+        ),
     )
     return files
-
-
-import re  # for list_input_files sorting (placed after to avoid early rebinding)
 
 
 # ---------------------------------------------------------------------- #
@@ -149,7 +84,7 @@ import re  # for list_input_files sorting (placed after to avoid early rebinding
 # ---------------------------------------------------------------------- #
 
 _CURRENT_REC_ID: list[int] = [0]  # mutable closure for logging
-_LAST_RAW_RESPONSE: str = ""      # stash raw LLM content for debugging
+_LAST_RAW_RESPONSE: str = ""  # stash raw LLM content for debugging
 
 
 def _call_with_retry(
@@ -194,14 +129,16 @@ def _call_with_retry(
             last_err = exc
             logger.warning(
                 "LLM call lỗi (rec-id=%d, attempt %d/%d) %s — content[:200]=%r",
-                _CURRENT_REC_ID[0], attempt + 1, max_retries + 1,
-                exc, last_raw[:200],
+                _CURRENT_REC_ID[0],
+                attempt + 1,
+                max_retries + 1,
+                exc,
+                last_raw[:200],
             )
             if attempt >= max_retries:
                 break
             time.sleep(2)  # chờ 2s trước khi retry cùng prompt
     raise RuntimeError(f"LLM fail after {max_retries + 1} attempts: {last_err}")
-
 
 
 # ---------------------------------------------------------------------- #
@@ -243,16 +180,21 @@ def process_record(
                     raw = raw[key]
                     break
         if not isinstance(raw, list):
-            logger.warning("[%d] Output không phải list: %r → ghi []", rec_id, type(raw))
+            logger.warning(
+                "[%d] Output không phải list: %r → ghi []", rec_id, type(raw)
+            )
             raw = []
 
     # Debug: nếu LLM trả [] thì log raw response để chẩn đoán
     if not raw:
         logger.warning(
             "[%d] LLM trả list rỗng. Raw response [:500]: %r",
-            rec_id, _LAST_RAW_RESPONSE[:500],
+            rec_id,
+            _LAST_RAW_RESPONSE[:500],
         )
-    final = assemble_record(input_text, raw, retriever, icd_retriever=icd_retriever)
+    final = assemble_record(
+        input_text, raw, retriever, icd_retriever=icd_retriever, llm_client=llm
+    )
     if not validate_output(final):
         logger.warning("[%d] Output fail schema validate", rec_id)
 
@@ -273,15 +215,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", type=Path, default=Path("data/input"))
     parser.add_argument("--output", type=Path, default=Path("output"))
     parser.add_argument("--workers", type=int, default=1)
-    parser.add_argument("--base-url", type=str, default="",
-                        help="Override LLM base URL (mặc định từ env OLLAMA_BASE_URL hoặc LMSTUDIO_BASE_URL)")
-    parser.add_argument("--model", type=str, default="",
-                        help="Override model name")
+    parser.add_argument(
+        "--base-url",
+        type=str,
+        default="",
+        help="Override LLM base URL (mặc định từ env OLLAMA_BASE_URL hoặc LMSTUDIO_BASE_URL)",
+    )
+    parser.add_argument("--model", type=str, default="", help="Override model name")
     parser.add_argument("--limit", type=int, default=0, help="0 = không giới hạn")
-    parser.add_argument("--max-few-shot", type=int, default=10,
-                        help="Số few-shot examples TỐI ĐA (default 10)")
-    parser.add_argument("--target-ctx", type=int, default=4096,
-                        help="Context length của LM Studio (default 4096). Few-shot tự cap theo budget.")
+    parser.add_argument(
+        "--max-few-shot",
+        type=int,
+        default=10,
+        help="Số few-shot examples TỐI ĐA (default 10)",
+    )
+    parser.add_argument(
+        "--target-ctx",
+        type=int,
+        default=6144,
+        help="Context length của Ollama/LM Studio (default 6144 cho qwen2.5:7b). Few-shot tự cap theo budget.",
+    )
     parser.add_argument("--log-file", type=Path, default=Path("predictions.log"))
     args = parser.parse_args(argv)
 
@@ -316,20 +269,25 @@ def main(argv: list[str] | None = None) -> int:
             logger.warning(
                 "Model '%s' CHƯA load trong LM Studio. Có: %s. "
                 "Có thể inference sẽ 500. Hãy load model trước.",
-                llm.config.model, loaded,
+                llm.config.model,
+                loaded,
             )
     except Exception as exc:
         logger.error(
             "Không kết nối được LM Studio ở %s: %s\n"
             "   → Mở LM Studio → Developer → Start Server (port 1234)",
-            llm.config.base_url, exc,
+            llm.config.base_url,
+            exc,
         )
         return 3
 
     translator = Translator(llm_client=llm)
-    translator.preset(DIAGNOSIS_VN_TO_EN_PRESET)
     retriever = RxNormRetriever()
-    icd_retriever = ICDRetriever(translator=translator, use_remote=True)
+    # VectorSearch: BGE-M3 vector search trên toàn bộ 71k mã ICD-10
+    local_search = ICD10VectorSearch()
+    icd_retriever = ICDRetriever(
+        translator=translator, use_remote=True, local_search=local_search
+    )
     # Adaptive few-shot cap based on context budget.
     # Tính số few-shot vừa đủ dựa trên: target_ctx - sys_prompt - max_tokens - user_input.
     all_examples = load_few_shot()
@@ -346,22 +304,29 @@ def main(argv: list[str] | None = None) -> int:
         auto_few_shot = 0  # Không vừa, skip hết few-shot
     else:
         # Each example ~ 800 chars total (user+assistant ~400 each)
-        auto_few_shot = max(0, min(remaining_for_fewshot // 200, len(all_examples), args.max_few_shot))
+        auto_few_shot = max(
+            0, min(remaining_for_fewshot // 200, len(all_examples), args.max_few_shot)
+        )
         # Ít nhất 2 example để có diversity, nhiều nhất theo budget
         auto_few_shot = max(0, min(auto_few_shot, args.max_few_shot))
 
     few_shot = format_few_shot_messages(all_examples[:auto_few_shot])
     logger.info(
         "Context budget: target=%d sys=%d max_out=%d budget_in=%d → few_shot=%d/%d",
-        args.target_ctx, sys_tokens, max_output_tokens, budget_for_input,
+        args.target_ctx,
+        sys_tokens,
+        max_output_tokens,
+        budget_for_input,
         len(few_shot) // 2 if few_shot else 0,
         len(all_examples),
     )
     if few_shot:
-        fs_chars = sum(len(m['content']) for m in few_shot)
+        fs_chars = sum(len(m["content"]) for m in few_shot)
         logger.info(
             "Few-shot selected: %d msgs, ~%d input tokens from %d total tokens budget",
-            len(few_shot), fs_chars // 4, budget_for_sys_fewshot // 4,
+            len(few_shot),
+            fs_chars // 4,
+            budget_for_sys_fewshot // 4,
         )
 
     files = list_input_files(args.input)
@@ -374,7 +339,9 @@ def main(argv: list[str] | None = None) -> int:
             rec_id = int(re.findall(r"\d+", f.stem)[0])
             try:
                 text = read_input_record(f)
-                process_record(rec_id, text, llm, retriever, icd_retriever, few_shot, args.output)
+                process_record(
+                    rec_id, text, llm, retriever, icd_retriever, few_shot, args.output
+                )
             except Exception as exc:
                 logger.exception("[%d] Lỗi: %s", rec_id, exc)
                 write_output(args.output / f"{rec_id}.json", [])
@@ -412,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     # RxNorm API cache (live API results, populates during inference)
     try:
         from .rxnorm_rag import save_rxnorm_cache
+
         save_rxnorm_cache()
     except Exception as exc:  # pragma: no cover
         logger.warning("Save RxNorm API cache fail: %s", exc)

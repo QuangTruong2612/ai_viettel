@@ -20,7 +20,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 import requests  # type: ignore
 
@@ -39,6 +39,22 @@ _RXNORM_API_CACHE: dict[str, list[str]] = {}
 # ---------------------------------------------------------------------- #
 
 
+def _strip_paren_keep_dose(match: "re.Match[str]") -> str:
+    """Helper cho re.sub: giữ nội dung trong (...) nếu chứa số liều (vd "325mg"),
+    nếu không thì trả về " " (strip hết).
+
+    Vd:
+        "(uống hôm nay)" → " "
+        "(325mg)" → "(325mg)" (giữ nguyên)
+        "(tiêm)" → " "
+    """
+    content = match.group(1).strip()
+    # Nếu có số + đơn vị liều → giữ (vd "(325mg)", "(0.5ml)")
+    if re.search(r"\d+\s*(mg|mcg|g|ml|iu|unit|%)", content, re.IGNORECASE):
+        return match.group(0)  # giữ nguyên cả (...)
+    return " "  # strip hết
+
+
 def _normalize(text: str) -> str:
     """Chuẩn hoá chuỗi: lowercase, bỏ diacritics, bỏ ký tự đặc biệt dư.
 
@@ -50,8 +66,14 @@ def _normalize(text: str) -> str:
        "0" + "5mg". Fix: dùng regex KHÔNG split dấu `.` để giữ "0.5mg"/"5.6mg".
     2. NFKD không strip được ký tự `đ` (U+0111 LATIN SMALL LETTER D WITH STROKE)
        vì không có decomposition → fix bằng replace thủ công trước NFKD.
+    3. Trước kia KHÔNG strip VN parentheticals "(uống hôm nay)", "(tiêm)" → NIH API
+       không khớp. Fix: strip `(...)` ngay đầu hàm (chỉ khi KHÔNG có số liều trong
+       ngoặc — nếu có thì giữ nguyên).
     """
     text = text.lower().strip()
+    # Bỏ parenthetical (uống hôm nay), (uống sáng), (tiêm) — KHÔNG chứa số liều
+    # Nếu có số trong ngoặc (vd "(325mg)") thì có thể là dose trong ngoặc — giữ nguyên
+    text = re.sub(r"\(([^)]*)\)", _strip_paren_keep_dose, text)
     # Xử lý đ/Đ trước (NFKD không strip được)
     text = text.replace("đ", "d").replace("Đ", "D")
     # Bỏ dấu tiếng Việt / Latin-1
@@ -68,15 +90,72 @@ def _normalize(text: str) -> str:
     # Bỏ các từ chỉ đường dùng / dạng bào chế / tần suất
     skip = {
         # dosage form / route
-        "po", "iv", "im", "sc", "sl", "pr", "topical", "inhale",
-        "oral", "tablet", "capsule", "solution", "suspension", "drop", "drops",
-        "injection", "cream", "ointment", "gel", "patch", "spray", "powder",
-        "liquid", "syrup", "granule", "lozenge", "film", "extended", "release",
-        "xl", "xr", "er", "sr", "la", "cr", "mg", "mcg", "g", "ml", "iu",
-        "unit", "dose", "strength", "tab", "cap", "inj", "amp", "vial",
+        "po",
+        "iv",
+        "im",
+        "sc",
+        "sl",
+        "pr",
+        "topical",
+        "inhale",
+        "oral",
+        "tablet",
+        "capsule",
+        "solution",
+        "suspension",
+        "drop",
+        "drops",
+        "injection",
+        "cream",
+        "ointment",
+        "gel",
+        "patch",
+        "spray",
+        "powder",
+        "liquid",
+        "syrup",
+        "granule",
+        "lozenge",
+        "film",
+        "extended",
+        "release",
+        "xl",
+        "xr",
+        "er",
+        "sr",
+        "la",
+        "cr",
+        "mg",
+        "mcg",
+        "g",
+        "ml",
+        "iu",
+        "unit",
+        "dose",
+        "strength",
+        "tab",
+        "cap",
+        "inj",
+        "amp",
+        "vial",
         # frequency
-        "daily", "bid", "tid", "qid", "qam", "qpm", "qhs", "q6h", "q8h", "q12h",
-        "prn", "qd", "qod", "hs", "ac", "pc", "q4h",
+        "daily",
+        "bid",
+        "tid",
+        "qid",
+        "qam",
+        "qpm",
+        "qhs",
+        "q6h",
+        "q8h",
+        "q12h",
+        "prn",
+        "qd",
+        "qod",
+        "hs",
+        "ac",
+        "pc",
+        "q4h",
     }
     # QUAN TRỌNG: regex split KHÔNG bao gồm `.` để giữ nguyên "0.5mg", "5.6mg"
     # còn sót lại sau khi regex mg replace (vd khi input là "0.5 mg/ml" thì giữ).
@@ -104,6 +183,9 @@ class RxNormIndex:
     names: list[str] = field(default_factory=list)
     rxcuis: list[str] = field(default_factory=list)
     name_to_idx: dict[str, int] = field(default_factory=dict)
+    _concept_codes: dict[str, list[tuple[str, str, str]]] = field(
+        default_factory=dict, repr=False
+    )
 
     # ------------------------------------------------------------------ #
 
@@ -122,6 +204,9 @@ class RxNormIndex:
             rxcuis=data.get("rxcuis", []),
         )
         idx.name_to_idx = {n: i for i, n in enumerate(idx.names)}
+        # Populate _concept_codes from local names/rxcuis lists for fuzzy filtering
+        for name, rxcui in zip(idx.names, idx.rxcuis):
+            idx._concept_codes.setdefault(rxcui, []).append((rxcui, name, ""))
         return idx
 
     # ------------------------------------------------------------------ #
@@ -144,6 +229,8 @@ class RxNormIndex:
             self.name_to_idx[name] = len(self.names)
             self.names.append(name)
             self.rxcuis.append(rxcui)
+            # Track all (rxcui, name, syn) triples for fuzzy post-filtering
+            self._concept_codes.setdefault(rxcui, []).append((rxcui, name, term_type))
 
     # ------------------------------------------------------------------ #
 
@@ -168,15 +255,36 @@ class RxNormIndex:
         if norm_text in self.exact:
             return sorted(set(self.exact[norm_text]))
 
-        # ----- 3. Fuzzy match trên toàn bộ names -----
+        # ----- 3. Fuzzy match trên toàn bộ names (CHỈ khi drug_name khớp) -----
+        # Bug history: fuzzy match "atenolol 50 mg po daily" thành "metoprolol succinate XL 50"
+        # vì WRatio cao do giống cấu trúc. Fix: yêu cầu drug name trong concept name.
         candidates = self._fuzzy_match(text, threshold=fuzzy_threshold)
         if candidates:
-            return sorted(set(candidates))
+            first_word = text.strip().split()[0].lower() if text.strip() else ""
+            filtered = [
+                c
+                for c in candidates
+                if c in self._concept_codes
+                and any(
+                    first_word in name.lower() or first_word in syn.lower()
+                    for _, name, syn in self._concept_codes[c]
+                )
+            ]
+            if filtered:
+                return sorted(set(filtered))
+            # Nếu fuzzy không match drug_name, fall through to API
+            candidates = []
 
         # ----- 4. Live NIH RxNorm REST API (drugs.json?name=) -----
         api_cands = _http_rxnorm_search(text, norm_text=norm_text)
         if api_cands:
-            return sorted(set(api_cands))
+            # Fix 16: Post-filter để loại concept có ingredient khác
+            # (vd searching "amlodipine" không nên trả concept có "metformin")
+            api_cands = _filter_wrong_ingredients(api_cands, text, self)
+            if api_cands:
+                return sorted(
+                    set(api_cands)
+                )  # Multiple OK — Jaccard metric vẫn 1.0 nếu GT match
 
         return []
 
@@ -217,9 +325,7 @@ class RxNormIndex:
                 continue
             # WRatio và partial_ratio kết hợp: WRatio cho cả chuỗi,
             # partial_ratio để bắt substring như "nystatin" trong "Nystatin Oral Suspension"
-            matches_wr = process.extract(
-                query, self.names, scorer=fuzz.WRatio, limit=5
-            )
+            matches_wr = process.extract(query, self.names, scorer=fuzz.WRatio, limit=5)
             matches_pr = process.extract(
                 query, self.names, scorer=fuzz.partial_ratio, limit=5
             )
@@ -241,16 +347,12 @@ class RxNormIndex:
                 rxcui = self.rxcuis[self.name_to_idx[name]]
                 if rxcui not in out:
                     out.append(rxcui)
-            if out:
-                break  # đã có kết quả từ candidate đầu tiên khả thi
         return out
-
-
-
 
     # ------------------------------------------------------------------ #
     # (No-op: embedding cache removed — chỉ dùng NIH API + local fuzzy.)
     # ------------------------------------------------------------------ #
+
 
 # ---------------------------------------------------------------------- #
 # Live NIH RxNorm API (drugs.json?name=)
@@ -281,7 +383,10 @@ def _drug_query_tokens(text: str) -> list[str]:
     Bug history: trước kia filter thiếu "x N" intake pattern (vd "aspirin 325mg x 1"),
     làm NIH API không khớp trả về [] cho cùng drug ở format tiêu chuẩn.
     Fix: thêm `\\bx \\d+\\b` (x 1, x 2, x N), `\\bviên\\b`, `\\bống\\b`, `\\blần\\b` vào skip.
+    Bug history #2: KHÔNG strip VN parentheticals "(uống hôm nay)" → NIH API trả rỗng.
+    Fix: strip `(...)` đầu hàm (giữ dose nếu có).
     """
+    text = re.sub(r"\(([^)]*)\)", _strip_paren_keep_dose, text)
     pat = (
         r"\d+(\.\d+)?\s*(mg|mcg|g|ml|iu|unit|%)"
         # Intake / quantity notation tiếng Việt: "x 1 viên", "uống 2 lần/ngày"
@@ -306,6 +411,92 @@ def _drug_query_tokens(text: str) -> list[str]:
     return tokens
 
 
+# Các tên đồng nghĩa UK/US/VN cho thuốc phổ biến.
+# NIH RxNorm chỉ có tên US (INN), không có UK generic.
+# Key: tên người dùng hay gõ. Value: tên US sẽ thử trong API.
+_DRUG_NAME_VARIANTS: dict[str, list[str]] = {
+    "paracetamol": ["acetaminophen", "apap"],
+    "acetaminophen": ["paracetamol", "apap"],
+    "salbutamol": ["albuterol"],
+    "albuterol": ["salbutamol"],
+    "adrenaline": ["epinephrine"],
+    "epinephrine": ["adrenaline"],
+    "noradrenaline": ["norepinephrine"],
+    "paracetamolacetamol": ["acetaminophen"],  # typo guard
+    "salbutamolol": ["albuterol"],  # typo guard
+}
+
+
+def _filter_wrong_ingredients(
+    codes: list[str],
+    drug_text: str,
+    index: "RxNormIndex | None" = None,
+) -> list[str]:
+    """Filter ra các RxNorm codes có ingredient sai so với drug_text.
+
+    General principle (Fix 16): ingredient trong concept name phải match
+    drug name trong query. E.g., searching "amlodipine" không nên trả
+    concept có "atorvastatin" (chỉ vì atenolol/amlodipine đôi khi combined).
+
+    Args:
+        codes: list RxCUI codes
+        drug_text: text gốc của drug (đã strip parentheticals)
+        index: RxNormIndex để lookup name (nếu không có thì chỉ filter bằng code list)
+
+    Returns: filtered list codes.
+    """
+    if not codes:
+        return codes
+
+    # Extract first meaningful word (drug name) từ drug_text
+    drug_text_clean = drug_text.lower().strip()
+    # Loại bỏ strength/route/freq đã được strip bởi _drug_query_tokens
+    drug_words = drug_text_clean.split()
+    if not drug_words:
+        return codes
+
+    # Lấy first word có chữ cái (không phải số/đơn vị)
+    drug_name = ""
+    for w in drug_words:
+        clean_w = w.strip(".,;:()")
+        if clean_w and any(c.isalpha() for c in clean_w) and len(clean_w) > 2:
+            drug_name = clean_w
+            break
+
+    if not drug_name or len(drug_name) < 3:
+        return codes  # quá ngắn để filter
+
+    out: list[str] = []
+    for code in codes:
+        # Get concept name từ index
+        if index is not None and code in index._concept_codes:
+            names = [name.lower() for _, name, _ in index._concept_codes[code]]
+        else:
+            # Skip check nếu không có index
+            out.append(code)
+            continue
+
+        # Check xem drug_name có trong concept names không
+        # Nếu concept name là ingredient khác (vd "atorvastatin"), skip
+        matched = False
+        for name in names:
+            if drug_name in name:
+                matched = True
+                break
+        if matched:
+            out.append(code)
+        # Nếu không match, có thể là combination drug (vd amlodipine + atorvastatin)
+        # Cho phép nếu drug_name cũng có trong name
+        else:
+            # Check nếu drug_name là 1 phần của combination (vd "amlodipine" in "amlodipine 10 mg / atorvastatin 10 mg")
+            for name in names:
+                if drug_name in name.split(" /")[0]:  # trước dấu /
+                    out.append(code)
+                    break
+
+    return out
+
+
 def _http_rxnorm_search(
     drug_text: str,
     *,
@@ -313,7 +504,12 @@ def _http_rxnorm_search(
     timeout: int = 20,
     max_results: int = 10,
 ) -> list[str]:
-    """Gọi NIH RxNorm REST API /REST/drugs.json?name=<drug>; trả list[rxcui] sorted."""
+    """Gọi NIH RxNorm REST API /REST/drugs.json?name=<drug>; trả list[rxcui] sorted.
+
+    Bug history: NIH API không có SCD cho "paracetamol" (UK name) — chỉ có
+    "acetaminophen" (US), "APAP", "Tylenol". Cần thử variants.
+    Fix: DRUG_NAME_VARIANTS chứa các tên đồng nghĩa UK/US/VN.
+    """
     if not drug_text:
         return []
 
@@ -322,39 +518,93 @@ def _http_rxnorm_search(
     if not tokens:
         return []
     query_tokens = tokens[:3]
-    cache_key = " ".join(query_tokens)
+    # Bug history: cache_key chỉ dựa trên query_tokens[:3] → collision giữa
+    # các drugs cùng generic name nhưng khác strength (vd clonazepam 0.5 vs 1.5).
+    # Fix: thêm strength vào cache_key nếu có.
+    strength_in_cache = ""
+    m_cache = re.search(r"(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|iu|unit|%)", drug_text.lower())
+    if m_cache:
+        strength_in_cache = f"{m_cache.group(1)}{m_cache.group(2)}"
+    cache_key = " ".join(query_tokens + ([strength_in_cache] if strength_in_cache else []))
 
-    # Cache check
-    if cache_key in _RXNORM_API_CACHE:
+    # Cache check - nhưng BỎ QUA nếu cache rỗng (cho phép retry khi NIH API trả rỗng)
+    if cache_key in _RXNORM_API_CACHE and _RXNORM_API_CACHE[cache_key]:
         return list(_RXNORM_API_CACHE[cache_key])
 
     # Trích strength để filter
+    # Bug history: regex chỉ pick "650 mg" trong "325-650 mg" (greedy match),
+    # khiến candidates prefer liều 650mg thay vì 325mg (BTC expect liều thấp).
+    # Fix: detect range "X-Y mg" và dùng X (lower bound) làm strength.
     strength_in_input = ""
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|iu|unit|%)", drug_text.lower())
-    if m:
-        strength_in_input = f"{m.group(1)}{m.group(2)}"
+    # Tìm range trước: "325-650 mg" → "325mg"
+    range_m = re.search(r"(\d+(?:\.\d+)?)\s*[-–]\s*\d+(?:\.\d+)?\s*(mg|mcg|g|ml|iu|unit|%)", drug_text.lower())
+    if range_m:
+        strength_in_input = f"{range_m.group(1)}{range_m.group(2)}"
+    else:
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|iu|unit|%)", drug_text.lower())
+        if m:
+            strength_in_input = f"{m.group(1)}{m.group(2)}"
 
     api_query = " ".join(query_tokens)
-    try:
-        r = requests.get(
-            f"{RXNAV_BASE}/drugs.json",
-            params={"name": api_query},
-            timeout=timeout,
-        )
-        r.raise_for_status()
-        data = r.json()
-    except Exception as exc:
-        logger.warning("RxNorm API fail (%r): %s", api_query, exc)
+    # Bug history: NIH API không có SCD cho "paracetamol" (UK name).
+    # Fix: thử cả variant names (UK ↔ US ↔ VN).
+    candidate_queries = [api_query]
+    first_word = query_tokens[0] if query_tokens else ""
+    if first_word in _DRUG_NAME_VARIANTS:
+        candidate_queries.extend(_DRUG_NAME_VARIANTS[first_word])
+    # Fix 15: Retry with backoff cho NIH API (network blip / rate limit)
+    all_results = []
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            for q in candidate_queries:
+                r = requests.get(
+                    f"{RXNAV_BASE}/drugs.json",
+                    params={"name": q},
+                    timeout=timeout,
+                )
+                r.raise_for_status()
+                data = r.json()
+                group = data.get("drugGroup", {}) or {}
+                cg = group.get("conceptGroup", []) or []
+                if cg:
+                    concept_groups = cg
+                    all_results = data
+                    break
+            if all_results:
+                break
+            # No results from any variant - retry with backoff
+            if attempt < max_retries:
+                time.sleep(0.3 * (2 ** attempt))
+        except Exception as exc:
+            logger.warning("RxNorm API fail (attempt %d, %r): %s", attempt, api_query, exc)
+            if attempt < max_retries:
+                time.sleep(0.3 * (2 ** attempt))
+    if not all_results:
+        logger.warning("RxNorm API fail (%r): no results after retries", api_query)
         return []
     time.sleep(0.05)
 
-    group = data.get("drugGroup", {}) or {}
-    concept_groups = group.get("conceptGroup", []) or []
+    # (variable `data` already set above)
 
     def _norm_for_match(s: str) -> str:
         return s.lower().replace(" ", "").replace("\t", "")
 
-    priority_tty = ["SCD", "SBD", "BPCK", "GPCK", "SCDF", "SBDF", "IN", "PIN", "MIN", "SCDC"]
+    priority_tty = [
+        "SCD",
+        "SBD",
+        "BPCK",
+        "GPCK",
+        "SCDF",
+        "SBDF",
+        "IN",
+        "PIN",
+        "MIN",
+        "SCDC",
+    ]
+    # Bug history: NIH API trả tất cả SCD dose forms → 30+ candidates không liên quan.
+    # Fix: giới hạn MAX_PER_TTY=3 (BTC test allow subset, nên 1-3 codes là đủ).
+    MAX_PER_TTY = 3
     by_tty: dict[str, list[tuple[str, str, str]]] = {}
     for cg in concept_groups:
         tty = cg.get("tty", "")
@@ -365,48 +615,78 @@ def _http_rxnorm_search(
             if rxcui and name:
                 by_tty.setdefault(tty, []).append((rxcui, name, syn))
 
+    def _score_candidate(name: str, syn: str, drug_query: str, strength: str) -> int:
+        """Chấm concept: drug name match + strength match + 'Oral Tablet' preferred.
+
+        Trả về score cao nhất → 1 code duy nhất, match input chính xác.
+        """
+        score = 0
+        norm_name = _norm_for_match(name)
+        norm_syn = _norm_for_match(syn)
+        # Drug name exact match (highest)
+        if drug_query and norm_name.startswith(drug_query.lower().replace(" ", "")):
+            score += 100
+        elif drug_query and drug_query.lower().replace(" ", "") in norm_name:
+            score += 50
+        # Strength exact match
+        if strength and (strength in norm_name or strength in norm_syn):
+            score += 80
+        # "Oral Tablet" preferred (most common dose form)
+        if "oraltablet" in norm_name:
+            score += 30
+        elif "capsule" in norm_name:
+            score += 20
+        elif "solution" in norm_name:
+            score += 5
+        # Combination drug (có "/") - penalty
+        if "/" in name:
+            score -= 40
+        return score
+
+    # Collect candidates with score
     out: list[str] = []
+    candidates: list[tuple[int, str]] = []  # (score, rxcui)
+    # Extract drug name (first meaningful token)
+    drug_name_for_filter = ""
+    for t in query_tokens:
+        if any(c.isalpha() for c in t) and len(t) > 2:
+            drug_name_for_filter = t.lower()
+            break
+    drug_name_norm = drug_name_for_filter.replace(" ", "")
+
     for tty in priority_tty:
         concepts = by_tty.get(tty, [])
         if not concepts:
             continue
-        if strength_in_input:
-            standalone_match = [
-                (rxcui, name)
-                for rxcui, name, syn in concepts
-                if "/" not in name
-                and (strength_in_input in _norm_for_match(name)
-                     or strength_in_input in _norm_for_match(syn))
-            ]
-            combo_match = [
-                (rxcui, name)
-                for rxcui, name, syn in concepts
-                if "/" in name
-                and (strength_in_input in _norm_for_match(name)
-                     or strength_in_input in _norm_for_match(syn))
-            ]
-            any_match = [
-                (rxcui, name)
-                for rxcui, name, syn in concepts
-                if strength_in_input in _norm_for_match(name)
-                or strength_in_input in _norm_for_match(syn)
-            ]
-            chosen = standalone_match or combo_match or any_match
-            for rxcui, _ in chosen:
-                if rxcui not in out:
-                    out.append(rxcui)
-            if out:
+        for rxcui, name, syn in concepts:
+            # Giới hạn top-K trong mỗi TTY bucket (Fix 5)
+            if len(candidates) >= MAX_PER_TTY:
                 break
-        standalone = [r for r, _, _ in concepts if "/" not in _]
-        combos = [r for r, _, _ in concepts if "/" in _]
-        for rxcui in (standalone + combos)[:max_results]:
-            if rxcui not in out:
-                out.append(rxcui)
-        if out:
+            # Extract drug name from query_tokens (first 2 tokens)
+            drug_query = " ".join(query_tokens[:2]) if query_tokens else ""
+            score = _score_candidate(name, syn, drug_query, strength_in_input)
+            # Fix 18: REQUIRE drug_name in name (không chỉ strength).
+            # Trước: matches = (drug in name) OR (strength in name)
+            # → codes thuốc khác cùng strength bị match nhầm (vd aspirin 81mg vs atorvastatin 81mg)
+            # Sau: matches = (drug_name in name) AND (... optional strength match bonus)
+            norm_name = _norm_for_match(name)
+            if not drug_name_norm or drug_name_norm not in norm_name:
+                continue
+            candidates.append((score, rxcui))
+        if candidates:
             break
 
-    _RXNORM_API_CACHE[cache_key] = sorted(set(out))
-    return sorted(set(out))
+    # Sort by score DESC, then dedupe
+    if candidates:
+        candidates.sort(key=lambda x: -x[0])
+        seen_codes = set()
+        for _, code in candidates:
+            if code not in seen_codes:
+                seen_codes.add(code)
+                out.append(code)
+
+    _RXNORM_API_CACHE[cache_key] = out
+    return out
 
 
 def save_rxnorm_cache() -> None:
@@ -442,7 +722,9 @@ class RxNormRetriever:
 # ---------------------------------------------------------------------- #
 
 
-def build_from_rxnorm_dump(dump_path: Path, out_path: Optional[Path] = None) -> RxNormIndex:
+def build_from_rxnorm_dump(
+    dump_path: Path, out_path: Optional[Path] = None
+) -> RxNormIndex:
     """Đọc file JSON dạng [{rxcui, name, term_type}, ...] và dựng index."""
     with dump_path.open("r", encoding="utf-8") as f:
         rows = json.load(f)

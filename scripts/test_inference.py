@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.llm_client import LLMClient  # noqa: E402
-from src.icd_rag import ICDRetriever, Translator  # noqa: E402
+from src.icd_rag import ICDRetriever, ICD10VectorSearch, Translator  # noqa: E402
 from src.postprocess import assemble_record, validate_output, write_output  # noqa: E402
 from src.prompts import (  # noqa: E402
     SYSTEM_PROMPT,
@@ -70,11 +70,14 @@ EXPECTED_GT = [
 ]
 
 
-def _parse_with_retry(llm: LLMClient, system_prompt: str, user_prompt: str,
-                       history: list[dict[str, str]]) -> object:
-    msgs = [{"role": "system", "content": system_prompt}] + history + [
-        {"role": "user", "content": user_prompt}
-    ]
+def _parse_with_retry(
+    llm: LLMClient, system_prompt: str, user_prompt: str, history: list[dict[str, str]]
+) -> object:
+    msgs = (
+        [{"role": "system", "content": system_prompt}]
+        + history
+        + [{"role": "user", "content": user_prompt}]
+    )
     last_raw = ""
     last_err: Exception | None = None
     for attempt in range(llm.config.max_retries + 1):
@@ -106,11 +109,11 @@ def main() -> int:
 
     llm = LLMClient()
     retriever = RxNormRetriever()
-    # ICD retriever — không dùng remote trong smoke test để tránh network
-    translator = Translator()
-    from src.inference import DIAGNOSIS_VN_TO_EN_PRESET
-    translator.preset(DIAGNOSIS_VN_TO_EN_PRESET)
-    icd = ICDRetriever(translator=translator, use_remote=False)
+    translator = Translator(llm_client=llm)
+    local_search = ICD10VectorSearch()
+    icd = ICDRetriever(
+        translator=translator, use_remote=False, local_search=local_search
+    )
     few_shot = format_few_shot_messages(load_few_shot())
 
     user_prompt = build_user_prompt(EXAMPLE_INPUT)
@@ -124,7 +127,9 @@ def main() -> int:
         if not isinstance(raw, list):
             raw = []
 
-    final = assemble_record(EXAMPLE_INPUT, raw, retriever, icd_retriever=icd)
+    final = assemble_record(
+        EXAMPLE_INPUT, raw, retriever, icd_retriever=icd, llm_client=llm
+    )
     write_output(args.out, final)
 
     ok = validate_output(final)

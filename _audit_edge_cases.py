@@ -9,15 +9,31 @@ from src.postprocess import (
     _find_span, validate_positions, dedupe_entities,
 )
 from src.rxnorm_rag import RxNormRetriever, _drug_query_tokens
-from src.icd_rag import ICDRetriever, Translator
+from src.icd_rag import ICDRetriever, ICD10VectorSearch, Translator
 from src.prompts import SYSTEM_PROMPT, OUTPUT_SCHEMA, load_few_shot
 
 # Setup
 import src.inference as inf
 ret = RxNormRetriever()
-trans = Translator()
-trans.preset(inf.DIAGNOSIS_VN_TO_EN_PRESET)
-icd = ICDRetriever(translator=trans, use_remote=False)
+from src.llm_client import LLMClient
+llm = LLMClient()
+
+# Check if LLM server is running; if not, disable LLM to run offline audit instantly
+llm_active = False
+try:
+    import socket
+    from urllib.parse import urlparse
+    parsed = urlparse(llm.config.base_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 1234
+    with socket.create_connection((host, port), timeout=0.5):
+        llm_active = True
+except Exception:
+    llm = None
+
+trans = Translator(llm_client=llm if llm_active else None)
+local_search = ICD10VectorSearch()
+icd = ICDRetriever(translator=trans, use_remote=False, local_search=local_search)
 
 # ============================================================================
 # EDGE CASES for diagnose postprocess — find what fails
@@ -175,7 +191,7 @@ print('=' * 70)
 
 failures = []
 for i, (name, input_text, raw_ents, expectation) in enumerate(CASES, 1):
-    final = assemble_record(input_text, raw_ents, ret, icd_retriever=icd)
+    final = assemble_record(input_text, raw_ents, ret, icd_retriever=icd, llm_client=llm)
     valid = validate_output(final)
     n_ent = len(final)
     n_drugs = sum(1 for e in final if e['type'] == 'THUỐC')

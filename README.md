@@ -1,328 +1,417 @@
-có 
+# AI Race 2026 — Medical Information Extraction
 
-# AI Race 2026 — Medical Information Extraction (Vòng 1)
+Pipeline trích xuất thực thể y khoa và liên kết mã chuẩn hoá (`ICD-10`, `RxNorm`) từ hồ sơ bệnh án tiếng Việt, chạy **hoàn toàn offline** với **Ollama** + local embeddings.
 
-Pipeline trích xuất thực thể y khoa có cấu trúc từ văn bản lâm sàng **tiếng Việt** — chạy hoàn toàn offline sau khi cache, không cần fine-tune.
+## 🚀 Quick Start (5 phút)
 
-| Loại                      | Mã chuẩn hoá    | Nguồn                                       |
-| -------------------------- | ------------------ | -------------------------------------------- |
-| `THUỐC`                 | RxNorm (`rxcui`) | NIH RxNorm REST API + local cache            |
-| `CHẨN_ĐOÁN`           | ICD-10 (`code`)  | NIH Clinical Tables API + VN→EN translation |
-| `TRIỆU_CHỨNG`          | —                 | LLM trực tiếp                              |
-| `TÊN_XÉT_NGHIỆM`      | —                 | LLM trực tiếp                              |
-| `KẾT_QUẢ_XÉT_NGHIỆM` | —                 | LLM trực tiếp                              |
+```powershell
+# 1. Clone + setup
+git clone <repo>
+cd AI_VIETTEL
 
-Mỗi entity có `position` `[start, end]` (0-indexed) + `assertions` ∈ `{isHistorical, isNegated, isFamily}` (subset, có thể kết hợp nhiều flag). Output: `output/{N}.json` (1 record / file).
+# Tạo venv và cài dependencies
+uv venv && uv pip install -r requirements.txt
+
+# 2. Cài Ollama + pull model (chỉ làm 1 lần)
+# Tải: https://ollama.com/download
+ollama pull qwen2.5:7b          # ~4.7 GB
+# Hoặc nếu muốn model mạnh hơn:
+# ollama pull gemma2:9b          # ~5.5 GB (Recommend, hiểu JSON tốt hơn)
+
+# 3. Khởi Ollama server (chạy nền)
+ollama serve
+
+# 4. Generate ICD-10 embeddings (~5 phút GPU, ~30 phút CPU)
+uv run python scripts/build_icd_embeddings.py
+
+# 5. Smoke test
+uv run scripts/test_inference.py --out output/smoke_test.json
+```
 
 ---
 
-## Tech Stack
+## 📋 Yêu cầu hệ thống
 
-| Thành phần         | Chi tiết                                                                                 |
-| -------------------- | ----------------------------------------------------------------------------------------- |
-| **LLM**        | `qwen2.5-7b-instruct` (Q4_K_M ~4.7GB) trong LM Studio tại `http://127.0.0.1:1234/v1` |
-| **RxNorm API** | `https://rxnav.nlm.nih.gov/REST/drugs.json?name=<drug>`                                 |
-| **ICD-10 API** | `https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search?terms=<q>&sf=name`            |
-| **Backend**    | Python ≥ 3.10,`openai` client OpenAI-compatible                                        |
-
-**Ràng buộc**: LLM self-host ≤ 9B params · không fine-tune · chỉ gọi 2 API NIH ở trên.
+| Thành phần | Tối thiểu | Khuyến nghị |
+|---|---|---|
+| Python | 3.10+ | 3.11 |
+| RAM | 16 GB | 32 GB |
+| GPU | NVIDIA RTX 3060 (12GB) | RTX 4090 (24GB) hoặc A100 |
+| VRAM | 8 GB (qwen2.5:7b) | 16 GB (gemma2:9b / qwen2.5:14b) |
+| Disk | 10 GB | 20 GB |
+| OS | Windows / Linux / macOS | Linux + NVIDIA |
 
 ---
 
-## Cấu trúc dự án
+## 🆕 Cải tiến mới nhất
+
+### Hybrid ICD Search (Vector + BM25)
+- Kết hợp BGE-M3 cosine similarity với BM25 keyword ranking
+- Công thức: `combined = α·cosine + β·bm25_normalized` (mặc định α=0.6, β=0.4)
+- Khắc phục "vector ảo" giữa các code cùng concept khác grade/stage (heart failure II vs III)
+- Files: [src/icd_rag.py](src/icd_rag.py) — `ICD10VectorSearch`, `ICD10BM25Index`, `ICD10HybridSearch`
+
+### Prompt Engineering Improvements
+- **XML structure**: SYSTEM_PROMPT wrap trong các `<role>`, `<instructions>`, `<workflow>`, `<entity_types>`, `<extraction_rules>`, `<special_cases_ecg>`, `<assertions>`, `<output_format>`, `<final_rules>` — giúp LLM phân biệt rõ từng phần chỉ thị.
+- **Few-shot examples**: 32 ví dụ chất lượng cao trong [data/examples.jsonl](data/examples.jsonl) (đã fix 132/151 positions sai). Auto-budget theo `target_ctx`.
+- **Positive framing**: các rule "BỎ lifestyle / BỎ đại từ chung" được refactor thành "TEXT ENTITY = TÊN CỤ THỂ", tránh paradoxical attention khi LLM đọc từ cấm.
+
+### Context-Aware ICD/RxNorm Pipeline
+- 6 lớp: Exact match → Translate VN→EN → Hybrid search → Fuzzy EN → Fuzzy VN → Remote NIH fallback
+- LLM đọc TOÀN BỘ input trước khi extract (3-step reasoning)
+- Context-aware query cho BGE-M3 (drugs + symptoms → disambiguate diagnosis)
+- Drug→Diagnosis inference table (amlodipine → THA, etc.)
+
+---
+
+## 🧠 Kiến trúc tổng quan
+
+Pipeline 3 giai đoạn:
+
+### Giai đoạn 1 — Clinical NER (LLM)
+Input: hồ sơ bệnh án tiếng Việt.
+Output: JSON array các entity thô (`THUỐC`, `CHẨN_ĐOÁN`, `TRIỆU_CHỨNG`, `TÊN_XÉT_NGHIỆM`, `KẾT_QUẢ_XÉT_NGHIỆM`) với `position` và `assertions`.
+Model: qwen2.5:7b / gemma2:9b (qua Ollama OpenAI-compatible API).
+
+### Giai đoạn 2 — LLM Context Rescanning
+- **THUỐC**: gom tên gốc + strength + route + frequency (vd `Amlodipine 10mg uống daily`).
+- **CHẨN_ĐOÁN**: gom severity/location/complication (vd `Trào ngược dạ dày` + `không viêm thực quản` → `GERD without esophagitis`).
+
+### Giai đoạn 3 — Medical RAG
+- **RxNorm**: Local index + NIH REST API + cache.
+- **ICD-10**: Hybrid search (BGE-M3 vector + BM25 keyword) trên 71,705 codes (`data/icd10.jsonl`).
+
+---
+
+## 📂 Cấu trúc thư mục
 
 ```
-F:\AI_VIETTEL\
+AI_VIETTEL/
 ├── src/
-│   ├── llm_client.py        # OpenAI-compatible wrapper cho LM Studio (timeout, retry)
-│   ├── prompts.py           # SYSTEM_PROMPT (5 loại + 3 assertions + rules A-F) + few-shot loader + schema
-│   ├── rxnorm_rag.py        # RxNormRetriever: exact → normalize → fuzzy → NIH API live
-│   ├── icd_rag.py           # ICDRetriever: Translator VN→EN + lookup exact/fuzzy/NIH API + prefix strip
-│   ├── postprocess.py       # validate_positions + dedupe + assemble_record + drug-cho split
-│   └── inference.py         # Main loop với health-check + adaptive few-shot budget
+│   ├── llm_client.py       # OpenAI-compatible client (timeout, retry, JSON parser)
+│   ├── prompts.py          # SYSTEM_PROMPT (XML-wrapped) + few-shot loader
+│   ├── icd_rag.py          # Translator + ICD10HybridSearch (vector + BM25)
+│   ├── rxnorm_rag.py       # RxNorm lookup + NIH API
+│   ├── postprocess.py      # Position auto-fix, LLM rescan, dedupe
+│   └── inference.py        # Main driver — orchestrate pipeline
 │
 ├── scripts/
-│   ├── download_rxnorm.py   # Bulk tải RxNorm qua /drugs.json?name=
-│   ├── build_vn_dict.py     # Build RxNorm index từ JSON seed
-│   ├── build_icd_dict.py    # Build ICD-10 index từ JSONL seed
-│   ├── test_inference.py    # Smoke test trên ví dụ BTC
-│   └── validate_outputs.py  # Schema check cho output/
+│   ├── build_icd_embeddings.py  # Generate icd10_embeddings.npy (BGE-M3)
+│   ├── test_inference.py        # Smoke test 1 record
+│   └── validate_outputs.py      # Schema validation
 │
 ├── data/
-│   ├── examples.jsonl       # 22 few-shot examples (đa dạng 5 loại + 3 assertions)
-│   ├── rxnorm_seed.jsonl    # 11 thuốc từ đề bài (seed RxNorm)
-│   ├── rxnorm_index.json    # Built (22 keys, 11 names)
-│   ├── icd_seed.jsonl       # 27 ICD-10 phổ biến + VN alias
-│   ├── icd_index.json       # Built (27 entries)
-│   ├── translation_cache.json    # Auto-generated: VN→EN cache
-│   ├── icd_remote_cache.json     # Auto-generated: NIH ICD remote cache
-│   └── rxnorm_api_cache.json     # Auto-generated: NIH RxNorm remote cache
+│   ├── icd10.jsonl              # 71,705 ICD-10 codes (full)
+│   ├── icd10_embeddings.npy     # BGE-M3 matrix ~280 MB (build 1 lần)
+│   ├── icd10_bm25_tokens.jsonl.gz  # BM25 token cache ~1 MB (build 1 lần)
+│   ├── examples.jsonl           # 32 few-shot examples (verified positions)
+│   ├── rxnorm_index.json        # Local RxNorm exact-match dict
+│   ├── translation_cache.json   # VN→EN translation cache
+│   └── icd_remote_cache.json    # NIH ICD API cache
 │
-├── input/                   # 1.txt .. 100.txt (bắt buộc)
-├── output/                  # 1.json .. 100.json (kết quả inference)
-├── predictions.log          # Realtime log, ghi đè mỗi lần chạy
-├── optimize_lm_studio.md    # Hướng dẫn tối ưu LM Studio
-├── requirements.txt
-└── README.md
+├── requirements.txt             # openai, rapidfuzz, sentence-transformers, rank-bm25, ...
+└── README.md                    # File này
 ```
-
-### Cleanup đã làm
-
-- ❌ Không còn `chat_json`, `_build_messages` (chỉ `_extract_json`)
-- ❌ Không còn `build_repair_prompt` (retry cùng prompt)
-- ❌ Không còn `embed_helper.py` (NIH API đủ dùng)
 
 ---
 
-## Cài đặt
+## 🛠️ Cài đặt chi tiết
 
-### Bước 1 — Python dependencies
+### Bước 1: Python venv
 
-```powershell
-cd F:\AI_VIETTEL
-pip install -r requirements.txt
+```bash
+# Linux / macOS / Git Bash
+uv venv && source .venv/bin/activate
+uv pip install -r requirements.txt
+
+# Windows PowerShell
+uv venv
+uv pip install -r requirements.txt
 ```
 
-`requirements.txt` gồm: `openai`, `rapidfuzz`, `sentence-transformers`, `numpy`, `jsonschema`, `requests`, `tqdm`.
+### Bước 2: Ollama + Model
 
-### Bước 2 — LM Studio + Model (HOẶC Ollama — chọn 1)
+```bash
+# Linux
+curl -fsSL https://ollama.com/install.sh | sh
 
-**Option A — LM Studio** (GUI, dễ dùng, nhiều model):
+# macOS: brew install ollama
+# Windows: tải từ https://ollama.com/download
 
-1. Mở LM Studio → tải **`qwen2.5-7b-instruct`** (Q4_K_M ~4.7GB) HOẶC **`qwen3.5-9b`** (Q4_K_M ~5.5GB)
-2. **Settings → Inference**:
-   - **Context Length**: `4096` (an toàn, mặc định) HOẶC `8192` (nếu GPU ≥ 8GB)
-   - **GPU Offload**: Max
-   - **Flash Attention**: ON (RTX 40 series)
-3. **Developer → Start Server** (port `1234`)
-
-**Option B — Ollama** (CLI, ít tốn RAM, chạy nền ổn định):
-
-```powershell
-# Cài Ollama: https://ollama.com/download (Windows installer)
-# Sau khi cài, mở PowerShell:
-ollama pull qwen2.5:7b-instruct-q4_K_M
-ollama serve                          # chạy server port 11434
+# Pull model (chọn 1)
+ollama pull qwen2.5:7b          # Default — nhanh, chất lượng OK
+ollama pull gemma2:9b           # Tốt hơn cho JSON output (Recommend)
+ollama pull qwen2.5:14b         # Mạnh nhưng cần 16GB VRAM
 ```
 
-Để dùng Ollama thay vì LM Studio:
-
-```powershell
-$env:OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
-$env:OLLAMA_MODEL = "qwen2.5:7b-instruct-q4_K_M"
-python -m src.inference --input input --output output
+Kiểm tra:
+```bash
+ollama list                     # Models đã pull
+ollama serve                    # Khởi server (default port 11434)
 ```
 
-**Dùng cả hai cùng lúc** (chia tải): bật LM Studio trên một máy, Ollama trên máy khác, trỏ CLI:
-
-```powershell
-python -m src.inference --base-url http://192.168.x.x:1234/v1 ...
-```
-
-### Bước 3 — Verify server
-
-LM Studio (port 1234):
-
-```powershell
-curl http://127.0.0.1:1234/v1/models
-```
-
-Ollama (port 11434):
-
-```powershell
+**Model test nhanh**:
+```bash
 curl http://127.0.0.1:11434/v1/models
+# → {"data": [{"id": "qwen2.5:7b", ...}]}
 ```
 
-Cả hai đều phải trả JSON với tên model. Pipeline tự auto-detect qua biến env.
+### Bước 3: Generate ICD-10 Embeddings
 
-### Bước 3 — Chuẩn bị data
+Cần GPU để nhanh (~5 phút). Nếu chỉ có CPU, chạy qua đêm:
 
-Indices đã sẵn sàng trong `data/`:
-
-- `rxnorm_index.json` — 11 thuốc từ đề bài (22 exact keys)
-- `icd_index.json` — 27 ICD-10 phổ biến + VN alias
-
-Nếu muốn mở rộng dictionary (tùy chọn):
-
-```powershell
-python scripts/download_rxnorm.py --out data/rxnorm_raw.json
-python scripts/build_vn_dict.py --dump data/rxnorm_raw.json
+```bash
+uv run python scripts/build_icd_embeddings.py
+# Output: data/icd10_embeddings.npy (~280 MB)
 ```
+
+**Trên Colab (khuyên dùng nếu GPU yếu)**:
+
+```python
+# Trong Colab cell
+!pip install sentence-transformers numpy tqdm
+from google.colab import files
+uploaded = files.upload()  # Upload icd10.jsonl
+
+import json, time, numpy as np
+from sentence_transformers import SentenceTransformer
+
+descs, codes = [], []
+with open("icd10.jsonl", encoding="utf-8") as f:
+    for line in f:
+        row = json.loads(line)
+        if row.get("code") and row.get("desc_en"):
+            codes.append(row["code"])
+            descs.append(row["desc_en"])
+
+model = SentenceTransformer("BAAI/bge-m3", device="cuda")
+emb = model.encode(descs, batch_size=256, show_progress_bar=True,
+                   normalize_embeddings=True, convert_to_numpy=True)
+np.save("icd10_embeddings.npy", emb)
+files.download("icd10_embeddings.npy")  # Tải về
+```
+
+Sau đó copy file về `data/icd10_embeddings.npy`.
 
 ---
 
-## Chạy inference
+## 🚀 Chạy Pipeline
 
-### Bước 1 — Đặt input vào `input/`
+### 1. Smoke test (1 record)
 
-Mỗi file `input/N.txt` là 1 văn bản lâm sàng. Lên đến 100 file.
+```bash
+$env:OLLAMA_MODEL = "qwen2.5:7b"   # PowerShell
+export OLLAMA_MODEL=qwen2.5:7b     # bash
 
-### Bước 2 — Smoke test
-
-```powershell
-cd F:\AI_VIETTEL
-python scripts/test_inference.py --out output/smoke_test.json
+uv run scripts/test_inference.py --out output/smoke_test.json
 ```
 
-→ Đảm bảo LM Studio server đang chạy với `qwen2.5-7b-instruct` trước.
+Expected: 1 file `output/smoke_test.json` chứa entities + ICD codes + RxNorm candidates.
 
-### Bước 3 — Inference đầy đủ
+### 2. Inference toàn bộ data
 
-```powershell
-python -m src.inference `
-    --input input `
-    --output output `
+Đặt file bệnh án vào `data/input/` (đặt tên `1.txt`, `2.txt`, ... hoặc `1.json` với field `"text"`):
+
+```bash
+uv run python -m src.inference `
+    --input data/input `
+    --output output/ `
     --workers 1 `
-    --target-ctx 4096 `
+    --target-ctx 8192 `
     --max-few-shot 10
 ```
 
-**Flags chi tiết:**
+Tham số quan trọng:
+- `--workers 1` — Ollama thường chỉ serve 1 request tại 1 thời điểm, parallel không giúp được.
+- `--target-ctx 8192` — context window (qwen2.5:7b default 4096, cần set 8192 để fit few-shot).
+- `--max-few-shot 10` — giới hạn số few-shot example (auto-budget theo context).
 
-| Flag               | Mặc định         | Mô tả                                               |
-| ------------------ | ------------------- | ----------------------------------------------------- |
-| `--input`        | `data/input`      | Thư mục chứa`N.txt`                              |
-| `--output`       | `output`          | Thư mục ghi`N.json`                               |
-| `--workers`      | `1`               | Số worker song song (LM Studio 1 request/lần)       |
-| `--target-ctx`   | `4096`            | Context Length LM Studio (adaptive cap few-shot)      |
-| `--max-few-shot` | `10`              | Số few-shot examples TỐI ĐA (auto-cap theo budget) |
-| `--limit`        | `0`               | Giới hạn số record (0 = hết)                      |
-| `--log-file`     | `predictions.log` | Log realtime                                          |
-
-### Bước 4 — Validate
-
-```powershell
-python scripts/validate_outputs.py --input output
+Đổi model qua env hoặc CLI:
+```bash
+$env:OLLAMA_MODEL = "gemma2:9b"   # switch model
+uv run python -m src.inference --input data/input --output output/ --model gemma2:9b
 ```
 
-Output mẫu:
+### 3. Validate schema
 
-```
-✅ 1.json: drugs=11 symp=8 historical=11
-✅ 2.json: drugs=0 symp=2 historical=0
-...
-Tất cả 100 file hợp lệ.
+```bash
+uv run scripts/validate_outputs.py --input output/
 ```
 
 ---
 
-## Pipeline flow
+## 🔧 Cấu hình Ollama nâng cao
 
-```
-Input: input/N.txt (Vietnamese clinical text)
-        │
-        ▼
-┌────────────────────────────────────────────┐
-│  LLM (qwen2.5-7b @ LM Studio)              │
-│  → JSON spans: text/type/position/assertions│
-│  (LLM được cấm điền candidates)             │
-└────────────┬───────────────────────────────┘
-             │
-             ▼
-┌────────────────────────────────────────────┐
-│  Postprocess                                │
-│  • validate_positions (self-heal)           │
-│  • dedupe (text, type)                      │
-│  • THUỐC            → RxNorm RAG (5 layers) │
-│  • CHẨN_ĐOÁN        → VN→EN + ICD RAG      │
-│  • TÊN_XÉT_NGHIỆM   → không candidates     │
-│  • Split "drug A cho disease B" → 2 entity │
-│  • Strip clinical prefix ("chẩn đoán:")    │
-└────────────┬───────────────────────────────┘
-             │
-             ▼
-     output/N.json ✅
+### Tăng context length
+
+Ollama default context = 2048 (qwen2.5:7b) hoặc 8192 (gemma2:9b). Để tăng:
+
+```bash
+# Tạo Modelfile riêng
+cat > Modelfile <<EOF
+FROM qwen2.5:7b
+PARAMETER num_ctx 8192
+EOF
+
+ollama create qwen2.5:7b-8k -f Modelfile
+$env:OLLAMA_MODEL = "qwen2.5:7b-8k"
 ```
 
-### Adaptive few-shot budget
+### GPU layers (nếu GPU yếu)
 
-`inference.py` tự tính số few-shot vừa context:
-
+```bash
+# Chạy chủ yếu trên CPU, chỉ 20 layer trên GPU
+cat > Modelfile <<EOF
+FROM qwen2.5:7b
+PARAMETER num_ctx 8192
+PARAMETER num_gpu 20
+EOF
+ollama create qwen2.5:7b-cpu -f Modelfile
 ```
-budget = target_ctx - max_output_tokens - reserve
-remaining = budget - sys_prompt_tokens   # còn cho few-shot + user input
-n_few_shot = min(remaining // 200, max_examples)
+
+### Chạy Ollama trên Colab
+
+```python
+# Colab cell 1: install + serve
+!curl -fsSL https://ollama.com/install.sh | sh
+!ollama pull gemma2:9b
+import subprocess, time
+subprocess.Popen(["nohup", "ollama", "serve"], stdout=open("/tmp/ollama.log", "w"))
+time.sleep(5)  # chờ server boot
+
+# Colab cell 2: set env
+import os
+os.environ["OLLAMA_MODEL"] = "gemma2:9b"
+os.environ["OLLAMA_BASE_URL"] = "http://127.0.0.1:11434/v1"
+
+# Colab cell 3: run inference
+!python -m src.inference --input data/input --output output/ --model gemma2:9b
 ```
-
-Với `target_ctx=4096` + `max_tokens=1024`:
-
-- 1.txt (3K chars) → **1 few-shot**
-- 2.txt (770 chars) → **4 few-shot**
-- 3.txt (4.4K chars) → **0 few-shot** (over budget)
-
-→ Không bao giờ overflow context.
-
-### RxNorm RAG — 5 lớp
-
-1. **Exact match** local seed (sub-second)
-2. **Normalized exact** (bỏ dose form / route / freq, giữ strength)
-3. **Fuzzy match** (WRatio + partial_ratio)
-4. **Live NIH API** `/drugs.json?name=` (filter standalone trước combo, đúng strength)
-
-### ICD-10 RAG — 5 lớp
-
-1. **Exact match** local seed (27 entries)
-2. **Translator VN→EN** (preset 60+ cụm: viết tắt THA/ĐTĐ/CVA, multi-word)
-3. **Fuzzy match** với partial_ratio
-4. **Fuzzy VN text** (khi LLM fail dịch)
-5. **Live NIH API** `/icd10cm/v3/search?sf=name`
 
 ---
 
-## Cấu hình theo phần cứng
+## 🛠 Troubleshooting
 
-| Phần cứng                     | Model             | `--target-ctx` | Workers | Tốc độ ước tính |
-| ------------------------------- | ----------------- | ---------------- | ------- | --------------------- |
-| **RTX 4050 8GB (laptop)** | qwen2.5-7b Q4_K_M | `8192`         | 1       | 30-50s/record         |
-| **RTX 4090 24GB**         | qwen3.5-9b Q4_K_M | `12288`        | 1-2     | 8-15s/record          |
-| **CPU only (8GB RAM)**    | qwen2.5-3b Q4_K_M | `4096`         | 1       | 60-120s/record        |
-| **CPU (16GB+ RAM)**       | qwen2.5-7b Q4_K_M | `6144`         | 1       | 60-180s/record        |
+| Lỗi | Nguyên nhân | Cách khắc phục |
+|---|---|---|
+| `Connection refused` ở `127.0.0.1:11434` | Ollama chưa chạy | `ollama serve` trong terminal khác |
+| `Model 'qwen2.5:7b' not found` | Chưa pull model | `ollama pull qwen2.5:7b` |
+| Output `[]` rỗng | Ollama trả JSON sai format / timeout | Xem `predictions.log`. Tăng timeout: `OLLAMA_TIMEOUT=300` env |
+| LLM chậm (>2 phút/record) | Chưa tận dụng GPU | Set `num_gpu` trong Modelfile |
+| `FileNotFoundError: icd10_embeddings.npy` | Chưa build embedding | `uv run python scripts/build_icd_embeddings.py` |
+| Lỗi font tiếng Việt trên Windows Terminal | CMD/PowerShell mặc định non-UTF8 | `$env:PYTHONIOENCODING = "utf-8"` trước khi chạy |
+| ICD lookup trả code irrelevant | Hybrid search chưa bật | Verify trong code: `use_hybrid=True` (default) |
+| Drug candidates có parenthetical `(uống)` bị mất | VN paren chưa strip | Đã fix: `_strip_paren_keep_dose()` trong `src/rxnorm_rag.py` |
+| ECG findings → 0 ICD candidates | NER phân loại sai | Đã fix: SYSTEM_PROMPT có rule + few-shot examples #5, #20, #26-28, #31 |
+| Few-shot overflow context | target_ctx quá nhỏ | Tăng `--target-ctx 8192` hoặc giảm `--max-few-shot` |
 
-Bắt đầu với `--target-ctx 4096`. Nếu GPU ≥ 8GB → tăng lên `8192` để có nhiều few-shot diversity.
+### Verify Ollama đang chạy
 
----
+```bash
+# Health check
+curl http://127.0.0.1:11434/
 
-## Đóng gói submission
-
-```powershell
-Compress-Archive -Path output,src,scripts,data,requirements.txt,README.md `
-    -DestinationPath output_bundle.zip -Force
+# List models
+curl http://127.0.0.1:11434/v1/models
 ```
 
-**BTC yêu cầu:**
+### Debug inference
 
-- `output/1.json .. 100.json`
-- Source code (`src/`, `scripts/`)
-- Data (giữ index files, bỏ `rxnorm_raw.json` nếu > 50MB)
-- Model weights → `models/README.txt` với link tải `qwen2.5-7b-instruct` GGUF
-- README này
-
----
-
-## Khắc phục sự cố
-
-| Triệu chứng                             | Cách xử lý                                             |
-| ----------------------------------------- | --------------------------------------------------------- |
-| `Connection refused 1234`               | Mở LM Studio → Developer → Start Server                |
-| `Request timed out` 6 phút mỗi record | Giảm`LLMConfig.timeout` còn `180`                   |
-| `Unterminated string` khi parse JSON    | Tăng`LLMConfig.max_tokens` lên `2048`               |
-| Output trắng`[]` cho mọi record       | Kiểm tra model đã load đúng chưa, restart LM Studio |
-| Output thiếu`candidates`               | Clear`data/rxnorm_api_cache.json` rồi chạy lại       |
-| Inference chậm (>10 phút/record)        | Giảm`max_tokens` hoặc đổi model nhỏ hơn           |
-| Context window overflow                   | Giảm`--max-few-shot` xuống `5`                      |
-| LLM trả văn bản không phải JSON      | `--max_tokens` đủ lớn để chứa entity list         |
+```bash
+# Logs sẽ ghi ra predictions.log + stdout
+$env:PYTHONIOENCODING = "utf-8"
+uv run python -m src.inference --input data/input --output output/ --limit 3 2>&1 | Tee-Object output/run.log
+```
 
 ---
 
-## Tài liệu kỹ thuật
+## 📦 Data setup (nếu thiếu file)
 
-- [`optimize_lm_studio.md`](optimize_lm_studio.md) — Tối ưu LM Studio theo GPU
-- [`src/prompts.py`](src/prompts.py) — SYSTEM_PROMPT đầy đủ 5 phần + 3 assertions + rules A-F
-- [`data/examples.jsonl`](data/examples.jsonl) — 22 few-shot examples
+```bash
+# Khôi phục data files (translation_cache, ICD index, etc.)
+git checkout HEAD -- data/
 
-## Tham khảo
+# Generate ICD-10 embeddings (1 lần, ~5 phút GPU)
+uv run python scripts/build_icd_embeddings.py
 
-- LM Studio: [https://lmstudio.ai/](https://lmstudio.ai/)
-- Qwen2.5: [https://huggingface.co/Qwen](https://huggingface.co/Qwen)
-- NIH RxNorm REST: [https://rxnav.nlm.nih.gov/InteractionAPIs.html](https://rxnav.nlm.nih.gov/InteractionAPIs.html)
-- NIH Clinical Tables: [https://clinicaltables.nlm.nih.gov/apidoc/icd10cm/v3/doc.html](https://clinicaltables.nlm.nih.gov/apidoc/icd10cm/v3/doc.html)
+# (Optional) Download RxNorm raw data
+uv run python scripts/download_rxnorm.py   # → data/rxnorm_raw.json
+uv run python scripts/build_vn_dict.py     # → data/vn_drug_names.csv
+
+# Verify
+ls data/
+# Expect:
+#   icd10.jsonl                          (71k codes)
+#   icd10_embeddings.npy                 (~280 MB, BGE-M3 matrix)
+#   icd10_bm25_tokens.jsonl.gz           (~1 MB, BM25 token cache)
+#   examples.jsonl                       (32 few-shot examples)
+#   translation_cache.json, icd_*.json   (auto-built on first inference)
+```
+
+---
+
+## 🌐 Kiến trúc chi tiết
+
+### Hybrid Search (Vector + BM25)
+
+Để giải quyết vấn đề vector "ảo" giữa các code cùng concept (vd `Paracetamol 500mg` vs `Paracetamol 250mg` có cosine > 0.95 nhưng khác mã RxNorm), pipeline dùng công thức:
+
+```
+combined_score = α · cosine_similarity + β · bm25_normalized
+                 (α = 0.6, β = 0.4 mặc định)
+```
+
+- **Vector**: BAAI/bge-m3 (đa ngôn ngữ VN/EN), 71k code × 1024-dim, normalized L2.
+- **BM25**: rank_bm25 trên multi-field text (desc_en × 2 + desc_vi + code), cache gzip ~1 MB.
+
+Xem [src/icd_rag.py](src/icd_rag.py) — class `ICD10HybridSearch`.
+
+### Prompt Engineering (3 phases)
+
+| Phase | Nội dung |
+|---|---|
+| 1 | XML structure: wrap SYSTEM_PROMPT thành `<role>`, `<instructions>`, `<workflow>`, `<entity_types>`, ... |
+| 2 | Few-shot: 32 examples trong `data/examples.jsonl` (đã verify positions 100% đúng) |
+| 3 | Positive framing: refactor rules "BỎ lifestyle" → "TEXT ENTITY = TÊN CỤ THỂ" |
+
+### Token budget
+
+| target_ctx | max_tokens | budget cho few-shot | estimated examples |
+|---|---|---|---|
+| 4096 | 2048 | -2108 | 0 ❌ |
+| 8192 | 2048 | 1932 | ~9 |
+| 16384 | 2048 | 10132 | ~10 (capped) |
+
+→ Với gemma2:9b (context 8192 default), fit ~9 few-shot examples.
+
+---
+
+## ✅ Verify full setup
+
+```bash
+# 1. Smoke test
+uv run scripts/test_inference.py --out output/smoke_test.json
+
+# 2. Validate schema
+uv run scripts/validate_outputs.py --input output/
+
+# 3. Run trên 5 records
+uv run python -m src.inference --input data/input --output output_test --limit 5
+
+# 4. Diff vs baseline (nếu có)
+```
+
+Nếu tất cả pass → setup OK. Chạy full pipeline:
+
+```bash
+uv run python -m src.inference --input data/input --output output/ --target-ctx 8192
+```
+
+---
+
+## 📜 License & References
+
+- ICD-10 data: từ [kamillamagna/ICD-10-CSV](https://github.com/kamillamagna/ICD-10-CSV) (CC0 public domain).
+- BGE-M3 embedding: [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3) (MIT).
+- Ollama: [ollama.com](https://ollama.com/) (MIT).
+- RxNorm: NIH NLM [RxNav REST API](https://rxnav.nlm.nih.gov/RxNormAPIs.html).

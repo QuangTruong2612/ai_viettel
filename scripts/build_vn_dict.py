@@ -111,7 +111,9 @@ def export_vn_csv(idx: RxNormIndex, path: Path) -> None:
         for name, rxcui in zip(idx.names, idx.rxcuis, strict=True):
             # Tìm alias VN nếu có
             token = name.split()[0].lower().strip(",.")
-            vn_candidates = [k for k in VN_TRANSLITERATIONS if VN_TRANSLITERATIONS[k] == token]
+            vn_candidates = [
+                k for k in VN_TRANSLITERATIONS if VN_TRANSLITERATIONS[k] == token
+            ]
             alias = "|".join(vn_candidates) if vn_candidates else ""
             key = f"{name}|{rxcui}"
             if key in seen:
@@ -129,7 +131,9 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("data/rxnorm_raw.json"),
         help="JSON dump từ download_rxnorm.py",
     )
-    parser.add_argument("--out-index", type=Path, default=Path("data/rxnorm_index.json"))
+    parser.add_argument(
+        "--out-index", type=Path, default=Path("data/rxnorm_index.json")
+    )
     parser.add_argument("--out-csv", type=Path, default=Path("data/vn_drug_names.csv"))
     args = parser.parse_args(argv)
 
