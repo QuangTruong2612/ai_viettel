@@ -7,33 +7,48 @@ Hỗ trợ:
 - concurrency thấp (4 parallel — LM Studio thường chỉ 1 worker thực sự).
 - retry per-record.
 - log ra file để debug.
+
+Cách chạy:
+    # Khuyến nghị (từ project root):
+    python -m src.inference --input data/input --output output --target-ctx 8192
+
+    # Hoặc trực tiếp (script tự thêm src/ vào sys.path):
+    python src/inference.py --input data/input --output output --target-ctx 8192
 """
 
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Đảm bảo có thể chạy trực tiếp `python src/inference.py` (không chỉ `python -m src.inference`)
+# bằng cách thêm thư mục cha của src/ vào sys.path.
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 import argparse
 import concurrent.futures as cf
 import json
 import logging
 import re
-import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .llm_client import LLMClient
-from .icd_rag import ICDRetriever, ICD10VectorSearch, Translator
-from .postprocess import (
+from src.llm_client import LLMClient
+from src.icd_rag import ICDRetriever, ICD10VectorSearch, Translator
+from src.postprocess import (
     assemble_record, validate_output, write_output,
     preprocess_input_for_llm,
 )
-from .prompts import (
+from src.prompts import (
     SYSTEM_PROMPT,
     build_user_prompt,
     format_few_shot_messages,
     load_few_shot,
 )
-from .rxnorm_rag import RxNormRetriever
+from src.rxnorm_rag import RxNormRetriever
 
 logger = logging.getLogger(__name__)
 

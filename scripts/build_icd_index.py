@@ -36,8 +36,14 @@ logging.basicConfig(
 logger = logging.getLogger("build_icd_index")
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-# Default: BYT mới nhất. Fallback: ICD10_Data cũ.
-DEFAULT_INPUT = PROJECT_DIR / "data" / "DM_ICD10_19_8_BYT.json"
+# Default: icd10.jsonl mới nhất (WHO ICD-10 2019 VN+EN, 15,732 codes).
+# Fallback: DM_ICD10_19_8_BYT.json (BYT chính thức, 36,689 codes, VN only).
+DEFAULT_INPUT_CANDIDATES = [
+    PROJECT_DIR / "data" / "icd10.jsonl",
+    PROJECT_DIR / "data" / "DM_ICD10_19_8_BYT.json",
+    PROJECT_DIR / "data" / "ICD10_Data.json",
+]
+DEFAULT_INPUT = next((c for c in DEFAULT_INPUT_CANDIDATES if c.exists()), DEFAULT_INPUT_CANDIDATES[0])
 DEFAULT_OUTPUT = PROJECT_DIR / "data" / "icd_index.json"
 
 
@@ -85,25 +91,57 @@ def main() -> int:
     name_to_idx: dict[str, int] = {}
 
     n_total, n_kept, n_stripped = 0, 0, 0
-    with args.input.open("r", encoding="utf-8") as f:
-        data = json.load(f)
+    rows: list[dict] = []
+    suffix = args.input.suffix.lower()
+
+    if suffix == ".json":
+        # BYT hoặc ICD10_Data cũ (JSON array)
+        with args.input.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        rows = data
+    else:
+        # JSONL format (icd10.jsonl mới hoặc cũ)
+        with args.input.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
 
     # Auto-detect format
-    sample = data[0] if data else {}
-    is_byt_format = "Mã" in sample and "Tên bệnh" in sample
-    logger.info(
-        "Detected format: %s",
-        "BYT (DM_ICD10_19_8_BYT.json)" if is_byt_format else "ICD10_Data.json (cũ)",
-    )
+    sample = rows[0] if rows else {}
+    if "Mã" in sample and "Tên bệnh" in sample:
+        is_byt_format = True
+        fmt_label = "BYT (DM_ICD10_19_8_BYT.json)"
+    elif "Mã bệnh" in sample:
+        is_byt_format = False
+        fmt_label = "ICD10_Data.json (cũ)"
+    elif "code" in sample and "desc_vi" in sample:
+        # icd10.jsonl mới (WHO ICD-10 2019 VN+EN)
+        is_who = True
+        is_byt_format = False
+        fmt_label = "WHO ICD-10 2019 (icd10.jsonl, VN+EN)"
+    else:
+        is_who = False
+        is_byt_format = False
+        fmt_label = "icd10.jsonl cũ (EN only)"
+    logger.info("Detected format: %s", fmt_label)
 
-    for row in data:
+    for row in rows:
         n_total += 1
         if is_byt_format:
             code = str(row.get("Mã", "")).strip()
             name = str(row.get("Tên bệnh", "")).strip()
+        elif is_who:
+            # icd10.jsonl mới: prefer desc_vi, fallback desc_en
+            code = str(row.get("code", "")).strip()
+            name = str(row.get("desc_vi", row.get("desc_en", ""))).strip()
         else:
-            code = str(row.get("Mã bệnh", "")).strip()
-            name = str(row.get("Tên bệnh gốc", "")).strip()
+            code = str(row.get("Mã bệnh", row.get("code", ""))).strip()
+            name = str(row.get("Tên bệnh gốc", row.get("desc_en", ""))).strip()
 
         if not (code and name):
             continue

@@ -383,12 +383,14 @@ class ICDRetriever:
     def _load_index(self, path: Optional[Path]) -> ICDIndex:
         path = path or (DATA_DIR / "icd_index.json")
         if not path.exists():
-            # Fallback: build từ DM_ICD10_19_8_BYT.json (BYT chính thức, format mới nhất)
-            seed_path = DATA_DIR / "DM_ICD10_19_8_BYT.json"
-            if not seed_path.exists():
-                # Fallback 2: ICD10_Data.json
-                seed_path = DATA_DIR / "ICD10_Data.json"
-            if seed_path.exists():
+            # Fallback chain: icd10.jsonl mới → BYT → ICD10_Data cũ
+            seed_candidates = [
+                DATA_DIR / "icd10.jsonl",                # WHO 2019 VN+EN (mới nhất)
+                DATA_DIR / "DM_ICD10_19_8_BYT.json",    # BYT chính thức (lớn nhất)
+                DATA_DIR / "ICD10_Data.json",           # cũ
+            ]
+            seed_path = next((c for c in seed_candidates if c.exists()), None)
+            if seed_path:
                 logger.info("icd_index.json không có, build từ %s", seed_path.name)
                 return build_from_seed(seed_path)
             return ICDIndex()
@@ -597,9 +599,12 @@ class ICD10VectorSearch:
         jsonl_path: Optional[Path] = None,
         embeddings_path: Optional[Path] = None,
     ) -> None:
-        # Default: ICD10_Data.json (VN ICD-10, format mới).
-        # Fallback: icd10.jsonl (English ICD-10, format cũ).
-        self._jsonl_path = jsonl_path or (DATA_DIR / "DM_ICD10_19_8_BYT.json")
+        # Default: icd10.jsonl mới nhất (WHO ICD-10 2019 VN+EN, 15,732 entries).
+        # Có cả desc_vi (cho VN queries) và desc_en (cho hybrid EN lookup).
+        # Fallback: DM_ICD10_19_8_BYT.json (BYT chính thức, 36,689 entries, VN only).
+        # Fallback 2: ICD10_Data.json (cũ).
+        # Fallback 3: icd10.jsonl cũ (EN only).
+        self._jsonl_path = jsonl_path or self._pick_default_jsonl()
         self._embeddings_path = embeddings_path or (DATA_DIR / "icd10_embeddings.npy")
 
         self.codes: list[str] = []
@@ -610,22 +615,36 @@ class ICD10VectorSearch:
         self._model = None
         self._loaded = False
 
+    @staticmethod
+    def _pick_default_jsonl() -> Path:
+        """Chọn file JSON/JSONL mới nhất có sẵn (ưu tiên WHO 2019 VN+EN)."""
+        candidates = [
+            DATA_DIR / "icd10.jsonl",                # WHO 2019 VN+EN (mới nhất)
+            DATA_DIR / "DM_ICD10_19_8_BYT.json",    # BYT chính thức (lớn nhất)
+            DATA_DIR / "ICD10_Data.json",           # cũ
+        ]
+        for c in candidates:
+            if c.exists():
+                return c
+        return candidates[0]  # fallback nếu không có file nào
+
     def _ensure_loaded(self) -> None:
-        """Lazy load: đọc DM_ICD10_19_8_BYT.json (BYT chính thức) + load embeddings.
+        """Lazy load: đọc ICD data + load embeddings.
 
-        Schema mặc định (DM_ICD10_19_8_BYT.json, 36,689 entries, tiếng Việt):
-            "Mã": "Z95.8",
-            "Tên bệnh": "Sự có mặt của dụng cụ cấy và mảnh ghép tim và mạch máu khác",
-            "Nhóm bệnh": "Những người có nguy cơ sức khỏe tiềm ẩn ...",
-            "Mô tả": "QĐ 4469/BYT ngày 28/10/2020",
-            "Hiệu lực": "Có"
+        Schema mặc định (icd10.jsonl mới — WHO ICD-10 2019 VN translation, 15,732 entries):
+            "code": "A00",
+            "desc_vi": "Bệnh tả",
+            "desc_en": "Cholera",
+            "source": "...",
+            "version": "WHO ICD-10 2019"
 
-        Một số entries có parenthetical context: "Hen [suyễn]" hoặc
-        "Rối loạn... (Rối loạn tâm thần)". desc_vi được build = "Tên bệnh | Nhóm bệnh".
+        Có cả desc_vi (cho VN queries qua BGE-M3 multilingual) và desc_en
+        (cho hybrid search chính xác theo chuẩn WHO).
 
-        Hỗ trợ fallback:
-        - ICD10_Data.json (cũ: "Mã bệnh" + "Tên bệnh gốc" + "Tên nhóm" + "Tên chương")
-        - icd10.jsonl (cũ nhất: "code" + "desc_en"/"desc_vi")
+        Hỗ trợ fallback (auto-detect):
+        - DM_ICD10_19_8_BYT.json (BYT VN, 36,689 entries)
+        - ICD10_Data.json (cũ, 11,384 entries)
+        - icd10.jsonl EN-only (cũ)
         """
         if self._loaded:
             return
@@ -635,34 +654,27 @@ class ICD10VectorSearch:
             self._loaded = True
             return
 
-        # 1. Đọc file JSON để lấy codes/descriptions
-        # Hỗ trợ cả 3 format:
-        # - DM_ICD10_19_8_BYT.json (BYT chính thức, 36k entries)
-        #   {"Mã", "Tên bệnh", "Nhóm bệnh", "Mô tả", ...}
-        # - ICD10_Data.json (cũ, 11k entries)
-        #   {"Mã bệnh", "Tên bệnh gốc", "Tên nhóm", "Tên chương"}
-        # - icd10.jsonl (cũ)
-        #   {code, desc_en, desc_vi}
+        # 1. Đọc file
         t0 = time.time()
         suffix = self._jsonl_path.suffix.lower()
 
         if suffix == ".json":
+            # JSON format (BYT hoặc ICD10_Data cũ)
             try:
                 with self._jsonl_path.open("r", encoding="utf-8") as f:
                     data = json.load(f)
 
-                # Detect format: BYT có "Mã" + "Tên bệnh"; ICD10_Data có "Mã bệnh" + "Tên bệnh gốc"
                 sample = data[0] if data else {}
-                is_byt_format = "Mã" in sample and "Tên bệnh" in sample
+                is_byt = "Mã" in sample and "Tên bệnh" in sample
 
                 for row in data:
-                    if is_byt_format:
+                    if is_byt:
                         code = str(row.get("Mã", "")).strip()
                         name_vi = str(row.get("Tên bệnh", "")).strip()
                         nhom = str(row.get("Nhóm bệnh", "")).strip()
                         mo_ta = str(row.get("Mô tả", "")).strip()
                     else:
-                        # ICD10_Data.json format cũ
+                        # ICD10_Data.json cũ
                         code = str(row.get("Mã bệnh", "")).strip()
                         name_vi = str(row.get("Tên bệnh gốc", "")).strip()
                         nhom = str(row.get("Tên nhóm", "")).strip()
@@ -675,7 +687,6 @@ class ICD10VectorSearch:
                     if nhom and nhom != name_vi:
                         ctx_parts.append(nhom)
                     if mo_ta and mo_ta != name_vi and "QĐ" not in mo_ta:
-                        # Skip noise như "QĐ 4469/BYT ngày 28/10/2020"
                         ctx_parts.append(mo_ta)
                     desc = " | ".join(ctx_parts)
                     self.codes.append(code)
@@ -686,7 +697,7 @@ class ICD10VectorSearch:
                 self._loaded = True
                 return
         else:
-            # Format cũ: icd10.jsonl với {code, desc_en, desc_vi}
+            # JSONL format (icd10.jsonl mới hoặc cũ)
             with self._jsonl_path.open("r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -697,11 +708,24 @@ class ICD10VectorSearch:
                     except json.JSONDecodeError:
                         continue
                     code = str(row.get("code", "")).strip()
-                    desc = str(row.get("desc_vi", row.get("desc_en", ""))).strip()
-                    if code and desc:
-                        self.codes.append(code)
-                        self.descs_raw.append(desc)
-                        self.chapters.append("")
+                    desc_vi = str(row.get("desc_vi", "")).strip()
+                    desc_en = str(row.get("desc_en", "")).strip()
+
+                    if not code:
+                        continue
+                    # Prefer desc_vi cho embedding (VN queries); fallback desc_en
+                    # Nếu có cả 2 thì embed cả 2 để hybrid VN-EN match
+                    if desc_vi and desc_en and desc_vi != desc_en:
+                        desc = f"{desc_vi} | {desc_en}"
+                    elif desc_vi:
+                        desc = desc_vi
+                    elif desc_en:
+                        desc = desc_en
+                    else:
+                        continue
+                    self.codes.append(code)
+                    self.descs_raw.append(desc)
+                    self.chapters.append("")
 
         logger.info(
             "ICD10VectorSearch: Đã nạp %d mã ICD từ %s (%.2fs)",
@@ -782,6 +806,9 @@ class ICD10VectorSearch:
         query_vec = self._model.encode(
             query, normalize_embeddings=True, convert_to_numpy=True
         )  # Shape: (1024,)
+        # Cast về cùng dtype với embeddings (float16 tiết kiệm RAM)
+        if self._embeddings is not None and self._embeddings.dtype != query_vec.dtype:
+            query_vec = query_vec.astype(self._embeddings.dtype)
 
         # 4. Tính Cosine Similarity bằng dot-product (vì vector đã được chuẩn hóa L2)
         scores = np.dot(self._embeddings, query_vec)  # Shape: (71705,)
@@ -890,8 +917,17 @@ class ICD10BM25Index:
         jsonl_path: Optional[Path] = None,
         tokens_cache_path: Optional[Path] = None,
     ) -> None:
-        # Default: ICD10_Data.json (VN ICD-10, format mới).
-        self._jsonl_path = jsonl_path or (DATA_DIR / "DM_ICD10_19_8_BYT.json")
+        # Default: icd10.jsonl (WHO ICD-10 2019 VN+EN, 15,732 entries).
+        # Fallback chain: BYT → ICD10_Data cũ.
+        candidates = [
+            DATA_DIR / "icd10.jsonl",
+            DATA_DIR / "DM_ICD10_19_8_BYT.json",
+            DATA_DIR / "ICD10_Data.json",
+        ]
+        if jsonl_path is not None:
+            self._jsonl_path = jsonl_path
+        else:
+            self._jsonl_path = next((c for c in candidates if c.exists()), candidates[0])
         self._tokens_cache_path = tokens_cache_path or (
             DATA_DIR / "icd10_bm25_tokens.jsonl.gz"
         )
@@ -1233,12 +1269,13 @@ class ICD10HybridSearch:
 def build_from_seed(path: Path, out_index: Optional[Path] = None) -> ICDIndex:
     """Đọc ICD data và build ICDIndex.
 
-    Hỗ trợ 3 format:
-    - JSON BYT (DM_ICD10_19_8_BYT.json): [{"Mã", "Tên bệnh", "Nhóm bệnh", ...}]
+    Hỗ trợ 4 format:
+    - JSONL mới (icd10.jsonl — WHO 2019 VN+EN): [{"code", "desc_vi", "desc_en"}]
+    - JSON BYT (DM_ICD10_19_8_BYT.json): [{"Mã", "Tên bệnh", "Nhóm bệnh"}]
     - JSON cũ (ICD10_Data.json): [{"Mã bệnh", "Tên bệnh gốc", "Tên nhóm"}]
     - JSONL cũ: [{"code", "name_en", "vn_aliases"}]
 
-    Index chứa VN names (cho exact match + fuzzy). Parentheses như
+    Index chứa names (cho exact match + fuzzy). Parentheses như
     "Hen [suyễn]" hoặc "Rối loạn... (modifier)" được GIỮ NGUYÊN trong names
     (cho exact match), nhưng cũng tạo thêm key không có parenthetical.
     """
@@ -1247,9 +1284,7 @@ def build_from_seed(path: Path, out_index: Optional[Path] = None) -> ICDIndex:
     def _strip_parens(name: str) -> str:
         if not name:
             return name
-        # Bỏ [...] ở cuối
         cleaned = _re.sub(r"\s*\[.*?\]\s*$", "", name)
-        # Bỏ (...) ở cuối
         cleaned = _re.sub(r"\s*\(.*?\)\s*$", "", cleaned)
         return cleaned.strip()
 
@@ -1273,14 +1308,13 @@ def build_from_seed(path: Path, out_index: Optional[Path] = None) -> ICDIndex:
                     name = str(row.get("Tên bệnh gốc", "")).strip()
                 if code and name:
                     idx.add(code, name)
-                    # Thêm key sạch (không parenthetical) cho exact match
                     name_clean = _strip_parens(name)
                     if name_clean and name_clean != name and name_clean.lower() not in idx.exact:
                         idx.exact.setdefault(name_clean.lower(), []).append(code)
         except Exception as exc:
             logger.error("build_from_seed: lỗi đọc %s: %s", path, exc)
     else:
-        # Format cũ (JSONL)
+        # Format JSONL — hỗ trợ cả icd10.jsonl mới (desc_vi+desc_en) và cũ (desc_en)
         with path.open("r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -1291,9 +1325,13 @@ def build_from_seed(path: Path, out_index: Optional[Path] = None) -> ICDIndex:
                 except json.JSONDecodeError:
                     continue
                 code = str(row.get("code", "")).strip()
-                name = str(row.get("name_en", row.get("name", ""))).strip()
+                # Ưu tiên desc_vi cho exact match (VN queries); fallback desc_en
+                name = str(row.get("desc_vi", row.get("desc_en", row.get("name", "")))).strip()
                 if code and name:
                     idx.add(code, name)
+                    name_clean = _strip_parens(name)
+                    if name_clean and name_clean != name and name_clean.lower() not in idx.exact:
+                        idx.exact.setdefault(name_clean.lower(), []).append(code)
 
     if out_index:
         out_index.parent.mkdir(parents=True, exist_ok=True)

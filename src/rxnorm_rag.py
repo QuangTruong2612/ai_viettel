@@ -336,6 +336,9 @@ class RxNormVectorSearch:
                 return []
 
         query_vec = self._model.encode(query, normalize_embeddings=True, convert_to_numpy=True)
+        # Cast về cùng dtype với embeddings (float16 tiết kiệm RAM cho 232k entries)
+        if self._embeddings is not None and self._embeddings.dtype != query_vec.dtype:
+            query_vec = query_vec.astype(self._embeddings.dtype)
         scores = np.dot(self._embeddings, query_vec)
         top_idx = np.argsort(-scores)[:top_k]
 

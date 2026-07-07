@@ -34,7 +34,11 @@ def main() -> int:
                         help="Output .npy embeddings file")
     parser.add_argument("--model", default="BAAI/bge-m3",
                         help="SentenceTransformer model")
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=32,
+                        help="Batch size encoding (giảm nếu OOM, vd 16 cho 8GB VRAM)")
+    parser.add_argument("--precision", choices=["float32", "float16"],
+                        default="float16",
+                        help="Float precision (float16 tiết kiệm 50% RAM, đủ cho cosine)")
     parser.add_argument("--limit", type=int, default=0,
                         help="Limit số rows đọc (0 = tất cả)")
     parser.add_argument("--skip-if-exists", action="store_true",
@@ -56,9 +60,26 @@ def main() -> int:
     from sentence_transformers import SentenceTransformer  # type: ignore
     import numpy as np
 
+    # Detect GPU
+    device = "cpu"
+    try:
+        import torch  # type: ignore
+        if torch.cuda.is_available():
+            device = "cuda"
+            gpu_name = torch.cuda.get_device_name(0)
+            total_mem_gb = torch.cuda.get_device_properties(0).total_mem / 1024**3
+            logger.info("Device: cuda (%s, %.1f GB)", gpu_name, total_mem_gb)
+            # Auto-suggest batch size cho 232k entries
+            if total_mem_gb < 16 and args.batch_size > 32:
+                logger.warning(
+                    "GPU < 16GB với 232k entries → recommend --batch-size 16-32 để tránh OOM"
+                )
+    except ImportError:
+        pass
+
     logger.info("Đang load model %s...", args.model)
     t0 = time.time()
-    model = SentenceTransformer(args.model)
+    model = SentenceTransformer(args.model, device=device)
     logger.info("Model loaded (%.1fs)", time.time() - t0)
 
     logger.info("Đang đọc %s...", args.input.name)
@@ -85,17 +106,37 @@ def main() -> int:
     logger.info("Loaded %d names (%.1fs)", len(names), time.time() - t0)
 
     # 2. Generate embeddings
-    logger.info("Encoding %d names (batch_size=%d)...", len(names), args.batch_size)
+    logger.info("Encoding %d names (batch_size=%d, precision=%s)...",
+                len(names), args.batch_size, args.precision)
     t0 = time.time()
-    embeddings = model.encode(
-        names,
-        batch_size=args.batch_size,
-        show_progress_bar=True,
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-    )
+    try:
+        embeddings = model.encode(
+            names,
+            batch_size=args.batch_size,
+            show_progress_bar=True,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        )
+    except RuntimeError as exc:
+        if "out of memory" in str(exc).lower() and device == "cuda":
+            logger.error(
+                "OOM! 232k entries cần nhiều RAM. Hãy thử:\n"
+                "  --batch-size 16 (hoặc 8 cho 8GB VRAM)\n"
+                "  --precision float16 (đã mặc định)"
+            )
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except ImportError:
+                pass
+        raise
     logger.info("Encoding done: shape=%r, time=%.1fs",
                 embeddings.shape, time.time() - t0)
+
+    # Convert to float16
+    if args.precision == "float16" and embeddings.dtype != np.float16:
+        embeddings = embeddings.astype(np.float16)
+        logger.info("Converted sang float16")
 
     # 3. Save
     args.output.parent.mkdir(parents=True, exist_ok=True)

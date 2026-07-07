@@ -5,9 +5,24 @@ Hàm chính:
 - dedupe_entities(entities): bỏ trùng (cùng text + position).
 - assemble_record(input_text, raw_entities, retriever): build list final có candidates.
 - validate_output(record): kiểm tra cuối cùng.
+
+Cách chạy:
+    # Khuyến nghị (từ project root):
+    python -m src.postprocess
+
+    # Hoặc trực tiếp (script tự thêm project root vào sys.path):
+    python src/postprocess.py
 """
 
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Đảm bảo có thể chạy trực tiếp `python src/postprocess.py`
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 import json
 import logging
@@ -15,8 +30,8 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from .icd_rag import ICDRetriever, build_context_query
-from .rxnorm_rag import RxNormRetriever
+from src.icd_rag import ICDRetriever, build_context_query
+from src.rxnorm_rag import RxNormRetriever
 
 logger = logging.getLogger(__name__)
 

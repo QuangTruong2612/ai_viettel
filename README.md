@@ -9,7 +9,7 @@ Pipeline **trích xuất thực thể y khoa** từ hồ sơ bệnh án tiếng 
 - 🎯 **5 loại entity y khoa**: `THUỐC`, `CHẨN_ĐOÁN`, `TRIỆU_CHỨNG`, `TÊN_XÉT_NGHIỆM`, `KẾT_QUẢ_XÉT_NGHIỆM`
 - 🔍 **NER thông minh theo MỨC ĐỘ ĐẦY ĐỦ**: THUỐC + CHẨN_ĐOÁN giữ nguyên (để lookup candidate chính xác); TRIỆU_CHỨNG minimal (bỏ duration/value)
 - 🎯 **Hybrid RAG**: Vector (BGE-M3) + BM25 keyword + Fuzzy cho cả ICD và RxNorm
-- 🇻🇳 **100% Vietnamese ICD data** (`DM_ICD10_19_8_BYT.json` - 36,689 entries, QĐ 4469/BYT)
+- 🇻🇳 **Vietnamese ICD data** (`icd10.jsonl` - WHO ICD-10 2019 VN translation, 15,732 codes có cả VN+EN)
 - 💊 **RxNorm** lookup VN/EN với BGE-M3 multilingual
 - 🏥 **3 assertions**: `isHistorical`, `isNegated`, `isFamily` (context-aware)
 - 🚀 **Offline hoàn toàn** — không cần NIH/NLM API
@@ -66,11 +66,12 @@ AI_VIETTEL/
 │   └── validate_outputs.py         # Validate output schema
 │
 ├── data/                             # Input data + indexes
-│   ├── DM_ICD10_19_8_BYT.json      # ICD-10 source (36,689 entries VN)
+│   ├── icd10.jsonl                 # ICD-10 source (WHO 2019 VN translation, 15,732 codes VN+EN)
+│   ├── DM_ICD10_19_8_BYT.json      # ICD-10 source (BYT VN official, 36,689 codes, fallback)
 │   ├── rxnorm.jsonl                 # RxNorm source (232k entries EN)
 │   ├── examples.jsonl               # Few-shot examples (33 entries, positions verified)
 │   ├── icd_index.json               # [build] exact match index
-│   ├── icd10_embeddings.npy         # [build] BGE-M3 matrix ~36k x 1024
+│   ├── icd10_embeddings.npy         # [build] BGE-M3 matrix ~15.7k x 1024
 │   ├── icd10_bm25_tokens.jsonl.gz   # [auto-build] BM25 token cache
 │   ├── rxnorm_index.json            # [build] exact match index
 │   ├── rxnorm_embeddings.npy        # [build] BGE-M3 matrix ~232k x 1024
@@ -220,7 +221,7 @@ uv run python scripts/build_icd_index.py
 
 # ICD embeddings (BGE-M3, ~5-10 phút GPU) — REQUIRED cho hybrid search
 uv run python scripts/build_icd_embeddings.py
-# → data/icd10_embeddings.npy (~140 MB)
+# → data/icd10_embeddings.npy (~73 MB với float16)
 
 # RxNorm exact match index (~1s) — REQUIRED cho L1 exact lookup
 uv run python scripts/build_rxnorm_index.py
@@ -228,12 +229,20 @@ uv run python scripts/build_rxnorm_index.py
 
 # RxNorm embeddings (BGE-M3, ~10-30 phút GPU) — REQUIRED cho hybrid search
 uv run python scripts/build_rxnorm_embeddings.py
-# → data/rxnorm_embeddings.npy (~900 MB)
+# → data/rxnorm_embeddings.npy (~464 MB với float16)
 ```
 
-> **Không có GPU?** Có thể chạy trên Google Colab — xem script `build_icd_embeddings.py` (tự detect GPU/CPU).
->
 > **Cả ICD + RxNorm đều có cùng kiến trúc 3 bước**: (1) exact match index, (2) BGE-M3 embeddings, (3) hybrid pipeline kết hợp cả hai.
+
+> **Tối ưu cho GPU yếu (Kaggle T4x2 14.56GB, Colab):**
+>
+> ```bash
+> # Nếu OOM: giảm batch size + dùng float16 (mặc định)
+> uv run python scripts/build_icd_embeddings.py --batch-size 16 --precision float16
+> uv run python scripts/build_rxnorm_embeddings.py --batch-size 16 --precision float16
+> ```
+>
+> `float16` tiết kiệm 50% RAM (928 MB → 464 MB cho 232k × 1024-dim), đủ chính xác cho cosine similarity.
 
 ### 4. Chạy inference
 
