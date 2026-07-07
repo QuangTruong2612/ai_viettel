@@ -1,28 +1,41 @@
-"""RxNorm RAG — tra cứu mã RxNorm cho mỗi thực thể THUỐC.
+"""RxNorm RAG — tra cứu mã RxNorm cho thực thể THUỐC.
 
-Pipeline 3 lớp (sau khi drop NIH API live):
-  L1: Exact tuple match (ingredient, strength) → top-1 rxcui.
-  L2: Combination drug — split strength by " / ", match nếu 1 thành phần khớp.
-  L3: Ingredient-only exact match (không có strength) → top-1 rxcui.
+Kiến trúc giống ICD RAG (semantic + hybrid offline):
 
-Dữ liệu dùng: `data/rxnorm.jsonl` (RxNorm Current Prescribable Content, 46k rows,
-schema {rxcui, ingredient, strength, doseform, ...}). Build index 1 lần qua
-`scripts/build_rxnorm_index.py` → `data/rxnorm_index.json`.
+Pipeline 5 lớp (offline, 100% local):
+  L1: Exact tuple match (ingredient, strength) → top-1 rxcui
+  L2: Hybrid search (BGE-M3 cosine ≥ 0.7 + BM25 keyword) — semantic
+  L3: Fuzzy match (rapidfuzz, partial_ratio) trên name
+  L4: Compound drug — split strength " / ", match 1 thành phần
+  L5: Ingredient-only exact match
 
-Đặc điểm:
-- Return 1 rxcui duy nhất (Jaccard metric yêu cầu đúng 1).
-- Không gọi NIH API → pipeline chạy hoàn toàn offline.
-- Strength normalization: "25mg" == "25 MG" == "25.0 MG" trong index keys.
+Dữ liệu: `data/rxnorm.jsonl` (RxNorm 2026 release, ~232k entries,
+schema {rxcui, name, ingredient, strength, doseform, ...}).
+
+Đặc điểt:
+- Multilingual vector search: BGE-M3 có thể map VN drug text → EN RxNorm entries.
+- Return 1 rxcui duy nhất (theo spec Jaccard).
+- Strength normalization: "25mg" == "25 MG" == "25.0 MG".
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import re
-import unicodedata
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+import numpy as np
+
+try:
+    from rank_bm25 import BM25Okapi  # type: ignore
+    _HAS_BM25 = True
+except ImportError:  # pragma: no cover
+    BM25Okapi = None  # type: ignore
+    _HAS_BM25 = False
 
 logger = logging.getLogger(__name__)
 
@@ -30,29 +43,21 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 
 # ---------------------------------------------------------------------- #
-# Normalization
+# Normalization helpers
 # ---------------------------------------------------------------------- #
 
 _STRENGTH_RE = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|iu|unit|%|meq|mEq)(?:/(mg|mcg|g|ml|iu|unit|%|meq|mEq))?",
+    r"(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|iu|unit|%|meq)(?:/(mg|mcg|g|ml|iu|unit|%|meq|mEq))?",
     re.IGNORECASE,
 )
 
 
 def _normalize_strength(s: str) -> str:
-    """Chuẩn hoá strength string.
-
-    Quy tắc:
-    - Lowercase, strip khoảng trắng giữa số và đơn vị.
-    - Uppercase đơn vị (MG, MG/ML, ...).
-    - Compound: split by " / " trả về list các thành phần đã normalize.
-    """
+    """Chuẩn hoá strength string → dạng "25MG", "25MG/ML"."""
     if not s:
         return ""
     s = s.strip().lower()
-    # Collapse whitespace giữa số và đơn vị
-    s = re.sub(r"(\d+(?:\.\d+)?)\s+(mg|mcg|g|ml|iu|unit|%|meq)", r"\1\2", s,
-               flags=re.IGNORECASE)
+    s = re.sub(r"(\d+(?:\.\d+)?)\s+(mg|mcg|g|ml|iu|unit|%|meq)", r"\1\2", s, flags=re.IGNORECASE)
     return s.upper()
 
 
@@ -62,20 +67,18 @@ def _normalize_ingredient(s: str) -> str:
 
 
 def _strip_route_freq(text: str) -> str:
-    """Loại bỏ VN parentheticals + route + frequency tokens.
+    """Loại bỏ route/freq/doseform tokens khỏi VN/EN drug text.
 
     VD: 'metoprolol 25 mg (uống hôm nay) po bid' → 'metoprolol 25 mg'.
     """
-    # Drop VN parentheticals (...): không drop nếu trong ngoặc có số + đơn vị liều
     def _repl(m: "re.Match[str]") -> str:
         content = m.group(1).strip()
         if _STRENGTH_RE.search(content):
-            return m.group(0)  # giữ nguyên
+            return m.group(0)  # giữ parenthetical có strength
         return " "
 
     text = re.sub(r"\(([^)]*)\)", _repl, text)
 
-    # Drop các token route/freq thường gặp
     skip_tokens = {
         "po", "iv", "im", "sc", "sl", "pr", "topical", "inhale", "oral",
         "tablet", "tab", "capsule", "cap", "solution", "suspension",
@@ -85,59 +88,43 @@ def _strip_route_freq(text: str) -> str:
         "daily", "bid", "tid", "qid", "qhs", "qam", "qpm",
         "q6h", "q8h", "q12h", "prn", "qd", "qod", "hs", "ac", "pc",
         "uống", "tiêm", "tiêng", "viên", "ống", "gói", "lần", "ngày",
-        "giờ", "tuần", "tháng", "sáng", "trưa", "chiều", "tối", "tối",
+        "giờ", "tuần", "tháng", "sáng", "trưa", "chiều", "tối",
     }
-    # Tokenize (giữ cả số liều làm 1 token "25mg")
-    # 1. Ghép số + đơn vị: "25 mg" → "25mg"; compound "100 mg/ml" → "100mg/ml"
+
     def _compact(m: "re.Match[str]") -> str:
-        # group 3 (optional /unit) — preserve compound strengths
         suffix = f"/{m.group(3).lower()}" if m.group(3) else ""
         return f"{m.group(1)}{m.group(2).lower()}{suffix}"
+
     text = _STRENGTH_RE.sub(_compact, text)
-    # 2. Split, filter, join. KHÔNG split trên "/" để giữ compound unit "100mg/ml".
     tokens = [t for t in re.split(r"[^a-z0-9/]+", text.lower()) if t]
     return " ".join(t for t in tokens if t not in skip_tokens)
 
 
 def _parse_drug(text: str) -> tuple[str, str]:
-    """Parse chuỗi thuốc → (ingredient, strength).
-
-    Quy tắc:
-    1. Strip route/freq → 'metoprolol 25 mg'.
-    2. Tìm tất cả strength tokens (vd '25mg', '12.5mg/ml').
-    3. Tất cả text còn lại trước strength → ingredient.
-    4. Nếu có nhiều strength → join by ' / ' (compound).
+    """Parse chuỗi thuốc → (ingredient_norm, strength_norm).
 
     Returns:
-        (ingredient_norm, strength_norm).
+        (ingredient_norm, strength_norm)
     """
     text = _strip_route_freq(text)
     if not text:
         return ("", "")
 
-    # Ghép strength: lấy tất cả số+đơn vị theo thứ tự xuất hiện
     matches = list(_STRENGTH_RE.finditer(text))
     if not matches:
-        # Không có strength → whole text = ingredient
         ingredient = re.sub(r"\s+", " ", text.lower()).strip()
         return (ingredient, "")
 
-    # Lấy tất cả strength strings theo thứ tự, trùng lặp giữ
     strengths = [m.group(0) for m in matches]
-
-    # Loại bỏ các token số+đơn vị ra khỏi text để lấy ingredient
     remaining = text
     for s in strengths:
-        # Xoá cả match exact, kể cả viết thường/viết hoa
         remaining = re.sub(re.escape(s), " ", remaining, flags=re.IGNORECASE)
 
-    # Ingredient = các từ còn lại (chữ cái + dấu nối)
     ingredient_tokens = re.findall(r"[a-z][a-z0-9-]+", remaining.lower())
     ingredient = " ".join(ingredient_tokens).strip()
     if not ingredient:
         return ("", "")
 
-    # Normalize strengths (uppercase, no space)
     norm_strengths = [_normalize_strength(s) for s in strengths]
     norm_strengths = [s for s in norm_strengths if s]
 
@@ -149,19 +136,19 @@ def _parse_drug(text: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------- #
-# Index data structures
+# Index: exact match (ingredient, strength) — fast path
 # ---------------------------------------------------------------------- #
 
 
 @dataclass
 class RxNormIndex:
-    """Index tra cứu RxNorm từ data structured (ingredient, strength).
+    """Index exact match (ingredient, strength) → list[rxcui].
 
     Attributes:
         by_ingredient_strength: dict[(ing_norm, str_norm), list[rxcui]]
-        by_ingredient: dict[ing_norm, list[rxcui]]  (chỉ ingredient)
-        names: list tên gốc (parallel với rxcuis) — cho fuzzy
-        rxcuis: list rxcui tương ứng
+        by_ingredient: dict[ing_norm, list[rxcui]]
+        names: list tên gốc — cho fuzzy
+        rxcuis: parallel với names
         name_to_idx: name -> idx
     """
 
@@ -173,23 +160,18 @@ class RxNormIndex:
 
     @classmethod
     def from_dict(cls, data: dict) -> "RxNormIndex":
-        # Parse tuple keys từ "ingredient|strength" string format
         bis_raw = data.get("by_ingredient_strength", {})
         bis: dict[tuple[str, str], list[str]] = {}
         if isinstance(bis_raw, dict):
-            # Old format: tuple keys (already parsed). New format: "ing|str" strings.
             for k, v in bis_raw.items():
                 if isinstance(k, (list, tuple)):
                     bis[(k[0], k[1])] = v
                 elif isinstance(k, str) and "|" in k:
                     parts = k.split("|", 1)
                     bis[(parts[0], parts[1])] = v
-        by_ingredient = data.get("by_ingredient", {})
-        if not isinstance(by_ingredient, dict):
-            by_ingredient = {}
         idx = cls(
             by_ingredient_strength=bis,
-            by_ingredient=by_ingredient,
+            by_ingredient=data.get("by_ingredient", {}),
             names=data.get("names", []),
             rxcuis=data.get("rxcuis", []),
         )
@@ -205,9 +187,7 @@ class RxNormIndex:
             "rxcuis": self.rxcuis,
         }
 
-    def add(self, rxcui: str, ingredient: str, strength: str,
-            name: str = "") -> None:
-        """Thêm 1 entry vào index."""
+    def add(self, rxcui: str, ingredient: str, strength: str, name: str = "") -> None:
         rxcui = str(rxcui).strip()
         ing_norm = _normalize_ingredient(ingredient)
         str_norm = _normalize_strength(strength)
@@ -227,24 +207,18 @@ class RxNormIndex:
     # ------------------------------------------------------------------ #
 
     def lookup(self, drug_text: str) -> list[str]:
-        """Tra cứu RxNorm cho một chuỗi thuốc. Trả top-1 rxcui (chuỗi rỗng nếu không match).
-
-        Pipeline:
-          L1: Exact (ingredient_norm, strength_norm) tuple match.
-          L2: Compound — match 1 trong các strength con.
-          L3: Ingredient-only exact match.
-        """
+        """Pipeline L1 + L4 + L5 (fast exact path)."""
         ing, strength = _parse_drug(drug_text)
         if not ing:
             return []
 
-        # L1: Exact (ingredient, strength) tuple match
+        # L1: Exact (ingredient, strength) tuple
         if strength:
             cands = self.by_ingredient_strength.get((ing, strength), [])
             if cands:
-                return [cands[0]]  # top-1
+                return [cands[0]]
 
-            # L2: Compound — strength có " / "
+            # L4: Compound split
             if " / " in strength:
                 for sub in strength.split(" / "):
                     sub = sub.strip()
@@ -254,11 +228,456 @@ class RxNormIndex:
                     if cands:
                         return [cands[0]]
 
-        # L3: Ingredient-only exact match
+        # L5: Ingredient-only
         cands = self.by_ingredient.get(ing, [])
         if cands:
             return [cands[0]]
+        return []
 
+
+# ---------------------------------------------------------------------- #
+# Vector Search — BGE-M3 cosine trên name field
+# ---------------------------------------------------------------------- #
+
+
+class RxNormVectorSearch:
+    """Tra cứu RxNorm bằng vector nhúng cosine.
+
+    Embed field `name` (English: "metoprolol 25 MG Oral Tablet") bằng BGE-M3.
+    BGE-M3 multilingual → có thể query bằng VN drug text (vd "metoprolol 25mg po bid")
+    và vẫn match sang EN entries.
+    """
+
+    def __init__(
+        self,
+        jsonl_path: Optional[Path] = None,
+        embeddings_path: Optional[Path] = None,
+    ) -> None:
+        self._jsonl_path = jsonl_path or (DATA_DIR / "rxnorm.jsonl")
+        self._embeddings_path = embeddings_path or (DATA_DIR / "rxnorm_embeddings.npy")
+
+        self.codes: list[str] = []
+        self.names: list[str] = []
+        self._embeddings: Optional[np.ndarray] = None
+        self._model = None
+        self._loaded = False
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        if not self._jsonl_path.exists():
+            logger.warning("RxNormVectorSearch: không thấy %s", self._jsonl_path)
+            self._loaded = True
+            return
+
+        t0 = time.time()
+        with self._jsonl_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rxcui = str(row.get("rxcui", "")).strip()
+                name = str(row.get("name", "")).strip()
+                if rxcui and name:
+                    self.codes.append(rxcui)
+                    self.names.append(name)
+
+        logger.info(
+            "RxNormVectorSearch: loaded %d entries (%.2fs)",
+            len(self.codes), time.time() - t0,
+        )
+
+        # Load embeddings if exists
+        if self._embeddings_path.exists():
+            try:
+                self._embeddings = np.load(self._embeddings_path)
+                logger.info(
+                    "RxNormVectorSearch: loaded embeddings %s (shape: %r)",
+                    self._embeddings_path.name, self._embeddings.shape,
+                )
+            except Exception as exc:
+                logger.warning("Embeddings load fail (%s)", exc)
+
+        self._loaded = True
+
+    def search(self, query: str, *, top_k: int = 10, threshold: float = 0.4) -> list[str]:
+        """Cosine search trên top_k. Filter ≥ threshold."""
+        self._ensure_loaded()
+        if not query or not self.codes:
+            return []
+
+        if self._model is None:
+            try:
+                from sentence_transformers import SentenceTransformer  # type: ignore
+                self._model = SentenceTransformer("BAAI/bge-m3")
+                logger.info("RxNormVectorSearch: loaded BGE-M3")
+            except ImportError:
+                logger.error("Sentence-transformers chưa cài!")
+                return []
+
+        if self._embeddings is None:
+            logger.info("Auto-generating RxNorm embeddings (chưa có .npy)...")
+            try:
+                self._embeddings = self._model.encode(
+                    self.names,
+                    batch_size=128,
+                    show_progress_bar=False,
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                )
+                np.save(self._embeddings_path, self._embeddings)
+                logger.info("Saved RxNorm embeddings → %s", self._embeddings_path.name)
+            except Exception as exc:
+                logger.error("Lỗi sinh embeddings: %s", exc)
+                return []
+
+        query_vec = self._model.encode(query, normalize_embeddings=True, convert_to_numpy=True)
+        scores = np.dot(self._embeddings, query_vec)
+        top_idx = np.argsort(-scores)[:top_k]
+
+        out: list[str] = []
+        for idx in top_idx:
+            score = float(scores[idx])
+            if score >= threshold:
+                rxcui = self.codes[idx]
+                if rxcui not in out:
+                    out.append(rxcui)
+        return out
+
+    def score_codes(self, query: str, codes: list[str]) -> dict[str, float]:
+        """Tính cosine similarity cho tập codes cụ thể (cho hybrid re-score)."""
+        self._ensure_loaded()
+        if not query or not codes or self._embeddings is None:
+            return {}
+        if self._model is None:
+            try:
+                from sentence_transformers import SentenceTransformer  # type: ignore
+                self._model = SentenceTransformer("BAAI/bge-m3")
+            except ImportError:
+                return {}
+        q_vec = self._model.encode(query, normalize_embeddings=True, convert_to_numpy=True)
+        all_scores = self._embeddings @ q_vec
+        idx_by_code = {c: i for i, c in enumerate(self.codes)}
+        return {c: float(all_scores[idx_by_code[c]]) for c in codes if c in idx_by_code}
+
+
+# ---------------------------------------------------------------------- #
+# BM25 Index — keyword fallback
+# ---------------------------------------------------------------------- #
+
+_BM25_STOP_WORDS = frozenset({
+    "the", "of", "and", "or", "with", "without", "in", "to", "a", "an",
+    "due", "by", "for", "from", "as", "at", "on", "is", "are", "be",
+})
+
+
+def _bm25_tokenize(text: str) -> list[str]:
+    """Tokenize cho BM25: alnum runs + VN diacritics, bỏ stop words."""
+    if not text:
+        return []
+    tokens = re.findall(r"[\w]+", text.lower(), flags=re.UNICODE)
+    return [t for t in tokens if len(t) > 1 and t not in _BM25_STOP_WORDS]
+
+
+class RxNormBM25Index:
+    """BM25 keyword index cho RxNorm — mở rộng candidates cho vector search.
+
+    Multi-field weighting: name × 2 (field chính), ingredient × 2 (search target),
+    strength × 1.
+    """
+
+    def __init__(
+        self,
+        jsonl_path: Optional[Path] = None,
+        tokens_cache_path: Optional[Path] = None,
+    ) -> None:
+        self._jsonl_path = jsonl_path or (DATA_DIR / "rxnorm.jsonl")
+        self._tokens_cache_path = tokens_cache_path or (DATA_DIR / "rxnorm_bm25_tokens.jsonl.gz")
+
+        self.codes: list[str] = []
+        self._bm25: Optional[Any] = None
+        self._id_to_idx: dict[str, int] = {}
+        self._loaded = False
+
+    def _build_doc_text(self, name: str, ingredient: str, strength: str) -> str:
+        parts: list[str] = []
+        if name:
+            parts.extend([name, name])
+        if ingredient and ingredient != name:
+            parts.extend([ingredient, ingredient])
+        if strength:
+            parts.append(strength.lower())
+        return " ".join(parts)
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        if not _HAS_BM25:
+            logger.warning("rank-bm25 chưa cài → BM25 disabled")
+            self._loaded = True
+            return
+        if not self._jsonl_path.exists():
+            self._loaded = True
+            return
+
+        tokenized: list[list[str]] = []
+
+        # 1. Try load cache
+        if self._tokens_cache_path.exists():
+            try:
+                with open(self._tokens_cache_path, "rb") as f:
+                    import gzip
+                    with gzip.open(self._tokens_cache_path, "rt", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            row = json.loads(line)
+                            self.codes.append(row["code"])
+                            tokenized.append(row["tokens"])
+                logger.info("BM25 loaded %d docs từ cache", len(self.codes))
+            except Exception:
+                self.codes.clear()
+                tokenized.clear()
+
+        # 2. Build from JSONL
+        if not tokenized:
+            t0 = time.time()
+            with self._jsonl_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    rxcui = str(row.get("rxcui", "")).strip()
+                    name = str(row.get("name", "")).strip()
+                    ing = str(row.get("ingredient", "")).strip()
+                    strength = str(row.get("strength", "")).strip()
+                    if not (rxcui and (name or ing)):
+                        continue
+                    doc_text = self._build_doc_text(name, ing, strength)
+                    self.codes.append(rxcui)
+                    tokenized.append(_bm25_tokenize(doc_text))
+            logger.info("BM25 tokenized %d docs từ JSONL (%.2fs)", len(self.codes), time.time() - t0)
+
+            # Save cache
+            try:
+                self._tokens_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                import gzip
+                with gzip.open(self._tokens_cache_path, "wt", encoding="utf-8") as f:
+                    for code, toks in zip(self.codes, tokenized):
+                        f.write(json.dumps({"code": code, "tokens": toks}, ensure_ascii=False) + "\n")
+            except Exception as exc:
+                logger.warning("BM25 cache save fail: %s", exc)
+
+        self._bm25 = BM25Okapi(tokenized)
+        self._id_to_idx = {c: i for i, c in enumerate(self.codes)}
+        self._loaded = True
+
+    def search(self, query: str, *, top_k: int = 20) -> tuple[list[str], list[float]]:
+        """Search BM25 → (codes, scores) sorted desc."""
+        self._ensure_loaded()
+        if self._bm25 is None or not query:
+            return [], []
+        q_tokens = _bm25_tokenize(query)
+        if not q_tokens:
+            return [], []
+        scores = self._bm25.get_scores(q_tokens)
+        top_idx = np.argsort(-scores)[:top_k]
+        out_codes: list[str] = []
+        out_scores: list[float] = []
+        for idx in top_idx:
+            s = float(scores[idx])
+            if s > 0:
+                out_codes.append(self.codes[int(idx)])
+                out_scores.append(s)
+        return out_codes, out_scores
+
+    def score_codes(self, query: str, codes: list[str]) -> dict[str, float]:
+        """BM25 score cho 1 tập codes, normalize về [0,1]."""
+        self._ensure_loaded()
+        if self._bm25 is None or not query or not codes:
+            return {}
+        q_tokens = _bm25_tokenize(query)
+        if not q_tokens:
+            return {}
+        scores = self._bm25.get_scores(q_tokens)
+        max_s = float(scores.max()) or 1.0
+        return {c: float(scores[self._id_to_idx[c]]) / max_s for c in codes if c in self._id_to_idx}
+
+
+# ---------------------------------------------------------------------- #
+# Hybrid Search — vector + BM25
+# ---------------------------------------------------------------------- #
+
+
+class RxNormHybridSearch:
+    """Hybrid RxNorm search = vector (BGE-M3) + BM25 keyword.
+
+    Threshold-based cosine (semantic), không cap top-K. Trả 1 rxcui (top match).
+
+    Args:
+        vector_search: instance RxNormVectorSearch.
+        bm25_index: instance RxNormBM25Index.
+        threshold: cosine minimum (mặc định 0.7).
+        fanout: số candidates mỗi method (union).
+    """
+
+    def __init__(
+        self,
+        vector_search: Optional[RxNormVectorSearch] = None,
+        bm25_index: Optional[RxNormBM25Index] = None,
+        threshold: float = 0.7,
+        fanout: int = 50,
+    ) -> None:
+        self.vector_search = vector_search or RxNormVectorSearch()
+        self.bm25_index = bm25_index or RxNormBM25Index()
+        self.threshold = threshold
+        self.fanout = fanout
+
+    def search(self, query: str, *, threshold: Optional[float] = None, top_k: Optional[int] = 1) -> list[str]:
+        """Semantic extraction: union candidates từ vector + BM25, re-score cosine."""
+        if not query:
+            return []
+        thr = threshold if threshold is not None else self.threshold
+        fanout = max(self.fanout, 30)
+
+        # 1. Get candidates from vector + BM25
+        vec_codes = self.vector_search.search(query, top_k=fanout, threshold=0.0) or []
+        bm25_codes, _ = self.bm25_index.search(query, top_k=fanout)
+
+        # 2. Union
+        candidates = list(dict.fromkeys(vec_codes + bm25_codes))
+        if not candidates:
+            return []
+
+        # 3. Re-score cosine
+        vec_scores = self.vector_search.score_codes(query, candidates)
+
+        # 4. Filter by cosine
+        matched: list[tuple[str, float]] = []
+        for code in candidates:
+            cos = vec_scores.get(code, 0.0)
+            if cos >= thr:
+                matched.append((code, cos))
+
+        if matched:
+            logger.debug("Hybrid '%s' → %d codes (top1=%s cos=%.3f)",
+                         query, len(matched), matched[0][0], matched[0][1])
+
+        # 5. Sort desc + tie-break by BM25
+        bm25_scores = self.bm25_index.score_codes(query, [c for c, _ in matched])
+        matched.sort(key=lambda x: (-x[1], -bm25_scores.get(x[0], 0.0)))
+
+        k = top_k if top_k is not None else 1
+        return [c for c, _ in matched[:k]]
+
+
+# ---------------------------------------------------------------------- #
+# High-level Retriever — combines all 5 layers
+# ---------------------------------------------------------------------- #
+
+
+class RxNormRetriever:
+    """High-level RxNorm retriever với 5 lớp offline.
+
+    Pipeline:
+      L1: Exact tuple (ingredient, strength) — fast path
+      L2: Hybrid search (vector + BM25) — semantic fallback
+      L3: Fuzzy match trên names — VN/EN variants
+      L4: Compound drug split
+      L5: Ingredient-only exact match
+    """
+
+    def __init__(
+        self,
+        index: Optional[RxNormIndex] = None,
+        index_path: Optional[Path] = None,
+        use_hybrid: bool = True,
+        hybrid_threshold: float = 0.7,
+    ) -> None:
+        if index is not None:
+            self.index = index
+        else:
+            self.index = load_index(index_path)
+
+        # Hybrid search (vector + BM25)
+        self.use_hybrid = use_hybrid
+        if use_hybrid:
+            self.vector_search = RxNormVectorSearch()
+            self.bm25_index = RxNormBM25Index()
+            self.hybrid_search = RxNormHybridSearch(
+                vector_search=self.vector_search,
+                bm25_index=self.bm25_index,
+                threshold=hybrid_threshold,
+            )
+        else:
+            self.vector_search = None
+            self.bm25_index = None
+            self.hybrid_search = None
+
+    # ------------------------------------------------------------------ #
+
+    def lookup(self, drug_text: str) -> list[str]:
+        """Tra RxNorm cho chuỗi thuốc VN/EN → list [rxcui] (0 hoặc 1)."""
+        if not drug_text:
+            return []
+
+        drug_text = drug_text.strip()
+
+        # L1: Exact (ing, strength)
+        result = self.index.lookup(drug_text)
+        if result:
+            return result
+
+        # L2: Hybrid search (BGE-M3 + BM25) — handles VN/EN fuzzy
+        if self.use_hybrid and self.hybrid_search is not None:
+            try:
+                result = self.hybrid_search.search(drug_text, top_k=1)
+                if result:
+                    return result
+            except Exception as exc:
+                logger.warning("Hybrid search fail (%s): %s", drug_text[:30], exc)
+
+        # L3: Fuzzy match trên names
+        result = self._fuzzy_local(drug_text)
+        if result:
+            return result
+
+        return []
+
+    # ------------------------------------------------------------------ #
+
+    def _fuzzy_local(self, query: str, threshold: int = 70) -> list[str]:
+        """Fuzzy match trên name list (rapidfuzz)."""
+        if not query or not self.index.names:
+            return []
+        try:
+            from rapidfuzz import fuzz, process  # type: ignore
+        except ImportError:
+            return []
+
+        # Strip route/freq trước khi fuzzy
+        stripped = _strip_route_freq(query)
+        if not stripped:
+            return []
+        q_tokens = [t for t in re.split(r"[^a-z0-9]+", stripped.lower()) if len(t) > 1]
+        if not q_tokens:
+            return []
+        q = " ".join(q_tokens)
+
+        matches = process.extract(q, self.index.names, scorer=fuzz.WRatio, limit=5)
+        matches += process.extract(q, self.index.names, scorer=fuzz.partial_ratio, limit=5)
+        for name, score, _ in matches:
+            if score >= threshold and name in self.index.name_to_idx:
+                return [self.index.rxcuis[self.index.name_to_idx[name]]]
         return []
 
 
@@ -268,7 +687,7 @@ class RxNormIndex:
 
 
 def load_index(path: Optional[Path] = None) -> RxNormIndex:
-    """Nạp index từ JSON. Trả RxNormIndex rỗng nếu không có file."""
+    """Nạp RxNormIndex từ JSON. Trả RxNormIndex rỗng nếu không có file."""
     path = path or (DATA_DIR / "rxnorm_index.json")
     if not path.exists():
         return RxNormIndex()
@@ -281,41 +700,18 @@ def save_index(idx: RxNormIndex, path: Optional[Path] = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(idx.to_dict(), f, ensure_ascii=False, indent=1)
-    logger.info(
-        "Saved → %s (%d names, %d ingredient+strength, %d ingredients)",
-        path.name, len(idx.names), len(idx.by_ingredient_strength),
-        len(idx.by_ingredient),
-    )
+    logger.info("Saved → %s (%d names, %d ing+strength, %d ingredients)",
+                path.name, len(idx.names), len(idx.by_ingredient_strength),
+                len(idx.by_ingredient))
 
 
 # ---------------------------------------------------------------------- #
-# High-level retriever
+# Build from JSONL
 # ---------------------------------------------------------------------- #
 
 
-class RxNormRetriever:
-    """Wrapper đơn giản cho RxNormIndex.lookup(). Trả 1 rxcui duy nhất."""
-
-    def __init__(self, index: Optional[RxNormIndex] = None,
-                 index_path: Optional[Path] = None) -> None:
-        if index is not None:
-            self.index = index
-        else:
-            self.index = load_index(index_path)
-
-    def lookup(self, drug_text: str) -> list[str]:
-        """Tra RxNorm cho 1 chuỗi thuốc → list có 0 hoặc 1 rxcui."""
-        return self.index.lookup(drug_text)
-
-
-# ---------------------------------------------------------------------- #
-# Build from JSONL dump
-# ---------------------------------------------------------------------- #
-
-
-def build_from_rxnorm_dump(dump_path: Path,
-                           out_path: Optional[Path] = None) -> RxNormIndex:
-    """Đọc JSONL [{rxcui, ingredient, strength, doseform, ...}] → build index."""
+def build_from_rxnorm_dump(dump_path: Path, out_path: Optional[Path] = None) -> RxNormIndex:
+    """Đọc JSONL [{rxcui, ingredient, strength, doseform, name, ...}] → build RxNormIndex."""
     idx = RxNormIndex()
     n = 0
     with dump_path.open("r", encoding="utf-8") as f:

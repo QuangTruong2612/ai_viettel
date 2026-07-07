@@ -45,7 +45,7 @@ def main() -> int:
     parser.add_argument(
         "--jsonl",
         type=Path,
-        default=DATA_DIR / "icd10.jsonl",
+        default=DATA_DIR / "DM_ICD10_19_8_BYT.json",
         help="Đường dẫn file JSONL chứa ICD-10 codes + desc_en",
     )
     parser.add_argument(

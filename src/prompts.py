@@ -5,15 +5,6 @@ Output: JSON array DUY NHẤT. MỖI entity có ĐÚNG 5 trường: text, type, 
 Quy trình: Bạn (LLM) phân tích input y khoa → suy luận từng quyết định → output JSON.
 </role>
 
-<workflow>
-## Quy trình (CoT — làm theo khi trích):
-1. Đọc input → xác định section headers ("Tiền sử:", "Chẩn đoán:", "Thuốc:", "Lý do nhập viện:").
-2. Mỗi concept y khoa (bỏ lifestyle/social theo R4) → xác định TYPE theo mức inclusive R1.
-3. Áp R5/R6/R7/R8 để tách (drug+disease, test+value, ECG nối "và", duplicate positions).
-4. Xác định assertions theo CONTEXT câu/clause (không chỉ keyword tức thì).
-5. Output JSON array; positions verified input[start:end]==text.
-</workflow>
-
 <critical_rules>
 ## 8 QUY TẮC BẮT BUỘC
 
@@ -89,15 +80,6 @@ KHÔNG gộp thành 1 entity. KHÔNG skip các lần sau.
 Áp dụng cho MỌI loại (triệu chứng, chẩn đoán, thuốc, ...).
 </critical_rules>
 
-<self_check>
-## Tự kiểm tra trước khi output (MỖI entity):
-✓ text==input[start:end] (R2)        ✓ candidates=[] (R3)        ✓ đủ 5 trường
-✓ THUỐC/CHẨN_ĐOÁN giữ full integral (R1)
-✓ TRIỆU_CHỨNG bỏ duration/value/freq (R1)
-✓ R5 split "A cho B", R6 split test+value, R7 split ECG "và", R8 duplicate positions
-✓ Assertion đúng context câu/clause (không phải keyword tức thì — VD "không sốt" gần "đau ngực" không negate "đau ngực")
-</self_check>
-
 <entity_types>
 ## 5 LOẠI (enum chính xác)
 
@@ -111,19 +93,13 @@ KHÔNG gộp thành 1 entity. KHÔNG skip các lần sau.
   • Text conclusion: "ecg bình thường", "nhịp xoang đều"
   • Positive/negative text: "dương tính", "âm tính", "positive", "negative"
 
-💡 ECG disambiguation: Kết luận bình thường ("ecg bình thường", "nhịp xoang đều") → KẾT_QUẢ_XÉT_NGHIỆM. Bất thường ("ngoại tâm thu nhĩ", "rung nhĩ", "ST chênh lên") → CHẨN_ĐOÁN.
-
-**ECG/Tim mạch** (CHẨN_ĐOÁN, có ICD): rung/cuồng nhĩ, ngoại tâm thu nhĩ/thất, nhịp nhanh/chậm xoang, blốc nhĩ thất/nhánh, ST chênh lên/xuống, suy tim độ I-IV, NMCT cấp/STEMI/NSTEMI, đau thắt ngực.
-
-**Vital signs** (TÁCH R6): HA 140/90 → TÊN="HA" + KQ="140/90 mmHg"; Mạch 110 lần/phút → TÊN="mạch" + KQ="110 lần/phút"; Nhiệt độ 38.5°C → TÊN="nhiệt độ" + KQ="38.5°C".
-
-**Drug naming**: Giữ nguyên từ input (generic "metoprolol"; brand "Lopressor"; combination "coversyl plus 5mg/1.25mg" 1 entity). KHÔNG convert brand → generic.
-
-**Allergy**: "dị ứng penicillin" → CHẨN_ĐOÁN + isHistorical.
-
-**VN abbreviations**: THA=tăng huyết áp, NMCT=nhồi máu cơ tim, ĐTĐ=đái tháo đường, TBMMN=tai biến mạch máu não. "tiểu đường"="đái tháo đường".
-
-**TRIỆU_CHỨNG vs CHẨN_ĐOÁN**: "đau ngực/đầu/bụng","khó thở","sốt","ngất" → TRIỆU_CHỨNG. "nhồi máu cơ tim","đau nửa đầu/migraine","đau thắt ngực" (angina, I20.x),"hen phế quản","viêm ruột thừa" → CHẨN_ĐOÁN.
+💡 **ECG**: bình thường ("ecg bình thường", "nhịp xoang đều") → KQ; bất thường ("ngoại tâm thu nhĩ", "rung nhĩ", "ST chênh lên") → CHẨN_ĐOÁN.
+💡 **ECG/Tim mạch CHẨN_ĐOÁN**: rung/cuồng nhĩ, ngoại tâm thu nhĩ/thất, nhịp nhanh/chậm xoang, blốc nhĩ thất/nhánh, ST chênh lên/xuống, suy tim độ I-IV, NMCT/STEMI/NSTEMI, đau thắt ngực.
+💡 **Vital signs** (TÁCH R6): "HA 140/90 mmHg" → TÊN="HA" + KQ="140/90 mmHg"; "Mạch 110 lần/phút" → TÊN="mạch" + KQ="110 lần/phút".
+💡 **Drug naming**: giữ nguyên từ input (brand "Lopressor" giữ nguyên, combination "coversyl plus 5mg/1.25mg" 1 entity).
+💡 **Allergy**: "dị ứng penicillin" → CHẨN_ĐOÁN + isHistorical.
+💡 **VN abb**: THA=tăng huyết áp, NMCT=nhồi máu cơ tim, ĐTĐ=đái tháo đường. "tiểu đường"="đái tháo đường".
+💡 **TRIỆU vs CHẨN**: "đau ngực/đầu/bụng","khó thở","sốt","ngất" → TRIỆU_CHỨNG. "NMCT","đau nửa đầu/migraine","đau thắt ngực" (angina I20.x),"hen phế quản","viêm ruột thừa" → CHẨN_ĐOÁN.
 </entity_types>
 
 ## 3 ASSERTIONS (max 3, có thể kết hợp)

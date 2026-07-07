@@ -44,9 +44,12 @@ class LLMConfig:
     keep_alive: str = "5m"
 
     # Ollama-specific: num_ctx override PER-REQUEST (qua extra_body).
-    # Default 16384 cho qwen3.5:9b (hỗ trợ 32K context). Compact prompts vẫn
-    # fit input dài. Override per-model trong Modelfile nếu cần.
-    num_ctx: int = 16384
+    # Default 8192 cho qwen2.5:7b trên Kaggle (16GB VRAM):
+    # - FP16 model (~14GB) → 8192 safe, 16384 tight
+    # - Quantized Q4 (~5GB) → 16384 comfortable
+    # - 32768 chỉ work với quantized + GPU offload
+    # Override qua env OLLAMA_NUM_CTX hoặc --target-ctx.
+    num_ctx: int = 8192
 
     @classmethod
     def from_env(cls) -> "LLMConfig":

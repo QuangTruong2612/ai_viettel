@@ -1,8 +1,9 @@
-"""Smoke test: chạy end-to-end trên 1 ví dụ BTC.
+"""Smoke test: chạy end-to-end trên 1 ví dụ.
 
 Dùng để kiểm tra nhanh sau khi:
-- Cài model trong LM Studio
-- Có data/rxnorm_index.json (chạy build_vn_dict.py)
+- Ollama serve đang chạy với model (vd qwen2.5:7b)
+- data/rxnorm_index.json + rxnorm_embeddings.npy (chạy build_rxnorm_index.py + build_rxnorm_embeddings.py)
+- data/icd10_embeddings.npy + DM_ICD10_19_8_BYT.json (chạy build_icd_embeddings.py)
 
 Kết quả in ra stdout để so với ground truth trong đề bài.
 """
@@ -17,8 +18,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.llm_client import LLMClient  # noqa: E402
 from src.icd_rag import ICDRetriever, ICD10VectorSearch, Translator  # noqa: E402
+from src.inference import _call_with_retry  # noqa: E402
+from src.llm_client import LLMClient  # noqa: E402
 from src.postprocess import assemble_record, validate_output, write_output  # noqa: E402
 from src.prompts import (  # noqa: E402
     SYSTEM_PROMPT,
@@ -70,38 +72,6 @@ EXPECTED_GT = [
 ]
 
 
-def _parse_with_retry(
-    llm: LLMClient, system_prompt: str, user_prompt: str, history: list[dict[str, str]]
-) -> object:
-    msgs = (
-        [{"role": "system", "content": system_prompt}]
-        + history
-        + [{"role": "user", "content": user_prompt}]
-    )
-    last_raw = ""
-    last_err: Exception | None = None
-    for attempt in range(llm.config.max_retries + 1):
-        try:
-            resp = llm._client.chat.completions.create(  # noqa: SLF001
-                model=llm.config.model,
-                messages=msgs,
-                temperature=llm.config.temperature,
-                top_p=llm.config.top_p,
-                max_tokens=llm.config.max_tokens,
-                timeout=llm.config.timeout,
-            )
-            content = resp.choices[0].message.content or ""
-            last_raw = content
-            return llm._extract_json(content)  # noqa: SLF001
-        except Exception as exc:
-            last_err = exc
-            logger.warning("Parse lỗi (lần %d): %s", attempt + 1, exc)
-            if attempt >= llm.config.max_retries:
-                break
-            time.sleep(2)
-    raise RuntimeError(f"Smoke test fail: {last_err}")
-
-
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--out", type=Path, default=Path("output/smoke_test.json"))
@@ -111,13 +81,13 @@ def main() -> int:
     retriever = RxNormRetriever()
     translator = Translator(llm_client=llm)
     local_search = ICD10VectorSearch()
-    icd = ICDRetriever(
-        translator=translator, use_remote=False, local_search=local_search
-    )
+    icd = ICDRetriever(translator=translator, local_search=local_search)
     few_shot = format_few_shot_messages(load_few_shot())
 
     user_prompt = build_user_prompt(EXAMPLE_INPUT)
-    raw = _parse_with_retry(llm, SYSTEM_PROMPT, user_prompt, few_shot)
+    raw = _call_with_retry(
+        llm, SYSTEM_PROMPT, user_prompt, history=few_shot, max_retries=1,
+    )
     if not isinstance(raw, list):
         if isinstance(raw, dict):
             for k in ("entities", "results", "data"):
@@ -133,8 +103,9 @@ def main() -> int:
     write_output(args.out, final)
 
     ok = validate_output(final)
-    print(f"Output count: {len(final)} (expected ~{len(EXPECTED_GT)})")
+    print(f"\nOutput count: {len(final)} (expected ~{len(EXPECTED_GT)})")
     print("Valid schema:", ok)
+    print(f"\nSaved → {args.out}")
     print("\nPredicted:")
     print(json.dumps(final, ensure_ascii=False, indent=2))
 
