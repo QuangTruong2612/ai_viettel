@@ -32,10 +32,9 @@ class LLMConfig:
     temperature: float = 0.0
     top_p: float = 1.0
 
-    # max_tokens=1024 đủ chứa JSON ~40 entities (~25 chars mỗi).
-    # Giảm từ 2048 → 1024 để fit trong Ollama num_ctx=4096-6144.
-    # Nếu LLM cần nhiều hơn, sẽ tự retry (JSON parse fail sẽ trigger).
-    max_tokens: int = 1024
+    # max_tokens=768 đủ chứa JSON ~25 entities (~30 chars mỗi).
+    # 9b có thể output dài hơn 4b; restore từ 512 → 768 cho đủ entities.
+    max_tokens: int = 768
     timeout: int = 180
     max_retries: int = 1  # giảm retry để fail fast
 
@@ -45,9 +44,9 @@ class LLMConfig:
     keep_alive: str = "5m"
 
     # Ollama-specific: num_ctx override PER-REQUEST (qua extra_body).
-    # Default 8192 để an toàn cho prompt ~2300 tokens + input ~1500 tokens + output 1024.
-    # Override per-model trong Modelfile nếu cần lớn hơn.
-    num_ctx: int = 8192
+    # Default 16384 cho qwen3.5:9b (hỗ trợ 32K context). Compact prompts vẫn
+    # fit input dài. Override per-model trong Modelfile nếu cần.
+    num_ctx: int = 16384
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
