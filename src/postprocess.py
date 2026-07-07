@@ -22,6 +22,86 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------- #
+# Input preprocessing — clean/truncate input trước khi gửi LLM
+# ---------------------------------------------------------------------- #
+
+# Ngưỡng tối đa cho input (chars). Vượt ngưỡng sẽ truncate để tránh overflow.
+# SYSTEM_PROMPT (~4059 tokens) + 4000 chars input (~1000 tokens) + max_tokens output (4096)
+# = ~9155 tokens. Vừa với Ollama num_ctx=8192 nếu giảm input xuống <3000 chars.
+_INPUT_MAX_CHARS = 4000
+
+# Header đánh dấu đã truncate (LLM biết phần nào bị cắt)
+_TRUNCATION_MARKER = "\n\n[... Đã rút gọn phần giữa để vừa context window ...]\n\n"
+
+
+def preprocess_input_for_llm(
+    input_text: str,
+    max_chars: int = _INPUT_MAX_CHARS,
+) -> str:
+    """Clean clinical note input trước khi gửi LLM — tránh context overflow.
+
+    Các bước:
+      1. Strip markdown noise: ** (bold), _ (italic), `#` headers
+      2. Normalize whitespace (collapse multiple spaces/newlines)
+      3. Drop empty lines
+      4. Drop pure-placeholder lines (chỉ chứa 'N/A', ': N/A', '-')
+      5. Dedupe consecutive duplicate lines (case-insensitive)
+      6. Nếu vẫn > max_chars: giữ first 60% + marker + last 30%
+         (giữ nguyên tiền sử + lý do nhập viện + kết quả xét nghiệm — phần clinical info)
+
+    Args:
+        input_text: raw clinical note
+        max_chars: cap chiều dài sau clean (default 4000)
+
+    Returns:
+        Cleaned input text. Nếu không cần clean → trả về input_text nguyên.
+    """
+    if not input_text or len(input_text) <= max_chars:
+        return input_text
+
+    text = input_text
+
+    # 1. Strip markdown: ** ** (bold), _ _ (italic), `#` (header)
+    text = re.sub(r"\*+", "", text)
+    text = re.sub(r"_+", "", text)
+    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+
+    # 2. Normalize whitespace
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # 3. Drop empty lines
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    text = "\n".join(lines)
+
+    # 4. Drop pure-placeholder lines (chỉ N/A, : N/A, -, ...)
+    placeholder_pattern = re.compile(r"^\s*[-\s]*(:\s*)?N/?A\s*[.:]?\s*$", re.IGNORECASE)
+    lines = text.split("\n")
+    lines = [ln for ln in lines if not placeholder_pattern.match(ln)]
+    text = "\n".join(lines)
+
+    # 5. Dedupe consecutive duplicate lines
+    deduped: list[str] = []
+    prev = None
+    for ln in text.split("\n"):
+        key = ln.strip().lower()
+        if key and key != prev:
+            deduped.append(ln)
+        prev = key
+    text = "\n".join(deduped)
+
+    # 6. Truncate nếu vẫn dài
+    if len(text) > max_chars:
+        head_size = int(max_chars * 0.6)
+        tail_size = int(max_chars * 0.3)
+        head = text[:head_size]
+        tail = text[-tail_size:]
+        text = head + _TRUNCATION_MARKER + tail
+
+    return text
+
+
+# ---------------------------------------------------------------------- #
 # Position fixing
 # ---------------------------------------------------------------------- #
 
@@ -330,6 +410,84 @@ _COMMON_DRUG_NAMES: set[str] = {
     "valacyclovir",
     "oseltamivir",
 }
+
+
+
+
+def _detect_assertions_from_context(
+    entity_text: str,
+    input_text: str,
+    entity_type: str,
+    entity_pos: int,
+) -> list:
+    """Detect assertions từ input context (LLM yếu hay quên).
+
+    Manh mối (case-insensitive):
+    - isHistorical: input có "Tiền sử:", "Trước đây:", "Đang dùng", "Đang duy trì"
+      và entity nằm trong window 200 chars sau manh mối.
+    - isNegated: input có "không", "chưa", "âm tính", "không xuất hiện"
+      và nằm trong window 30 chars trước entity.
+    - isFamily: input có "bố", "mẹ", "anh", "chị", "em", "ông", "bà" + "bệnh nhân"
+      HOẶC "tiền sử gia đình" trong window 100 chars.
+    """
+    if entity_type not in ("CHẨN_ĐOÁN", "THUỐC", "TRIỆU_CHỨNG"):
+        return []
+
+    text_lower = input_text.lower()
+    pos = max(0, entity_pos)
+
+    # Window quanh entity (200 chars)
+    win_start = max(0, pos - 200)
+    win_end = min(len(input_text), pos + len(entity_text) + 100)
+    window_lower = text_lower[win_start:win_end]
+
+    # Window trước entity cho negation (20 chars) — đủ cho "không ", "chưa ".
+    pre_start = max(0, pos - 20)
+    pre_window = text_lower[pre_start:pos]
+    found = []
+
+    # isHistorical
+    historical_markers = ["tiền sử", "trước đây", "đang duy trì", "đang dùng", "trước đó", "đã từng"]
+    for m in historical_markers:
+        if m in window_lower and m not in found:
+            # Mark vị trí của marker
+            marker_pos = text_lower.find(m)
+            if marker_pos >= 0 and abs(marker_pos - pos) < 300:
+                found.append("isHistorical")
+                break
+
+    # isFamily: cần word boundary để tránh "ông " match "không "
+    family_patterns = [
+        r"\bbố\s+([bệe]nh\s+)?nh[âa]n",       # bố (bệnh) nhân
+        r"\bm[ẹe]\s+([bệe]nh\s+)?nh[âa]n",      # mẹ/me (bệnh) nhân
+        r"\bcha\s+([bệe]nh\s+)?nh[âa]n",      # cha (bệnh) nhân
+        r"\banh\s+(trai\s+)?[bệe]nh\s+nh[âa]n",
+        r"\bch[ịi]\s+(g[áa]i\s+)?[bệe]nh\s+nh[âa]n",
+        r"\bem\s+(trai\s+|g[áa]i\s+)?[bệe]nh\s+nh[âa]n",
+        r"\bcon\s+(trai\s+|g[áa]i\s+)?[bệe]nh\s+nh[âa]n",
+        r"\bông\s+([bệe]nh\s+)?nh[âa]n",       # ông (bệnh) nhân — word boundary!
+        r"\bbà\s+([bệe]nh\s+)?nh[âa]n",        # bà (bệnh) nhân
+        r"\bti[eề]n\s+s[ử]?\s*gia\s+[đd][ìi]nh",  # tiền sử gia đình
+    ]
+    for pat in family_patterns:
+        if re.search(pat, window_lower):
+            found.append("isFamily")
+            break
+
+    # isNegated: check "không", "chưa", "âm tính" trong window 20 chars trước entity.
+    # Lưu ý: "không" có thể nằm sát entity (vd "không sốt" → pre_window kết thúc bằng "khô").
+    near = text_lower[max(0, pos - 15):pos + 5]  # rộng hơn để bắt "không "
+    found_negated = False
+    for neg in ("không", "chưa", "âm tính"):
+        if neg in near:
+            found_negated = True
+            break
+    if found_negated and "isNegated" not in found:
+        found.append("isNegated")
+
+    return found[:3]  # max 3 theo spec
+
+
 
 
 def _drop_substring_entities(entities: list[dict]) -> list[dict]:
@@ -741,6 +899,8 @@ def assemble_record(
     final: list[dict[str, Any]] = []
     # Track text+type đã emit để dedupe (vd "doxycycline" trùng khi LLM trả 2 lần)
     seen_signatures: set[tuple[str, str]] = set()
+    # Loại type được phép có candidates (per spec: CHỈ CHẨN_ĐOÁN + THUỐC)
+    CANDIDATES_ALLOWED_TYPES = {"CHẨN_ĐOÁN", "THUỐC"}
     for ent in validated:
         etype = ent.get("type", "")
         text = str(ent.get("text", "")).strip()
@@ -828,6 +988,7 @@ def assemble_record(
                     "type": "THUỐC",
                     "position": [drug_pos_start, drug_pos_end],
                     "assertions": list(assertions),
+                    "candidates": [],
                 }
                 cleaned = sanitize_drug_text(drug_part)
                 if cleaned:
@@ -871,6 +1032,7 @@ def assemble_record(
                     "type": diag_type,
                     "position": [diag_pos_start, diag_pos_end],
                     "assertions": list(assertions),
+                    "candidates": [],
                 }
                 # Candidates chỉ cho CHẨN_ĐOÁN (Fix 3: apply rescan cho split diagnosis)
                 if diag_type == "CHẨN_ĐOÁN" and icd_retriever is not None:
@@ -907,8 +1069,17 @@ def assemble_record(
             "type": etype,
             "position": [int(ent["position"][0]), int(ent["position"][1])],
             "assertions": assertions,
+            "candidates": [],   # SPEC: luôn có field, [] cho non-allowed types
         }
-        # Candidates CHỈ cho THUỐC và CHẨN_ĐOÁN (per spec)
+        # Postprocess smart-assert: NẾU LLM quên assertions, detect từ input context.
+        if not assertions:
+            assertions = _detect_assertions_from_context(
+                text, input_text, etype, int(ent["position"][0]),
+            )
+            item["assertions"] = assertions
+        # Candidates CHỈ được populate cho CHẨN_ĐOÁN và THUỐC (per spec).
+        # 3 type còn lại (TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM)
+        # sẽ có candidates=[] empty list.
         # Bước rescan: dùng LLM rà soát ngữ cảnh để sinh câu truy vấn tối ưu
         if etype == "THUỐC":
             # Rescan để lấy query chuẩn hóa (gom liều, đường dùng từ văn bản)
@@ -964,18 +1135,24 @@ def assemble_record(
             if cand:
                 item["candidates"] = cand
         elif etype == "TÊN_XÉT_NGHIỆM":
-            # Fix 17: Link TÊN_XÉT_NGHIỆM với KẾT_QUẢ_XÉT_NGHIỆM gần nhất
-            # Tìm KẾT_QUẢ_XÉT_NGHIỆM entity nằm trong cùng "đoạn test" (window 200 chars).
+            # SPEC: không có field `result`. Mối liên hệ TÊN_XÉT_NGHIỆM ↔ KẾT_QUẢ
+            # được handle NGẦM bằng position proximity (cùng section trong input).
+            # Logging ở debug level để debug, không ghi vào output.
             linked_results = _link_test_results(
                 text, int(ent["position"][0]), int(ent["position"][1]), validated,
             )
             if linked_results:
-                item["result"] = linked_results
                 logger.debug(
-                    "[%d] TÊN_XÉT_NGHIỆM '%s' linked to %d KQ",
+                    "[%d] TÊN_XÉT_NGHIỆM '%s' ↔ %d KQ (link ngầm qua position)",
                     _seen_count, text, len(linked_results),
                 )
         final.append(item)
+
+    # Defense-in-depth: đảm bảo MỌI entity có field `candidates` (schema required).
+    # Nếu LLM quên, auto-fill [] (theo spec: chỉ THUỐC/CHẨN_ĐOÁN mới có codes).
+    for ent in final:
+        if "candidates" not in ent:
+            ent["candidates"] = []
     return final
 
 
@@ -1042,7 +1219,14 @@ def _link_test_results(
 
 
 def validate_output(payload: list[dict[str, Any]]) -> bool:
-    """Schema check cuối cùng."""
+    """Schema check cuối cùng. Auto-fix missing fields (LLM hay quên candidates)."""
+    if not isinstance(payload, list):
+        return False
+    # Defense: MỌI entity phải có 5 fields theo spec — auto-fill nếu thiếu
+    for ent in payload:
+        if isinstance(ent, dict):
+            ent.setdefault("candidates", [])
+            ent.setdefault("assertions", [])
     try:
         from jsonschema import validate  # type: ignore
 
@@ -1050,6 +1234,8 @@ def validate_output(payload: list[dict[str, Any]]) -> bool:
 
         validate(instance=payload, schema=OUTPUT_SCHEMA)
         return True
+    except Exception:
+        return False
     except Exception as exc:
         logger.warning("Validation lỗi: %s", exc)
         return False

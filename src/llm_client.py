@@ -32,11 +32,22 @@ class LLMConfig:
     temperature: float = 0.0
     top_p: float = 1.0
 
-    # max_tokens=4096 đủ chứa JSON ~40 entities (~80 chars mỗi).
-    # Tăng từ 2048 → 4096 để tránh JSON bị truncate giữa chừng → parse fail.
-    max_tokens: int = 4096
+    # max_tokens=1024 đủ chứa JSON ~40 entities (~25 chars mỗi).
+    # Giảm từ 2048 → 1024 để fit trong Ollama num_ctx=4096-6144.
+    # Nếu LLM cần nhiều hơn, sẽ tự retry (JSON parse fail sẽ trigger).
+    max_tokens: int = 1024
     timeout: int = 180
     max_retries: int = 1  # giảm retry để fail fast
+
+    # Ollama-specific: keep_alive (vd "5m", "1h", "0"). Default "5m" giữ model
+    # load giữa các request. Set "0" để unload sau mỗi request (context clean slate).
+    # Pass qua OpenAI-compat extra_body → Ollama nhận được.
+    keep_alive: str = "5m"
+
+    # Ollama-specific: num_ctx override PER-REQUEST (qua extra_body).
+    # Default 8192 để an toàn cho prompt ~2300 tokens + input ~1500 tokens + output 1024.
+    # Override per-model trong Modelfile nếu cần lớn hơn.
+    num_ctx: int = 8192
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
@@ -56,6 +67,7 @@ class LLMConfig:
             temperature=float(os.environ.get("LMSTUDIO_TEMPERATURE", cls.temperature)),
             max_tokens=int(os.environ.get("LMSTUDIO_MAX_TOKENS", cls.max_tokens)),
             timeout=int(os.environ.get("LMSTUDIO_TIMEOUT", cls.timeout)),
+            num_ctx=int(os.environ.get("OLLAMA_NUM_CTX", cls.num_ctx)),
         )
 
 
