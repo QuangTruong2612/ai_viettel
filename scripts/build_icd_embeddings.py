@@ -185,7 +185,8 @@ def main() -> int:
         if torch.cuda.is_available():
             device = "cuda"
             gpu_name = torch.cuda.get_device_name(0)
-            total_mem_gb = torch.cuda.get_device_properties(0).total_mem / 1024**3
+            # PyTorch API: total_memory (was total_mem in older versions)
+            total_mem_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
             logger.info("Device: cuda (%s, %.1f GB)", gpu_name, total_mem_gb)
             # Auto-suggest batch size nếu GPU yếu
             if total_mem_gb < 12 and args.batch_size > 32:
