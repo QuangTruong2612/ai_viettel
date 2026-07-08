@@ -30,7 +30,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from src.icd_rag import ICDRetriever, build_context_query
+from src.icd_rag import ICDRetriever
 from src.rxnorm_rag import RxNormRetriever
 
 logger = logging.getLogger(__name__)
@@ -153,19 +153,25 @@ def validate_positions(
     out: list[dict[str, Any]] = []
     for ent in entities:
         text = str(ent.get("text", "")).strip()
-        pos = ent.get("position", [])
-        if not text or not isinstance(pos, list) or len(pos) != 2:
+        if not text:
             continue
 
-        start, end = int(pos[0]), int(pos[1])
-        # Sanity bounds
-        if start < 0:
-            start = 0
-        if end > len(input_text):
-            end = len(input_text)
+        pos = ent.get("position", [])
+        start, end = 0, 0
+        # Trường hợp 1: LLM có cung cấp position (cũ)
+        if isinstance(pos, list) and len(pos) == 2:
+            start, end = int(pos[0]), int(pos[1])
+            # Sanity bounds
+            if start < 0:
+                start = 0
+            if end > len(input_text):
+                end = len(input_text)
+            # Nếu substring không khớp → tìm lại
+            if input_text[start:end] != text:
+                start, end = 0, 0  # force re-find bên dưới
 
-        # Nếu substring không khớp → tìm lại
-        if input_text[start:end] != text:
+        # Trường hợp 2: LLM KHÔNG cung cấp position (mới) → TỰ TÌM
+        if start == 0 and end == 0:
             found = _find_span(input_text, text)
             if found is None:
                 logger.debug("Bỏ entity không tìm được: %r", text)
