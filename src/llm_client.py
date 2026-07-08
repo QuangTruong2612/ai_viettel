@@ -35,21 +35,26 @@ class LLMConfig:
     # max_tokens=768 đủ chứa JSON ~25 entities (~30 chars mỗi).
     # 9b có thể output dài hơn 4b; restore từ 512 → 768 cho đủ entities.
     max_tokens: int = 768
-    timeout: int = 180
+    timeout: int = 300  # 5 phút/request (9b chậm hơn 7b, tránh timeout)
     max_retries: int = 1  # giảm retry để fail fast
 
-    # Ollama-specific: keep_alive (vd "5m", "1h", "0"). Default "5m" giữ model
-    # load giữa các request. Set "0" để unload sau mỗi request (context clean slate).
-    # Pass qua OpenAI-compat extra_body → Ollama nhận được.
-    keep_alive: str = "5m"
+    # Ollama-specific: keep_alive. Default "0" → UNLOAD model sau mỗi request
+    # → giải phóng VRAM, tránh OOM khi 9b trên Kaggle T4x2.
+    # Set "5m" nếu muốn giữ model load giữa các request (nhanh hơn nhưng tốn VRAM).
+    keep_alive: str = "0"
 
     # Ollama-specific: num_ctx override PER-REQUEST (qua extra_body).
-    # Default 8192 cho qwen2.5:7b trên Kaggle (16GB VRAM):
-    # - FP16 model (~14GB) → 8192 safe, 16384 tight
-    # - Quantized Q4 (~5GB) → 16384 comfortable
+    # Default 8192 cho Kaggle T4x2 (16GB VRAM):
+    # - qwen2.5:7b FP16 (~5GB) → 8192 safe, 16384 tight
+    # - qwen3.5:9b FP16 (~5.5GB) → 8192 RECOMMENDED, 16384 có thể OOM
+    # - Quantized Q4_K_M (~3GB) → 16384 comfortable
     # - 32768 chỉ work với quantized + GPU offload
     # Override qua env OLLAMA_NUM_CTX hoặc --target-ctx.
     num_ctx: int = 8192
+
+    # Ollama-specific: num_gpu layers. -1 = all (default).
+    # Giảm nếu OOM (vd num_gpu=20 → 20 layer trên GPU, phần còn trên CPU/RAM).
+    num_gpu: int = -1
 
     @classmethod
     def from_env(cls) -> "LLMConfig":

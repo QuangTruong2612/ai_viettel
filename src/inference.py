@@ -209,13 +209,15 @@ def _call_with_retry(
                 max_tokens=llm.config.max_tokens,
                 timeout=llm.config.timeout,
                 # Ollama-specific: truyền qua extra_body.
-                # - keep_alive: "5m" (default) giữ model load 5 phút, KV cache persistent.
-                #   "0" unload ngay → context cô lập nhưng chậm hơn.
+                # - keep_alive: "0" unload ngay → giải phóng VRAM (tốt cho 9b trên Kaggle).
+                #   "5m" giữ model load 5 phút (nhanh hơn nhưng tốn VRAM).
                 # - num_ctx: override Ollama context length PER-REQUEST. Default 8192 để
                 #   tránh overflow khi user chưa bump Modelfile num_ctx.
+                # - num_gpu: số layer GPU (default -1 = all). Giảm nếu OOM.
                 extra_body={
-                    "keep_alive": getattr(llm.config, "keep_alive", "5m"),
+                    "keep_alive": getattr(llm.config, "keep_alive", "0"),
                     "num_ctx": getattr(llm.config, "num_ctx", 8192),
+                    "num_gpu": getattr(llm.config, "num_gpu", -1),
                 },
             )
             content = resp.choices[0].message.content or ""
@@ -412,8 +414,28 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if not args.input.exists():
-        logger.error("Input dir không tồn tại: %s", args.input)
-        return 2
+        # Nếu path tương đối, thử resolve từ project root (parent của src/)
+        # → user chạy từ bất kỳ đâu vẫn work
+        if not args.input.is_absolute():
+            try:
+                project_root = Path(__file__).resolve().parents[1]
+                candidate = project_root / args.input
+                if candidate.exists():
+                    args.input = candidate
+                    logger.info("Resolved relative input path → %s", args.input)
+                else:
+                    logger.error(
+                        "Input dir không tồn tại: %s "
+                        "(cũng đã thử resolve từ project root: %s)",
+                        args.input, candidate,
+                    )
+                    return 2
+            except Exception:
+                logger.error("Input dir không tồn tại: %s", args.input)
+                return 2
+        else:
+            logger.error("Input dir không tồn tại: %s", args.input)
+            return 2
 
     args.output.mkdir(parents=True, exist_ok=True)
 
