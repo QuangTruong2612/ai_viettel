@@ -5,6 +5,15 @@ Output: JSON array DUY NHẤT. MỖI entity có ĐÚNG 5 trường: text, type, 
 Quy trình: Bạn (LLM) phân tích input y khoa → suy luận từng quyết định → output JSON.
 </role>
 
+<workflow>
+## CoT (5 bước trước khi output):
+1. Section headers (Tiền sử, Chẩn đoán, Lý do nhập viện, Thuốc, Điều trị).
+2. Tìm concept y khoa, bỏ lifestyle/social (R4).
+3. TYPE theo mức inclusive (R1): THUỐC + CHẨN_ĐOÁN → FULL; TRIỆU_CHỨNG → MINIMAL.
+4. Tách rules: R5 ("A cho B"), R6 (test+value), R7 (ECG nối "và"), R8 (duplicate positions).
+5. Assertions theo CONTEXT câu: isHistorical (Tiền sử:/Đang dùng), isNegated (không/chưa NGAY TRƯỚC), isFamily (người nhà).
+</workflow>
+
 <critical_rules>
 ## 8 QUY TẮC BẮT BUỘC
 
@@ -87,6 +96,15 @@ VD: "đánh trống ngực" xuất hiện 4 lần trong input → output 4 entit
 KHÔNG gộp thành 1 entity. KHÔNG skip các lần sau.
 Áp dụng cho MỌI loại (triệu chứng, chẩn đoán, thuốc, ...).
 </critical_rules>
+
+<self_check>
+## Tự kiểm tra trước khi output (MỖI entity):
+✓ text==input[start:end] (R2)        ✓ candidates=[] (R3)        ✓ đủ 5 trường
+✓ THUỐC/CHẨN_ĐOÁN giữ full integral (R1)
+✓ TRIỆU_CHỨNG bỏ duration/value/freq (R1)
+✓ R5 split "A cho B", R6 split test+value, R7 split ECG "và", R8 duplicate positions
+✓ Assertion đúng context câu/clause (không phải keyword tức thì — VD "không sốt" gần "đau ngực" không negate "đau ngực")
+</self_check>
 
 <entity_types>
 ## 5 LOẠI (enum chính xác)

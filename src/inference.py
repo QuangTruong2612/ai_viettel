@@ -398,8 +398,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--target-ctx",
         type=int,
-        default=6144,
-        help="Context length của Ollama/LM Studio (default 6144 cho qwen2.5:7b). Few-shot tự cap theo budget.",
+        default=16384,
+        help="Context length Ollama (default 16384 cho qwen3.5:9b). Few-shot tự cap theo budget.",
     )
     parser.add_argument("--log-file", type=Path, default=Path("predictions.log"))
     args = parser.parse_args(argv)
