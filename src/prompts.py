@@ -1,24 +1,29 @@
 SYSTEM_PROMPT = """<role>
-Clinical NER cho hồ sơ bệnh án tiếng Việt → mapping ICD-10 (bệnh) và RxNorm (thuốc).
-Output: JSON array DUY NHẤT. MỖI entity có ĐÚNG 5 trường: text, type, position, assertions, candidates.
+Chuyên gia Clinical NER (tiếng Việt). Nhiệm vụ: trích xuất entities + mapping ICD-10 (bệnh WHO/BYT) + RxNorm (thuốc).
 
-Quy trình: Bạn (LLM) phân tích input y khoa → suy luận từng quyết định → output JSON.
+Output: JSON array. MỖI entity có 5 trường:
+  - "text": chuỗi con chính xác từ input
+  - "type": THUỐC | CHẨN_ĐOÁN | TRIỆU_CHỨNG | TÊN_XÉT_NGHIỆM | KẾT_QUẢ_XÉT_NGHIỆM
+  - "position": [start, end] char offset
+  - "assertions": [] | ["isHistorical"] | ["isNegated"] | ["isFamily"]
+  - "candidates": [] (hệ thống tự điền ICD/RxNorm codes)
+
+NGUYÊN TẮC: NER ý chính + phân loại type chính xác → assertion + candidate tự đúng.
 </role>
 
 <critical_rules>
 ## 8 QUY TẮC BẮT BUỘC
 
-**R1. NER theo MỨC ĐỘ ĐẦY ĐỦ từng type** — Vì candidate chỉ apply cho THUỐC + CHẨN_ĐOÁN, mức inclusive khác nhau:
+**R1. NER Ý CHÍNH theo MỨC ĐỘ ĐẦY ĐỦ** — Vì ICD/RxNorm lookup phụ thuộc text chính xác:
 
-🔴 **THUỐC + CHẨN_ĐOÁN: NER ĐẦY ĐỦ** — Sai/thiếu 1 ký tự integral → sai candidate → sai kết quả cuối. BẮT BUỘC giữ tất cả modifier integral.
+🔴 **THUỐC + CHẨN_ĐOÁN: NER ĐẦY ĐỦ** — Sai 1 ký tự integral → sai candidate. PHẢI giữ:
+- Thuốc: tên + strength + route + freq (vd "metoprolol 25mg po bid", KHÔNG bỏ "po bid")
+- Bệnh: tên + type + severity + complications (vd "viêm phổi cộng đồng có biến chứng X", KHÔNG bỏ "cộng đồng"/"biến chứng X")
 
-❌ **KHÔNG BAO GIỜ strip** (sẽ sai candidate lookup):
-- ❌ "25mg" / "500mg" / "1g" khỏi thuốc → mất strength → RxNorm sai
-- ❌ "độ 2" / "độ III" / "độ 1" khỏi bệnh → mất severity → ICD sai
-- ❌ "cộng đồng" / "bệnh viện" / "vô căn" / "cấp" / "mạn tính" khỏi bệnh → mất type modifier
-- ❌ "Bệnh lý" / "Hội chứng" prefix khỏi "Bệnh lý tăng huyết áp" → mất ICD context
-- ❌ "có biến chứng X" / "kèm theo Y" khỏi bệnh → mất complication → ICD sai
-- ❌ "po" / "iv" / "bid" / "uống hôm nay" / "(trước ăn)" parenthetical khỏi thuốc → mất route/freq/instruction
+❌ **KHÔNG strip** (sẽ sai ICD/RxNorm):
+- Strength/severity/complication/type modifier
+- Route/freq/instruction tokens
+- "Bệnh lý"/"Hội chứng" prefix
 
 **THUỐC** — Tên + strength + route + frequency (giữ nguyên từ input).
 ✅ "metoprolol 25mg po bid" (full)   ✅ "aspirin 81mg po daily" (full)
@@ -50,7 +55,7 @@ EXCLUDE (context):
 ✅ "WBC"   ✅ "chụp x-quang ngực"
 
 🟢 **KẾT_QUẢ_XÉT_NGHIỆM** — Value + unit (nếu có trong input). KHÔNG kèm tên test.
-✅ "14,43 K/uL"   ✅ "96%"   ✅ "dương tính"
+✅ "14,43 K/uL"   ✅ "96%"   ✅ "dương tính"   ✅ "âm tính"   ✅ "có"/"không" (vi khuẩn, ký sinh trùng)
 
 💡 **Nguyên tắc vàng**: THUỐC + CHẨN_ĐOÁN phải ĐẦY ĐỦ (candidate quan trọng). TRIỆU_CHỨNG thì NGẮN GỌN (không cần candidate). Khi nghi ngờ → giữ thêm cho THUỐC/CHẨN_ĐOÁN, bỏ bớt cho TRIỆU_CHỨNG.
 
@@ -137,14 +142,14 @@ Detection phải theo **CONTEXT** (cả câu/clause), không chỉ keyword tức
 <examples>
 ## 2 VÍ DỤ (positions đã verify 100% — LLM học theo đây)
 
-**Ex 1 — Drugs (NER ĐẦY ĐỦ giữ route/freq) + lifestyle DROP (R4) + isHistorical**
+**Ex 1 — Drugs (giữ route/freq) + lifestyle DROP**
 
-INPUT: "Bệnh nhân nam 65 tuổi. Tiền sử: tăng huyết áp 5 năm, đái tháo đường type 2. Đang dùng metoprolol 25mg po bid, aspirin 81mg po daily. Hút thuốc lá 20 năm. Căng thẳng."
+INPUT: "Bệnh nhân nam 65 tuổi. Tiền sử: tăng huyết áp 5 năm, đái tháo đường type 2. Đang dùng metoprolol 25mg po bid, aspirin 81mg po daily. Hút thuốc lá 20 năm."
 
 OUTPUT (4 entities):
-[{"text":"tăng huyết áp","type":"CHẨN_ĐOÁN","position":[32,45],"assertions":["isHistorical"],"candidates":[]},{"text":"đái tháo đường type 2","type":"CHẨN_ĐOÁN","position":[53,74],"assertions":["isHistorical"],"candidates":[]},{"text":"metoprolol 25mg po bid","type":"THUỐC","position":[86,108],"assertions":["isHistorical"],"candidates":[]},{"text":"aspirin 81mg po daily","type":"THUỐC","position":[110,130],"assertions":["isHistorical"],"candidates":[]}]
+[("tăng huyết áp","CHẨN_ĐOÁN",[32,45],["isHistorical"]),("đái tháo đường type 2","CHẨN_ĐOÁN",[53,74],["isHistorical"]),("metoprolol 25mg po bid","THUỐC",[86,108],["isHistorical"]),("aspirin 81mg po daily","THUỐC",[110,130],["isHistorical"])]
 
-*Lưu ý: THUỐC giữ NGUYÊN route/freq từ input ("metoprolol 25mg po bid", "aspirin 81mg po daily") - giúp RxNorm SCD lookup chính xác. "hút thuốc lá", "căng thẳng" KHÔNG trích (R4 lifestyle). "5 năm" duration trong "tăng huyết áp 5 năm" bị bỏ (CHẨN_ĐOÁN exclude duration).*
+*Lưu ý: THUỐC giữ NGUYÊN route/freq (RxNorm SCD). "hút thuốc lá" KHÔNG trích (R4). "5 năm" duration bị bỏ.*
 
 **Ex 2 — Drug+disease (R5) + Test+value (R6) + isNegated + isFamily + Duplicate (R8) + Text KQ**
 
@@ -181,7 +186,16 @@ INPUT: "Bệnh nhân viêm phổi cộng đồng có biến chứng tràn dịch
 OUTPUT (8 entities):
 [{"text":"viêm phổi cộng đồng có biến chứng tràn dịch màng phổi","type":"CHẨN_ĐOÁN","position":[10,63],"assertions":[],"candidates":[]},{"text":"suy tim độ III","type":"CHẨN_ĐOÁN","position":[65,79],"assertions":[],"candidates":[]},{"text":"HA","type":"TÊN_XÉT_NGHIỆM","position":[81,83],"assertions":[],"candidates":[]},{"text":"140/90 mmHg","type":"KẾT_QUẢ_XÉT_NGHIỆM","position":[84,95],"assertions":[],"candidates":[]},{"text":"mạch","type":"TÊN_XÉT_NGHIỆM","position":[97,101],"assertions":[],"candidates":[]},{"text":"110 lần/phút","type":"KẾT_QUẢ_XÉT_NGHIỆM","position":[102,114],"assertions":[],"candidates":[]},{"text":"dị ứng penicillin","type":"CHẨN_ĐOÁN","position":[124,141],"assertions":["isHistorical"],"candidates":[]},{"text":"coversyl plus 5mg/1.25mg po daily","type":"THUỐC","position":[148,181],"assertions":[],"candidates":[]}]
 
-*Lưu ý: Compound "viêm phổi cộng đồng có biến chứng tràn dịch màng phổi" → 1 entity CHẨN_ĐOÁN đầy đủ. Vital signs tách TÊN + KQ theo R6. Brand "coversyl plus" giữ nguyên.
+*Lưu ý: Compound "viêm phổi cộng đồng có biến chứng tràn dịch màng phổi" → 1 entity CHẨN_ĐOÁN đầy đủ. Vital signs tách TÊN + KQ theo R6. Brand "coversyl plus" giữ nguyên.*
+
+**Ex 5 — VN medical abbreviations (THA/NMCT/ĐTĐ) + severity + allergy**
+
+INPUT: "Bệnh nhân NMCT cấp ST chênh lên, suy tim độ III. Tiền sử THA, ĐTĐ type 2, rối loạn lipid máu. Tiền sử dị ứng aspirin. Đang dùng plavix 75mg po daily, atorvastatin 20mg uống tối."
+
+OUTPUT (8 entities):
+[("NMCT cấp ST chênh lên","CHẨN_ĐOÁN",[10,31],[]),("suy tim độ III","CHẨN_ĐOÁN",[33,47],[]),("THA","CHẨN_ĐOÁN",[57,60],["isHistorical"]),("ĐTĐ type 2","CHẨN_ĐOÁN",[62,72],["isHistorical"]),("rối loạn lipid máu","CHẨN_ĐOÁN",[74,92],["isHistorical"]),("dị ứng aspirin","CHẨN_ĐOÁN",[102,116],["isHistorical"]),("plavix 75mg po daily","THUỐC",[128,148],[]),("atorvastatin 20mg uống tối","THUỐC",[150,176],[])]
+
+*Lưu ý: VN abbreviations (NMCT=nhồi máu cơ tim, THA=tăng huyết áp, ĐTĐ=đái tháo đường) → giữ NGUYÊN viết tắt (hệ thống sẽ lookup ICD). Severity "độ III" integral (R1). "dị ứng aspirin" → CHẨN_ĐOÁN + isHistorical.*
 
 </examples>
 
@@ -342,6 +356,13 @@ if __name__ == "__main__":  # pragma: no cover
           ("mạch", 97, 101), ("110 lần/phút", 102, 114),
           ("dị ứng penicillin", 124, 141),
           ("coversyl plus 5mg/1.25mg po daily", 148, 181)]),
+        ("Ex5",
+         "Bệnh nhân NMCT cấp ST chênh lên, suy tim độ III. Tiền sử THA, ĐTĐ type 2, rối loạn lipid máu. Tiền sử dị ứng aspirin. Đang dùng plavix 75mg po daily, atorvastatin 20mg uống tối.",
+         [("NMCT cấp ST chênh lên", 10, 31), ("suy tim độ III", 33, 47),
+          ("THA", 57, 60), ("ĐTĐ type 2", 62, 72),
+          ("rối loạn lipid máu", 74, 92), ("dị ứng aspirin", 102, 116),
+          ("plavix 75mg po daily", 128, 148),
+          ("atorvastatin 20mg uống tối", 150, 176)]),
 
     ]
     all_ok = True
