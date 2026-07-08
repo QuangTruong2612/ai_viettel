@@ -452,10 +452,14 @@ class ICDRetriever:
         bm25_query = build_context_query(text, "CHẨN_ĐOÁN", other_entities)
         # Vector vẫn dùng text gốc (không contaminate embedding - bug history #4)
 
-        # L3: Hybrid search (BGE-M3 cosine ≥ 0.7 + BM25 mở rộng candidates)
+        # L3: Hybrid search (BGE-M3 cosine ≥ 0.5 + BM25 mở rộng candidates)
+        # Threshold 0.5 (không phải 0.7) vì:
+        # - VN query vs EN+VN concatenated desc: cosine ~0.55-0.70
+        # - 0.7 quá strict → miss 70% medical terms
+        # - 0.5 balance giữa precision và recall
         if self.local_search is not None:
             local_results = self.local_search.search(
-                text, threshold=0.7  # no top_k → trả hết
+                text, threshold=0.5  # giảm từ 0.7 để bắt VN→EN semantic
             )
             if local_results:
                 local_results = _filter_irrelevant_codes(local_results, text, self.idx)
@@ -1191,7 +1195,7 @@ class ICD10HybridSearch:
         alpha: float = 0.6,
         beta: float = 0.4,
         top_k: Optional[int] = None,    # None = no cap (semantic extraction)
-        threshold: float = 0.7,         # Cosine threshold (high confidence)
+        threshold: float = 0.5,         # Cosine threshold (giảm từ 0.7 → 0.5 để match VN→EN+VN)
         fanout: int = 50,
     ) -> None:
         # alpha/beta kept cho backward compat nhưng KHÔNG dùng trong search() nữa.

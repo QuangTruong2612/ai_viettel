@@ -537,7 +537,7 @@ class RxNormHybridSearch:
         self,
         vector_search: Optional[RxNormVectorSearch] = None,
         bm25_index: Optional[RxNormBM25Index] = None,
-        threshold: float = 0.7,
+        threshold: float = 0.5,  # giảm từ 0.7 → 0.5 để match VN drug text
         fanout: int = 50,
     ) -> None:
         self.vector_search = vector_search or RxNormVectorSearch()

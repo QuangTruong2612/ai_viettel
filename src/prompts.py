@@ -5,15 +5,6 @@ Output: JSON array DUY NHẤT. MỖI entity có ĐÚNG 5 trường: text, type, 
 Quy trình: Bạn (LLM) phân tích input y khoa → suy luận từng quyết định → output JSON.
 </role>
 
-<workflow>
-## CoT (5 bước trước khi output):
-1. Section headers (Tiền sử, Chẩn đoán, Lý do nhập viện, Thuốc, Điều trị).
-2. Tìm concept y khoa, bỏ lifestyle/social (R4).
-3. TYPE theo mức inclusive (R1): THUỐC + CHẨN_ĐOÁN → FULL; TRIỆU_CHỨNG → MINIMAL.
-4. Tách rules: R5 ("A cho B"), R6 (test+value), R7 (ECG nối "và"), R8 (duplicate positions).
-5. Assertions theo CONTEXT câu: isHistorical (Tiền sử:/Đang dùng), isNegated (không/chưa NGAY TRƯỚC), isFamily (người nhà).
-</workflow>
-
 <critical_rules>
 ## 8 QUY TẮC BẮT BUỘC
 
@@ -96,15 +87,6 @@ VD: "đánh trống ngực" xuất hiện 4 lần trong input → output 4 entit
 KHÔNG gộp thành 1 entity. KHÔNG skip các lần sau.
 Áp dụng cho MỌI loại (triệu chứng, chẩn đoán, thuốc, ...).
 </critical_rules>
-
-<self_check>
-## Tự kiểm tra trước khi output (MỖI entity):
-✓ text==input[start:end] (R2)        ✓ candidates=[] (R3)        ✓ đủ 5 trường
-✓ THUỐC/CHẨN_ĐOÁN giữ full integral (R1)
-✓ TRIỆU_CHỨNG bỏ duration/value/freq (R1)
-✓ R5 split "A cho B", R6 split test+value, R7 split ECG "và", R8 duplicate positions
-✓ Assertion đúng context câu/clause (không phải keyword tức thì — VD "không sốt" gần "đau ngực" không negate "đau ngực")
-</self_check>
 
 <entity_types>
 ## 5 LOẠI (enum chính xác)
@@ -192,14 +174,14 @@ OUTPUT (6 entities — note mức inclusive khác nhau theo type):
   - *"tăng huyết áp độ 2" → KEEP NGUYÊN (severity "độ 2" integral với ICD code)*
   - *"Tiền sử:" → KHÔNG extract (section header)*
 
-**Ex 6 — ECG/LAB pattern (R7) + Test (R6)**
+**Ex 4 — Compound diagnosis (R1) + Vital signs (R6) + Brand drug**
 
-INPUT: "Bệnh nhân vào viện vì đau ngực. Monitor holter cho thấy ngoại tâm thu nhĩ và ngoại tâm thu thất thường xuyên."
+INPUT: "Bệnh nhân viêm phổi cộng đồng có biến chứng tràn dịch màng phổi, suy tim độ III. HA 140/90 mmHg, mạch 110 lần/phút. Tiền sử dị ứng penicillin. Dùng coversyl plus 5mg/1.25mg po daily."
 
-OUTPUT (4 entities):
-[{"text":"đau ngực","type":"TRIỆU_CHỨNG","position":[22,30],"assertions":[],"candidates":[]},{"text":"Monitor holter","type":"TÊN_XÉT_NGHIỆM","position":[32,46],"assertions":[],"candidates":[]},{"text":"ngoại tâm thu nhĩ","type":"CHẨN_ĐOÁN","position":[56,73],"assertions":[],"candidates":[]},{"text":"ngoại tâm thu thất","type":"CHẨN_ĐOÁN","position":[77,95],"assertions":[],"candidates":[]}]
+OUTPUT (8 entities):
+[{"text":"viêm phổi cộng đồng có biến chứng tràn dịch màng phổi","type":"CHẨN_ĐOÁN","position":[10,63],"assertions":[],"candidates":[]},{"text":"suy tim độ III","type":"CHẨN_ĐOÁN","position":[65,79],"assertions":[],"candidates":[]},{"text":"HA","type":"TÊN_XÉT_NGHIỆM","position":[81,83],"assertions":[],"candidates":[]},{"text":"140/90 mmHg","type":"KẾT_QUẢ_XÉT_NGHIỆM","position":[84,95],"assertions":[],"candidates":[]},{"text":"mạch","type":"TÊN_XÉT_NGHIỆM","position":[97,101],"assertions":[],"candidates":[]},{"text":"110 lần/phút","type":"KẾT_QUẢ_XÉT_NGHIỆM","position":[102,114],"assertions":[],"candidates":[]},{"text":"dị ứng penicillin","type":"CHẨN_ĐOÁN","position":[124,141],"assertions":["isHistorical"],"candidates":[]},{"text":"coversyl plus 5mg/1.25mg po daily","type":"THUỐC","position":[148,181],"assertions":[],"candidates":[]}]
 
-*Lưu ý R7: "ngoại tâm thu nhĩ và ngoại tâm thu thất" → TÁCH 2 CHẨN_ĐOÁN riêng. Bỏ "thường xuyên" (frequency, không phải entity). "Monitor holter" → TÊN_XÉT_NGHIỆM (tên thiết bị). "đau ngực" → TRIỆU_CHỨNG minimal (bỏ "vào viện vì" clause).*
+*Lưu ý: Compound "viêm phổi cộng đồng có biến chứng tràn dịch màng phổi" → 1 entity CHẨN_ĐOÁN đầy đủ. Vital signs tách TÊN + KQ theo R6. Brand "coversyl plus" giữ nguyên.
 
 </examples>
 
@@ -360,18 +342,7 @@ if __name__ == "__main__":  # pragma: no cover
           ("mạch", 97, 101), ("110 lần/phút", 102, 114),
           ("dị ứng penicillin", 124, 141),
           ("coversyl plus 5mg/1.25mg po daily", 148, 181)]),
-        ("Ex6",
-         "Bệnh nhân vào viện vì đau ngực. Monitor holter cho thấy ngoại tâm thu nhĩ và ngoại tâm thu thất thường xuyên.",
-         [("đau ngực", 22, 30), ("Monitor holter", 32, 46),
-          ("ngoại tâm thu nhĩ", 56, 73), ("ngoại tâm thu thất", 77, 95)]),
 
-        ("Ex5",
-         "Bệnh nhân nhập viện vì đau ngực. Tiền sử: tăng huyết áp, đái tháo đường type 2. Tiền sử gia đình có THA. Không sốt, không ho. Tiền sử dị ứng aspirin. Đang dùng amlodipine 5mg po daily.",
-         [("đau ngực", 23, 31), ("tăng huyết áp", 42, 55),
-          ("đái tháo đường type 2", 57, 78), ("THA", 100, 103),
-          ("sốt", 111, 114), ("ho", 122, 124),
-          ("dị ứng aspirin", 134, 148),
-          ("amlodipine 5mg po daily", 160, 183)]),
     ]
     all_ok = True
     for name, text, entities in examples_in_prompt:
