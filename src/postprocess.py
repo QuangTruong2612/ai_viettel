@@ -1331,9 +1331,14 @@ def _expand_duplicates(entities, input_text):
         return entities
 
     # Modifiers VN cần strip trước khi match (R14/R25)
+    # PREFIX modifiers: tăng, giảm, có, không, ...
+    # SUFFIX qualifiers: nhẹ, nặng, vừa, ... (R6 cũng drop duration/intensity)
     _MODIFIERS_PREFIX = re.compile(
-        r"^(tăng|giảm|có|không|đang|bị|bị\s+|nhẹ|nặng|vừa|"
-        r"rõ|rõ\s+rệt|ít|nhiều|hơi|khoảng|có\s+thể)\s+",
+        r"^(tăng|giảm|có|không|đang|bị|bị\s+|rõ|rõ\s+rệt|ít|nhiều|hơi|khoảng|có\s+thể)\s+",
+        re.IGNORECASE | re.UNICODE,
+    )
+    _MODIFIERS_SUFFIX = re.compile(
+        r"\s+(nhẹ|nặng|vừa|nhẹ\s+nhàng|nặng\s+nề|nhẹ\s+vừa|có\s+triệu\s+chứng|vừa\s+phải)$",
         re.IGNORECASE | re.UNICODE,
     )
 
@@ -1348,30 +1353,33 @@ def _expand_duplicates(entities, input_text):
         text_lower = text.lower()
         input_lower = input_text.lower()
 
+        # UNION exact + stripped match (lấy tất cả vị trí)
+        # Set để tránh duplicate positions giữa exact và stripped
+        all_positions_set = set()
+
         # Cách 1: exact substring match
-        positions_exact = []
         start = 0
         while True:
             idx = input_lower.find(text_lower, start)
             if idx < 0:
                 break
-            positions_exact.append([idx, idx + len(text)])
+            all_positions_set.add((idx, idx + len(text)))
             start = idx + 1
 
         # Cách 2: stripped match (bỏ modifier "tăng", "giảm"...)
         text_stripped = _MODIFIERS_PREFIX.sub("", text_lower).strip()
-        positions_stripped = []
+        # Also strip SUFFIX qualifiers (nhẹ, nặng, vừa)
+        text_stripped = _MODIFIERS_SUFFIX.sub("", text_stripped).strip()
         if text_stripped and text_stripped != text_lower and len(text_stripped) >= 4:
             start = 0
             while True:
                 idx = input_lower.find(text_stripped, start)
                 if idx < 0:
                     break
-                positions_stripped.append([idx, idx + len(text_stripped)])
+                all_positions_set.add((idx, idx + len(text_stripped)))
                 start = idx + 1
 
-        # Merge: dùng exact positions (ưu tiên)
-        all_positions = positions_exact if positions_exact else positions_stripped
+        all_positions = [list(p) for p in sorted(all_positions_set)]
 
         # Nếu chỉ có 1 occurrence → giữ nguyên
         if len(all_positions) <= 1:
