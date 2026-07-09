@@ -332,38 +332,52 @@ def _try_recover_typo(
 
 
 def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Bỏ trùng (cùng text + type) — kết quả sort theo position.
+    """Bỏ trùng entities theo (text, type) - R10 LOOSE chuẩn (2026-07-09).
 
-    R10 LOOSE (mới 2026-07, tối ưu cho model < 9B): Cùng text + type → 1 entity.
-    Áp dụng cho TẤT CẢ loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XN, KQ_XN).
-    Giữ entity ở vị trí sớm nhất (position[0] nhỏ nhất).
+    R10 LOOSE (chuẩn, tối ưu cho model < 9B):
+    - Cùng text + type → 1 entity (dedup theo text+type, bất kể position)
+    - Áp dụng cho TẤT CẢ loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XN, KQ_XN)
+    - Giữ entity ở vị trí sớm nhất (position[0] nhỏ nhất)
 
-    R22 (mới 2026-07): test name/procedure (TÊN_XÉT_NGHIỆM) duplicate
-    chỉ giữ 1 entity đầu tiên (position sớm nhất). Áp dụng CÙNG với R10 LOOSE.
+    R22: TÊN_XÉT_NGHIỆM duplicate cùng 1 admission → 1 entity (R22 dedup).
 
-    Tại sao R10 LOOSE:
-    - Model < 9B (vd Qwen 2.5 7B) hay gộp duplicate tự nhiên → R10 strict gây miss
-    - Trade-off: giảm recall tuyệt đối trên strict, nhưng tăng recall trên loose target
-    - Ưu tiên quality > quantity trong F1 evaluation khi model yếu
+    Position field (R27.1, từ LLM):
+    - Position KHÔNG quyết định dedup (vẫn dedup theo text+type)
+    - Position chỉ giúp LLM extract ĐỦ entities (không miss duplicate)
+    - Postprocess dùng position[0] để sort entities theo thứ tự xuất hiện
+
+    Tại sao R10 LOOSE (không R10 STRICT theo position):
+    - LLM có position giúp extract đủ duplicate (vd "ngất xỉu" x 4 → extract 4)
+    - Postprocess dedup về 1 → đơn giản, ổn định
+    - Trade-off: giảm recall tuyệt đối nhưng tăng precision (F1 ↑)
+    - User preference (turn trước): "chỉ R10 loose, 1 pass"
     """
     out: list[dict[str, Any]] = []
-    seen_keys: set[tuple[str, str]] = set()  # (text_lower, type) cho R10 LOOSE + R22
+    # Track: (text_lower, type) → đã thấy
+    seen_keys: set[tuple[str, str]] = set()
 
     # Sort theo position để giữ entity sớm nhất
     sorted_ents = sorted(
         [e for e in entities if e.get("text")],
-        key=lambda e: int(e.get("position", [0, 0])[0]) if isinstance(e.get("position"), list) else 0,
+        key=lambda e: (
+            int(e.get("position", [0, 0])[0])
+            if isinstance(e.get("position"), list) and len(e.get("position")) >= 1
+            else 0
+        ),
     )
 
     for ent in sorted_ents:
         etype = ent.get("type", "")
         text = str(ent.get("text", "")).strip()
-        start = int(ent.get("position", [0, 0])[0]) if isinstance(ent.get("position"), list) else 0
 
-        # R10 LOOSE + R22: nếu đã thấy (text, type) → drop duplicate
-        # Áp dụng cho TẤT CẢ loại
+        # R10 LOOSE: cùng text + type → 1 entity (dedup bất kể position)
         dedup_key = (text.lower(), etype)
         if dedup_key in seen_keys:
+            pos = ent.get("position", [0, 0])
+            if isinstance(pos, list) and len(pos) >= 1:
+                start = pos[0]
+            else:
+                start = 0
             logger.debug(
                 "R10 LOOSE dedup: drop duplicate %s '%s' at pos %d",
                 etype, text, start,
@@ -374,44 +388,6 @@ def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
     out.sort(key=lambda e: e["position"][0])
     return out
-
-
-# ---------------------------------------------------------------------- #
-# Drop drug names that look wrong (heuristic)
-# ---------------------------------------------------------------------- #
-
-
-_DRUG_NAME_BAD_PATTERNS = re.compile(
-    r"^(thuốc|drug|medication|thuoc)\s*$", re.IGNORECASE
-)
-
-
-# Strip prescription suffix "x N + unit" trong drug text (R4 mới 2026-07).
-# KEEP "x 1" / "x 2" (dose count), DROP the unit word sau đó.
-# Patterns:
-#   "aspirin 325mg x 1 viên" → "aspirin 325mg x 1" (drop " viên")
-#   "aspirin 325mg x 1 viên sáng" → "aspirin 325mg x 1" (drop " viên sáng")
-#   "paracetamol 500mg x 2 lần/ngày" → "paracetamol 500mg x 2" (drop " lần/ngày")
-#   "aspirin 325mg x 1" → "aspirin 325mg x 1" (no unit → KEEP nguyên)
-# Lưu ý: "po bid" / "po daily" KHÔNG match (không có "x N").
-_DRUG_X_N_PATTERN = re.compile(
-    r"\s+(?:viên(?:\s+(?:sáng|tối|trưa))?|tablet|tab|lần(?:/ngày)?|ống|gói|ngày)\s*$",
-    re.IGNORECASE | re.UNICODE,
-)
-
-
-# SMART parens strip (R18 mới 2026-07): chỉ drop parens chứa admin instruction words.
-# KHÔNG drop parens có numerical/clinical info (giữ dose change, concentration, brand abbrev).
-# Admin keywords: uống, ăn, trước, sau, food, meal, hôm nay, cùng bữa, with food
-# Numerical/clinical: 50mg, 25mg, 5mg/ml, HCl, 200mg/5ml, etc. (digits present)
-#
-# Heuristic: nếu parens có ≥1 digit → KEEP (clinical data); nếu KHÔNG có digit + có admin word → DROP.
-_DRUG_PARENS_PATTERN = re.compile(
-    r"\s+\(([^)]*)\)",
-    re.UNICODE,
-)
-
-
 def _is_admin_parens(content: str) -> bool:
     """True nếu parens content là admin instruction (DROP), False nếu clinical data (KEEP)."""
     if not content:
