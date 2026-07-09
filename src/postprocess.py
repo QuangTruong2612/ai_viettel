@@ -332,29 +332,21 @@ def _try_recover_typo(
 
 
 def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Bỏ trùng entities theo (text, type) - R10 LOOSE chuẩn (2026-07-09).
+    """Bỏ trùng entities dựa trên (text, type, position) - R10 STRICT (2026-07-09, user preference).
 
-    R10 LOOSE (chuẩn, tối ưu cho model < 9B):
-    - Cùng text + type → 1 entity (dedup theo text+type, bất kể position)
+    R10 STRICT (đổi từ R10 LOOSE theo user feedback 2026-07-09):
+    - Cùng text + type + cùng position → 1 entity (R22 dedup)
+    - Cùng text + type + khác position → giữ cả N entities (R10 STRICT theo position)
     - Áp dụng cho TẤT CẢ loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XN, KQ_XN)
-    - Giữ entity ở vị trí sớm nhất (position[0] nhỏ nhất)
 
-    R22: TÊN_XÉT_NGHIỆM duplicate cùng 1 admission → 1 entity (R22 dedup).
-
-    Position field (R27.1, từ LLM):
-    - Position KHÔNG quyết định dedup (vẫn dedup theo text+type)
-    - Position chỉ giúp LLM extract ĐỦ entities (không miss duplicate)
-    - Postprocess dùng position[0] để sort entities theo thứ tự xuất hiện
-
-    Tại sao R10 LOOSE (không R10 STRICT theo position):
-    - LLM có position giúp extract đủ duplicate (vd "ngất xỉu" x 4 → extract 4)
-    - Postprocess dedup về 1 → đơn giản, ổn định
-    - Trade-off: giảm recall tuyệt đối nhưng tăng precision (F1 ↑)
-    - User preference (turn trước): "chỉ R10 loose, 1 pass"
+    Lý do R10 STRICT (đổi từ LOOSE):
+    - LLM có position → extract đầy đủ duplicate ở các vị trí khác nhau
+    - Postprocess giữ N entities để khớp với ground truth (48-51 entities/file)
+    - Trade-off: tăng recall tuyệt đối, có thể tăng false positive nếu LLM extract duplicate giả
     """
     out: list[dict[str, Any]] = []
-    # Track: (text_lower, type) → đã thấy
-    seen_keys: set[tuple[str, str]] = set()
+    # Track: (text_lower, type, position[0]) → đã thấy
+    seen_keys: set[tuple[str, str, int]] = set()
 
     # Sort theo position để giữ entity sớm nhất
     sorted_ents = sorted(
@@ -369,21 +361,21 @@ def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     for ent in sorted_ents:
         etype = ent.get("type", "")
         text = str(ent.get("text", "")).strip()
+        pos = ent.get("position", [0, 0])
+        if not (isinstance(pos, list) and len(pos) == 2 and all(isinstance(p, int) for p in pos)):
+            pos = [0, 0]
+        start = pos[0]
 
-        # R10 LOOSE: cùng text + type → 1 entity (dedup bất kể position)
-        dedup_key = (text.lower(), etype)
-        if dedup_key in seen_keys:
-            pos = ent.get("position", [0, 0])
-            if isinstance(pos, list) and len(pos) >= 1:
-                start = pos[0]
-            else:
-                start = 0
+        # R10 STRICT: cùng text + type + position → 1 entity (drop duplicate vị trí)
+        # Khác position → giữ cả N entities
+        key = (text.lower(), etype, start)
+        if key in seen_keys:
             logger.debug(
-                "R10 LOOSE dedup: drop duplicate %s '%s' at pos %d",
-                etype, text, start,
+                "R22 dedup: drop duplicate (text=%r, type=%r, pos=%d)",
+                text, etype, start,
             )
             continue
-        seen_keys.add(dedup_key)
+        seen_keys.add(key)
         out.append(ent)
 
     out.sort(key=lambda e: e["position"][0])
