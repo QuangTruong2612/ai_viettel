@@ -168,11 +168,43 @@ def validate_positions(
                 end = len(input_text)
             # Nếu substring không khớp → tìm lại
             if input_text[start:end] != text:
-                start, end = 0, 0  # force re-find bên dưới
+                # Fix case-sensitivity (mới 2026-07): nếu chỉ khác case → tìm lại
+                # case-insensitive và UPDATE text thành correct case trong input
+                # (vd "khó thở nhẹ" → "Khó thở nhẹ")
+                if input_text[start:end].lower() == text.lower():
+                    text = input_text[start:end]
+                else:
+                    start, end = 0, 0  # force re-find bên dưới
 
         # Trường hợp 2: LLM KHÔNG cung cấp position (mới) → TỰ TÌM
         if start == 0 and end == 0:
             found = _find_span(input_text, text)
+            if found is None:
+                # Fallback: thử case-insensitive để recover entities có case sai
+                ci_idx = input_text.lower().find(text.lower())
+                if ci_idx >= 0:
+                    actual_text = input_text[ci_idx:ci_idx + len(text)]
+                    if actual_text.lower() == text.lower():
+                        found = (ci_idx, ci_idx + len(text))
+                        text = actual_text  # update text sang correct case
+                        logger.debug(
+                            "Recovered case-mismatched entity '%s' → '%s'",
+                            ent.get("text", ""), text,
+                        )
+            # R23 typo recovery: nếu text bị dính (vd "atenololtrong" → "atenolol")
+            if found is None:
+                # Pass hint_pos = LLM's original pos để tìm occurrence gần nhất
+                # (tránh recover sai khi drug name xuất hiện nhiều nơi)
+                hint_pos = int(ent.get("position", [0, 0])[0]) if isinstance(ent.get("position"), list) else 0
+                recovered = _try_recover_typo(text, input_text, hint_pos=hint_pos)
+                if recovered is not None:
+                    recovered_text, start_recovered, end_recovered = recovered
+                    found = (start_recovered, end_recovered)
+                    text = recovered_text
+                    logger.debug(
+                        "Recovered typo entity '%s' → '%s' at pos %d",
+                        ent.get("text", ""), text, start_recovered,
+                    )
             if found is None:
                 logger.debug("Bỏ entity không tìm được: %r", text)
                 continue
@@ -182,21 +214,165 @@ def validate_positions(
     return out
 
 
+def _find_closest_occurrence(
+    text: str, substring: str, hint_pos: int
+) -> int | None:
+    """Tìm occurrence của substring gần hint_pos nhất.
+
+    Dùng cho R23 typo recovery: nếu drug name xuất hiện NHIỀU LẦN trong input
+    (vd "atenolol" ở cả dòng 5 và dòng 36), chọn vị trí GẦN entity_pos nhất
+    để recover đúng context.
+
+    Args:
+        text: input text để tìm.
+        substring: chuỗi cần tìm.
+        hint_pos: vị trí mong muốn (entity_pos của entity gốc).
+
+    Returns: vị trí index của occurrence gần hint_pos nhất, hoặc None nếu không tìm thấy.
+    """
+    if not text or not substring:
+        return None
+    text_lower = text.lower()
+    sub_lower = substring.lower()
+    sub_len = len(sub_lower)
+
+    best_idx = None
+    best_dist = float("inf")
+
+    start = 0
+    while True:
+        idx = text_lower.find(sub_lower, start)
+        if idx < 0:
+            break
+        dist = abs(idx - hint_pos)
+        if dist < best_dist:
+            best_dist = dist
+            best_idx = idx
+        # Optimization: nếu đã tìm thấy match exact tại hint_pos thì dừng
+        if dist == 0:
+            break
+        start = idx + 1
+
+    return best_idx
+
+
+# VN particles thường bị dính với drug names
+_VN_PARTICLES = (
+    "trong", "ngày", "hôm", "nay", "qua", "sáng", "tối", "chiều", "trưa",
+    "lúc", "khi", "đang", "đã", "sẽ", "với", "cho", "của", "từ",
+    "uống", "tiêm", "dùng", "trước", "sau", "ăn", "nghỉ", "trị",
+    "điều", "trị", "việc", "nhà", "bệnh", "viện", "mạch", "vào", "ra",
+)
+
+
+def _try_recover_typo(
+    text: str, input_text: str, hint_pos: int = 0
+) -> tuple[str, int, int] | None:
+    """R23: thử recover entity bị typo dính chữ.
+
+    Patterns:
+    1. Drug name + VN particle (vd "atenololtrong" → "atenolol")
+       → match first word trong _COMMON_DRUG_NAMES, sau đó là particle.
+    2. "cảm giác" + adjective dính (vd "cảm giáckhó chịu" → "cảm giác khó chịu")
+       → match "cảm giác" + " " + VN/EN word.
+
+    Args:
+        text: entity text bị typo (vd "atenololtrong").
+        input_text: toàn bộ input.
+        hint_pos: vị trí gốc của entity trong input (để tìm match gần nhất,
+            tránh recover sai nếu drug name xuất hiện nhiều nơi).
+
+    Returns: (recovered_text, start, end) nếu match, None nếu không.
+    """
+    if not text or len(text) < 5:
+        return None
+
+    text_lower = text.lower().strip()
+
+    # Pattern 1: Drug name + VN particle dính (không có space)
+    # VD: "atenololtrong" → "atenolol" + "trong"
+    for drug in _COMMON_DRUG_NAMES:
+        if text_lower.startswith(drug) and len(text_lower) > len(drug):
+            suffix = text_lower[len(drug):]
+            # Suffix phải là particle (không có digit, không có strength unit)
+            if not suffix[0].isdigit() and suffix in _VN_PARTICLES:
+                # Tìm vị trí drug name gần hint_pos nhất (tránh match sai ở vị trí khác)
+                idx = _find_closest_occurrence(input_text, drug, hint_pos)
+                if idx is not None and idx >= 0:
+                    return (input_text[idx:idx + len(drug)], idx, idx + len(drug))
+
+    # Pattern 2: "cảm giác" + adjective dính → "cảm giác " + adjective
+    for prefix in ("cảm giác", "triệu chứng", "dấu hiệu"):
+        if text_lower.startswith(prefix) and len(text_lower) > len(prefix):
+            suffix = text_lower[len(prefix):]
+            # Suffix phải là 1 từ (vd "khó", "đau", "nặng")
+            if suffix and not suffix[0].isspace() and len(suffix) <= 20:
+                # Thêm space
+                idx = _find_closest_occurrence(input_text, prefix, hint_pos)
+                if idx is not None and idx >= 0:
+                    # Kiểm tra text tiếp theo trong input có phải space + word không
+                    next_start = idx + len(prefix)
+                    if next_start < len(input_text) and input_text[next_start] == " ":
+                        # Đã có space, không cần recover
+                        continue
+                    # Recover: thêm space
+                    recovered_text = input_text[idx:idx + len(prefix)] + " " + suffix
+                    # Chỉ return nếu match tìm được trong input
+                    if recovered_text.lower() in input_text.lower():
+                        ri = _find_closest_occurrence(input_text, recovered_text, hint_pos)
+                        if ri is not None:
+                            return (input_text[ri:ri + len(recovered_text)], ri, ri + len(recovered_text))
+
+    return None
+
+
 # ---------------------------------------------------------------------- #
 # Dedupe
 # ---------------------------------------------------------------------- #
 
 
 def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Bỏ trùng (cùng text + start) — kết quả sort theo start."""
-    seen: set[tuple[str, int]] = set()
+    """Bỏ trùng (cùng text + start) — kết quả sort theo start.
+
+    R22 (mới 2026-07): test name/procedure (TÊN_XÉT_NGHIỆM) duplicate
+    chỉ giữ 1 entity đầu tiên (position sớm nhất). Áp dụng TRƯỚC R10 generic
+    dedup. Tại sao: trong F1 evaluation, 1 test name xuất hiện N lần = 1 ground
+    truth entity, extract N sẽ gây false positive.
+    """
     out: list[dict[str, Any]] = []
-    for ent in entities:
-        key = (str(ent.get("text", "")), int(ent.get("position", [0, 0])[0]))
-        if key in seen:
+    seen_general: set[tuple[str, int]] = set()
+    seen_test_names: set[tuple[str, str]] = set()  # (text_lower, type) cho R22
+
+    # Pass 1: Áp dụng R22 - TÊN_XÉT_NGHIỆM duplicate → chỉ giữ 1 (entity đầu tiên)
+    # Sort theo position để giữ entity sớm nhất
+    sorted_ents = sorted(
+        [e for e in entities if e.get("text")],
+        key=lambda e: int(e.get("position", [0, 0])[0]) if isinstance(e.get("position"), list) else 0,
+    )
+
+    for ent in sorted_ents:
+        etype = ent.get("type", "")
+        text = str(ent.get("text", "")).strip()
+        start = int(ent.get("position", [0, 0])[0]) if isinstance(ent.get("position"), list) else 0
+
+        # R22: nếu là TÊN_XÉT_NGHIỆM và đã thấy text này rồi → drop
+        if etype == "TÊN_XÉT_NGHIỆM":
+            test_key = (text.lower(), etype)
+            if test_key in seen_test_names:
+                logger.debug(
+                    "R22 dedup: drop duplicate TÊN_XÉT_NGHIỆM '%s' at pos %d",
+                    text, start,
+                )
+                continue
+            seen_test_names.add(test_key)
+
+        # R10: dedup generic (cùng text + start)
+        general_key = (text, start)
+        if general_key in seen_general:
             continue
-        seen.add(key)
+        seen_general.add(general_key)
         out.append(ent)
+
     out.sort(key=lambda e: e["position"][0])
     return out
 
@@ -519,8 +695,9 @@ def _detect_assertions_from_context(
     """Detect assertions từ input context (LLM yếu hay quên).
 
     Manh mối (case-insensitive):
-    - isHistorical: input có "Tiền sử:", "Trước đây:", "Đang dùng", "Đang duy trì"
-      và entity nằm trong window 200 chars sau manh mối.
+    - isHistorical: input có "Tiền sử:", "Tiền sử bệnh", "Trước đây:", "Đang dùng",
+      "Đang duy trì", "Thuốc trước", "Thuốc trước khi nhập viện", "Thuốc trước đây"
+      và entity nằm trong window 500 chars sau manh mối.
     - isNegated: input có "không", "chưa", "âm tính", "không xuất hiện"
       và nằm trong window 30 chars trước entity.
     - isFamily: input có "bố", "mẹ", "anh", "chị", "em", "ông", "bà" + "bệnh nhân"
@@ -532,9 +709,10 @@ def _detect_assertions_from_context(
     text_lower = input_text.lower()
     pos = max(0, entity_pos)
 
-    # Window quanh entity (200 chars)
-    win_start = max(0, pos - 200)
-    win_end = min(len(input_text), pos + len(entity_text) + 100)
+    # Window quanh entity (mở rộng 500 chars thay vì 200 để bắt THUỐC trong section
+    # "Tiền sử bệnh" + "Thuốc trước khi nhập viện" có thể cách xa header)
+    win_start = max(0, pos - 500)
+    win_end = min(len(input_text), pos + len(entity_text) + 200)
     window_lower = text_lower[win_start:win_end]
 
     # Window trước entity cho negation (20 chars) — đủ cho "không ", "chưa ".
@@ -542,13 +720,18 @@ def _detect_assertions_from_context(
     pre_window = text_lower[pre_start:pos]
     found = []
 
-    # isHistorical
-    historical_markers = ["tiền sử", "trước đây", "đang duy trì", "đang dùng", "trước đó", "đã từng"]
+    # isHistorical (mở rộng markers + window)
+    historical_markers = [
+        "tiền sử bệnh", "tiền sử", "trước đây", "đang duy trì", "đang dùng",
+        "trước đó", "đã từng", "thuốc trước khi nhập viện", "thuốc trước",
+        "trước nhập viện", "trước đó",
+    ]
+    # Tìm TẤT CẢ markers trong window, không phải chỉ vị trí đầu tiên trong text
     for m in historical_markers:
-        if m in window_lower and m not in found:
-            # Mark vị trí của marker
-            marker_pos = text_lower.find(m)
-            if marker_pos >= 0 and abs(marker_pos - pos) < 300:
+        if m in window_lower:
+            # Mark vị trí của marker (ưu tiên vị trí gần entity nhất trong window)
+            marker_pos = window_lower.rfind(m) + win_start
+            if marker_pos >= 0 and abs(marker_pos - pos) < 500:
                 found.append("isHistorical")
                 break
 

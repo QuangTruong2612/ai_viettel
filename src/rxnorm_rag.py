@@ -734,6 +734,11 @@ class RxNormRetriever:
         - Hybrid threshold nâng 0.7→0.78 (tránh candidates noise)
         - Top_k=1 đã đúng → đảm bảo "1 mã thuốc" semantic, KHÔNG list nhiều
         - Nếu confidence thấp → return [], KHÔNG đoán sai
+
+        2026-07 fix: Thêm L4 fallback — nếu L1 ingredient-only exact match fail
+        (vd "atenolol" có trong data nhưng L5 lookup miss) → thử fuzzy match trên
+        name field với threshold thấp hơn (75) để bắt các trường hợp drug name
+        ngắn gọn không match được qua L1.
         """
         if not drug_text:
             return []
@@ -763,6 +768,16 @@ class RxNormRetriever:
         # L3: Fuzzy match với threshold 80 (strict hơn 70 cũ)
         result = self._fuzzy_local(drug_text, threshold=80)
         if result:
+            return result[:1]
+
+        # L4: Fuzzy match lỏng hơn (75) — fallback cho drug name ngắn (vd "atenolol")
+        # mà L1 miss (do index chưa build đúng hoặc ingredient normalization fail)
+        result = self._fuzzy_local(drug_text, threshold=75)
+        if result:
+            logger.debug(
+                "RxNorm L4 loose fuzzy fallback matched '%s' → %s",
+                drug_text, result,
+            )
             return result[:1]
 
         return []  # confidence thấp → empty

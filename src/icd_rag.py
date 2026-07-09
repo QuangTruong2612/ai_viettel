@@ -448,6 +448,13 @@ class ICDRetriever:
         if key in self.idx.exact:
             return sorted(set(self.idx.exact[key]))[:2]
 
+        # L1.5: VN prefix exact match — nếu text là prefix của desc_vi (vd
+        # "viêm tuyến mồ hôi" là prefix của "Viêm tuyến mồ hôi mủ [nhọt ổ gà]")
+        # → match. Fix bug L73.2 bị miss vì desc_vi có thêm "mủ [nhọt ổ gà]".
+        prefix_codes = self._exact_match_vn_prefix(text)
+        if prefix_codes:
+            return sorted(set(prefix_codes))[:2]
+
         # L2: Build query có context cho BM25 (dùng nearby drugs/symptoms)
         bm25_query = build_context_query(text, "CHẨN_ĐOÁN", other_entities)
         # Vector vẫn dùng text gốc (không contaminate embedding - bug history #4)
@@ -495,6 +502,13 @@ class ICDRetriever:
                     restricted = _restrict_chapter(kept, text)
                     if restricted:
                         return restricted[:2]
+                    # Fallback 2026-07: nếu text match chapter keyword (vd "tuyến mồ hôi"
+                    # → L73) mà `kept` không có code L73 nào → thử VN prefix exact match
+                    # trong index (desc_vi bắt đầu bằng text) thay vì trả bacterial codes.
+                    if _text_matches_chapter_keyword(text):
+                        prefix_codes = self._exact_match_vn_prefix(text)
+                        if prefix_codes:
+                            return sorted(set(prefix_codes))[:2]
                     return kept[:2]
 
         # L4: Local fuzzy match trên names VN (threshold 85, cap 2)
@@ -505,6 +519,10 @@ class ICDRetriever:
                 restricted = _restrict_chapter(fuzzy_vn[:2], text)
                 if restricted:
                     return restricted
+                if _text_matches_chapter_keyword(text):
+                    prefix_codes = self._exact_match_vn_prefix(text)
+                    if prefix_codes:
+                        return sorted(set(prefix_codes))[:2]
                 return fuzzy_vn[:2]
 
         # L5: BM25 fallback (top-2 — strict hơn cho Set-based F1)
@@ -516,6 +534,10 @@ class ICDRetriever:
                     restricted = _restrict_chapter(bm25_codes[:2], text)
                     if restricted:
                         return restricted
+                    if _text_matches_chapter_keyword(text):
+                        prefix_codes = self._exact_match_vn_prefix(text)
+                        if prefix_codes:
+                            return sorted(set(prefix_codes))[:2]
                     return bm25_codes[:2]
 
         return []  # noqa: RET504
@@ -572,6 +594,34 @@ class ICDRetriever:
             code = self.idx.codes[self.idx.name_to_idx[name]]
             if code not in out:
                 out.append(code)
+        return out
+
+    # ------------------------------------------------------------------ #
+
+    def _exact_match_vn_prefix(self, text: str) -> list[str]:
+        """Match VN prefix: nếu text là prefix (case-insensitive) của bất kỳ
+        desc_vi nào trong index → return codes tương ứng.
+
+        Fix L73.2 case: entity "viêm tuyến mồ hôi" không match exact
+        "viêm tuyến mồ hôi mủ [nhọt ổ gà]" vì thiếu "mủ [nhọt ổ gà]".
+        Nhưng text là prefix của desc_vi → match L73.2.
+
+        Min prefix length = 8 chars để tránh false positive ("viêm" match
+        hàng trăm codes khác nhau).
+        """
+        if not text or len(text) < 8:
+            return []
+        text_lower = text.lower().strip()
+        import re as _re
+        out: list[str] = []
+        for name, idx in self.idx.name_to_idx.items():
+            name_lower = name.lower().strip()
+            # Strip bracketed context "[...]" và "(...)" để so sánh prefix
+            name_clean = _re.sub(r"\s*[\[\(].*?[\]\)]\s*", " ", name_lower).strip()
+            if name_clean.startswith(text_lower):
+                code = self.idx.codes[idx]
+                if code not in out:
+                    out.append(code)
         return out
 
     # ------------------------------------------------------------------ #
@@ -1366,6 +1416,22 @@ def _restrict_chapter(codes, entity_text):
             if restricted:
                 return restricted
     return codes
+
+
+def _text_matches_chapter_keyword(text: str) -> bool:
+    """True nếu text chứa keyword của bất kỳ chapter restriction rule nào.
+
+    Dùng để trigger VN prefix exact match fallback khi vector search trả codes
+    sai chapter (vd: "viêm tuyến mồ hôi" → vector trả A00.0/A04 bacterial,
+    nhưng text match "L73" rule → fallback exact match sẽ tìm L73.2).
+    """
+    if not text:
+        return False
+    text_lower = text.lower()
+    for keywords, _ in _CHAPTER_RESTRICTIONS:
+        if any(kw in text_lower for kw in keywords):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------- #
