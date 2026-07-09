@@ -39,7 +39,38 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+_LOCAL_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
+# Path Kaggle cố định (chỉ đọc - chỉ dùng nếu user đã upload sẵn).
+# Bao gồm: embeddings (.npy) + index (.json) + translation cache (.json).
+# KHÔNG có: JSONL data source (rxnorm.jsonl) - phải dùng local.
+_KAGGLE_DATA_DIR = Path("/kaggle/input/datasets/quangtrg/data_match/data")
+
+
+def _detect_data_dir() -> Path:
+    """Auto-detect data directory: Kaggle cached nếu có, fallback local.
+
+    Trên Kaggle, embeddings + index files đã được upload sẵn để tránh
+    build lại (rất chậm). Đường dẫn: /kaggle/input/datasets/quangtrg/data_match/data/
+
+    Returns:
+        Path tới data directory ưu tiên cho EMBEDDINGS + INDEX.
+        JSONL data source LUÔN dùng local (không có trên Kaggle).
+    """
+    if (
+        _KAGGLE_DATA_DIR.exists()
+        and _KAGGLE_DATA_DIR.is_dir()
+        and any(_KAGGLE_DATA_DIR.iterdir())
+    ):
+        return _KAGGLE_DATA_DIR
+    return _LOCAL_DATA_DIR
+
+
+# DATA_DIR: cho EMBEDDINGS + INDEX (auto-detect Kaggle)
+DATA_DIR = _detect_data_dir()
+
+# JSONL_DATA_DIR: cho DATA SOURCE JSONL (luôn local vì Kaggle không có)
+JSONL_DATA_DIR = _LOCAL_DATA_DIR
 
 
 # ---------------------------------------------------------------------- #
@@ -350,7 +381,8 @@ class RxNormVectorSearch:
         jsonl_path: Optional[Path] = None,
         embeddings_path: Optional[Path] = None,
     ) -> None:
-        self._jsonl_path = jsonl_path or (DATA_DIR / "rxnorm.jsonl")
+        # NOTE: JSONL files LUÔN dùng local (Kaggle không có JSONL data source).
+        self._jsonl_path = jsonl_path or (JSONL_DATA_DIR / "rxnorm.jsonl")
         self._embeddings_path = embeddings_path or (DATA_DIR / "rxnorm_embeddings.npy")
 
         self.codes: list[str] = []
@@ -495,7 +527,8 @@ class RxNormBM25Index:
         jsonl_path: Optional[Path] = None,
         tokens_cache_path: Optional[Path] = None,
     ) -> None:
-        self._jsonl_path = jsonl_path or (DATA_DIR / "rxnorm.jsonl")
+        # NOTE: JSONL files LUÔN dùng local (Kaggle không có JSONL data source).
+        self._jsonl_path = jsonl_path or (JSONL_DATA_DIR / "rxnorm.jsonl")
         self._tokens_cache_path = tokens_cache_path or (DATA_DIR / "rxnorm_bm25_tokens.jsonl.gz")
 
         self.codes: list[str] = []

@@ -266,32 +266,23 @@ def process_record(
     t0 = time.time()
     logger.info("[%d] Bắt đầu (len=%d)", rec_id, len(input_text))
     # Adaptive few-shot: tự giảm số examples khi user_prompt dài để tránh overflow.
-    # Quy tắc:
-    #   user_prompt > 3000 chars ~ 750 tokens → chỉ giữ 1 few-shot
-    #   user_prompt > 5000 chars ~ 1250 tokens → bỏ hết few-shot (chỉ system + user)
-    #   user_prompt <= 3000 chars → giữ đủ số few-shot như CLI yêu cầu
-    # Lý do: Ollama KV cache giữa các records + context overflow dễ fail
-    # khi input dài (vd 3.txt: 6500 chars). Code-level adaptive an toàn hơn
-    # config Modelfile keep_alive mà user không thay đổi được.
+    # Quy tắc (mới 2026-07, tối ưu cho model < 9B + không giới hạn thời gian):
+    #   user_prompt > 5000 chars → chỉ giữ 2 few-shot (input rất dài)
+    #   user_prompt > 3000 chars → chỉ giữ 4 few-shot (input dài)
+    #   user_prompt <= 3000 chars → giữ nguyên CLI cap (ưu tiên quality)
+    # Lý do: Vì không giới hạn thời gian (constraint mới), ưu tiên QUALITY
+    # → giữ nhiều few-shot hơn so với logic cũ (bỏ hết khi > 2500).
     user_prompt_len = len(input_text)
-    # Adaptive few-shot: tự giảm số examples khi user_prompt dài để tránh overflow.
-    # Quy tắc:
-    #   user_prompt > 2500 chars ~ 1000 tokens (real VN ratio) → bỏ hết few-shot
-    #   user_prompt > 1500 chars ~ 600 tokens → chỉ giữ 1 few-shot
-    #   user_prompt <= 1500 chars → giữ nguyên CLI cap
-    # Lý do: Ollama KV cache giữa các records + context overflow dễ fail
-    # khi input dài. Code-level adaptive an toàn hơn config Modelfile keep_alive
-    # mà user không thay đổi được.
-    if user_prompt_len > 2500:
-        adaptive_few_shot = few_shot[:0]    # bỏ hết
-        logger.debug("[%d] Adaptive: skip few-shot (input len=%d > 2500)",
+    if user_prompt_len > 5000:
+        adaptive_few_shot = few_shot[:2]    # input rất dài → 2 examples
+        logger.debug("[%d] Adaptive: keep 2 few-shot (input len=%d > 5000)",
                       rec_id, user_prompt_len)
-    elif user_prompt_len > 1500:
-        adaptive_few_shot = few_shot[:1]    # chỉ giữ 1
-        logger.debug("[%d] Adaptive: keep 1 few-shot (input len=%d > 1500)",
+    elif user_prompt_len > 3000:
+        adaptive_few_shot = few_shot[:4]    # input dài → 4 examples
+        logger.debug("[%d] Adaptive: keep 4 few-shot (input len=%d > 3000)",
                       rec_id, user_prompt_len)
     else:
-        adaptive_few_shot = few_shot       # giữ nguyên CLI cap
+        adaptive_few_shot = few_shot       # input ngắn → giữ nguyên CLI cap
 
     # Clean input TRƯỚC khi build_user_prompt: strip markdown, drop N/A,
     # truncate nếu quá dài. Áp dụng cho cả clean + adaptive để fit num_ctx.
@@ -390,9 +381,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-few-shot",
         type=int,
-        default=5,
-        help="Số few-shot examples TỐI ĐA (default 3; giảm để giảm token overhead, "
-             "tăng nếu model cần thêm ví dụ)",
+        default=8,
+        help="Số few-shot examples TỐI ĐA (default 8 cho model < 9B, tăng từ 5). "
+             "Nhiều examples giúp model < 9B hiểu pattern tốt hơn.",
     )
     
     parser.add_argument(

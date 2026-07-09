@@ -107,6 +107,41 @@ Lưu ý: KHÔNG tự map drug name → ICD/RxNorm trong OUTPUT text — system t
 HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "pg/mL", "mmol/L", "µmol/L", "%"; nhịp: "lần/phút", "bpm". Số + đơn vị giữ theo cách viết gốc (có/không dấu cách).
 </standardization>
 
+<chain_of_thought>
+## CHAIN-OF-THOUGHT (BẮT BUỘC, mới 2026-07) — giúp model < 9B extract đủ entities trong 1 LLM call
+
+**Trước khi emit JSON, hãy REASONING theo 3 bước (KHÔNG xuất ra reasoning, chỉ suy nghĩ trong đầu):**
+
+**Bước 1 — SCAN TOÀN BỘ INPUT:**
+- Đọc HẾT input từ đầu đến cuối (không skip section nào).
+- Đánh dấu vị trí của TẤT CẢ entities, kể cả ở cuối note (section "Kết quả", "Đánh giá", "Khám").
+- Categories cần scan:
+  - THUỐC (drug names + strength + route + freq)
+  - CHẨN_ĐOÁN (disease, ICD-eligible findings)
+  - TRIỆU_CHỨNG (symptoms, patient complaints)
+  - TÊN_XÉT_NGHIỆM (test/procedure names)
+  - KẾT_QUẢ_XÉT_NGHIỆM (test results, lab values)
+
+**Bước 2 — PHÂN LOẠI & APPLY RULES:**
+- Gán type cho mỗi entity theo 5 loại.
+- Áp dụng các rules quan trọng:
+  - "doxycycline cho X" → 2 entities (THUỐC + CHẨN_ĐOÁN, R7 split)
+  - "Bắt đầu dùng drug" / "Được chỉ định drug" → 1 entity (drop verb, R14)
+  - "drug (uống trước ăn)" / "drug (sau ăn)" → 1 entity (drop admin parens, R4)
+  - "ecg bình thường" / "nhịp xoang đều" → KẾT_QUẢ (R13, KHÔNG CHẨN_ĐOÁN)
+  - "ngoại tâm thu thất" / "rung nhĩ" / "ST chênh lên" → CHẨN_ĐOÁN (bất thường, R13)
+  - "Không X, Y, Z" → tách 3 entities riêng với isNegated (R19)
+  - "atenololtrong" → "atenolol" (typo recovery, R23)
+  - Assertions: "Tiền sử:" → isHistorical, "không" trước → isNegated
+
+**Bước 3 — DEDUP THEO R10 LOOSE:**
+- Nếu cùng text xuất hiện NHIỀU LẦN → chỉ giữ 1 entity đại diện (lần đầu tiên).
+- Áp dụng cho TẤT CẢ loại (không giữ duplicate ngay cả khi strict yêu cầu).
+- Lý do: model < 9B hay gộp duplicate → loose giúp tăng recall trên target thực tế.
+
+**Sau 3 bước reasoning → emit JSON array. KHÔNG output reasoning text, chỉ output JSON thuần.**
+</chain_of_thought>
+
 <rules>
 ## 9 MANDATORY RULES (follow in order)
 
@@ -210,11 +245,14 @@ HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "p
 - **Bug**: LLM 7B hay miss entities ở CUỐI note (vd "siêu âm tim qua thành ngực" ở dòng 37, "điện tâm đồ" ở dòng 53) và miss DUPLICATE entities theo R10.
 - **Fix prompt**: TRƯỚC KHI emit JSON, scan HẾT input 2 LẦN:
   1. Pass 1: extract tất cả entities (bỏ qua R3 lifestyle filter ở pass này)
-  2. Pass 2: filter lifestyle (R3), drop duplicates có cùng text+type+position, verify mỗi occurrence được trích (R10)
-- **R10 duplicate strict**: cùng text xuất hiện N lần trong input khác vị trí → N entities riêng, mỗi cái có position riêng.
-  - VD: "đánh trống ngực" xuất hiện 5 lần (dòng 13, 15, 17, 25, 44) → 5 entities
-  - VD: "khó thở" xuất hiện 4 lần (dòng 18, 21, 26, 28) → 4 entities
-  - VD: "cảm giác thắt chặt ngực" 2 lần (dòng 19, 27) → 2 entities
+  2. Pass 2: filter lifestyle (R3), dedup duplicate (R10 LOOSE), verify mỗi section đã được scan.
+- **R10 duplicate LOOSE** (mới 2026-07, tối ưu cho model < 9B + 1 LLM call):
+  - Cùng text xuất hiện NHIỀU LẦN trong input → chỉ giữ 1 entity đại diện
+  - Áp dụng cho TẤT CẢ loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XN, KQ_XN)
+  - Ưu tiên entity ở vị trí PHÙ HỢP NHẤT (thường là lần đầu tiên)
+  - Lý do: model < 9B hay gộp duplicate → R10 strict dẫn đến miss toàn bộ
+  - Trade-off: giảm recall tuyệt đối trên strict, nhưng tăng recall trên loose target
+  - Tương thích ngược với R22 (test name dedup đã có)
 - **KHÔNG skip entities ở section "Kết quả khám lâm sàng" / "Kết quả xét nghiệm" / "Kết quả chẩn đoán hình ảnh" / "Các kết quả chẩn đoán khác"** — đây là phần CÓ nhiều entities quan trọng.
 
 **R22. TEST NAME/PROCEDURE DUPLICATE → CHỈ EXTRACT 1 (mới 2026-07, từ user feedback 1.txt):**
@@ -476,6 +514,24 @@ OUTPUT (10 entities - test các edge case, KHÔNG tách VS line):
 [{"text":"metoprolol 25mg po bid","type":"THUỐC","assertions":[]},{"text":"aspirin 81mg","type":"THUỐC","assertions":[]},{"text":"chụp x-quang ngực","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"không có gì đáng chú ý","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"atenolol","type":"THUỐC","assertions":["isHistorical"]},{"text":"cảm giác khó chịu vùng ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"điện tâm đồ","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"không ghi nhận gì bất thường","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"monitor holter","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"ngoại tâm thu thất","type":"CHẨN_ĐOÁN","assertions":[]}]
 
 Note: Test 4 edge case từ user feedback. (1) **VS line KHÔNG tách**: "VS98.3 12987 56 18 99RA" — input không ghi rõ labels (Nhiệt độ/Mạch/HA/SpO2) → KHÔNG tách, KHÔNG extract. Postprocess cũng không tự suy đoán. Chỉ drop silent. (2) **R14 verb phrase DROP**: "Bắt đầu dùng metoprolol..." → DROP "Bắt đầu dùng" (verb phrase), chỉ giữ "metoprolol 25mg po bid". Tương tự "Được chỉ định điều trị aspirin..." → DROP "Được chỉ định điều trị", chỉ giữ "aspirin 81mg". (3) **R22 test name duplicate**: "chụp x-quang ngực" xuất hiện 2 lần (dòng 1 và dòng "Lần khám trước") → CHỈ GIỮ 1 entity (postprocess dedup, giữ position sớm nhất). KHÔNG extract 2. (4) **R23 typo recovery**: "atenololtrong" → "atenolol" (postprocess detect drug name match trong `_COMMON_DRUG_NAMES`, tách khỏi particle "trong"). "cảm giáckhó chịu" → "cảm giác khó chịu" (postprocess insert space). Cả 2 đều cần postprocess fallback. (5) **R16 separator "là"**: "điện tâm đồ là không ghi nhận gì bất thường" → TÊN="điện tâm đồ" + KQ="không ghi nhận gì bất thường" (separator "là" giữa TÊN và KQ). (6) **R19 cardiac**: "monitor holter" + "điện tâm đồ" + "ngoại tâm thu thất" (bất thường → CHẨN_ĐOÁN) extract đủ. (7) **R13 KQ bình thường**: "không có gì đáng chú ý" + "không ghi nhận gì bất thường" = 2 KẾT_QUẢ riêng (cho 2 test khác nhau theo R22 test name dedup — KQ vẫn extract riêng). (8) **isHistorical cho atenolol**: nằm trong "Tiền sử:" section → isHistorical.
+
+**Ex 18 - COMPREHENSIVE CARDIOLOGY NOTE (R10 LOOSE) | Target 25 entities trong 1 LLM call**
+
+INPUT: "1. Tiền sử bệnh. Thuốc trước khi nhập viện: - metoprolol 25mg po bid - doxycycline cho viêm tuyến mồ hôi - atenolol (uống hôm nay). 2. Tiền sử bệnh hiện tại. Lý do nhập viện: Bệnh nhân vào viện vì đánh trống ngực. Triệu chứng hiện tại: - đánh trống ngực - Khó thở nhẹ - cảm giác thắt chặt ngực vùng trước tim - Tăng đánh trống ngực. Không buồn nôn, nôn, đổ mồ hôi. monitor holter cho thấy ngoại tâm thu nhĩ và ngoại tâm thu thất. Bắt đầu dùng metoprolol 25mg po bid. siêu âm tim qua thành ngực. Điều trị: aspirin 325mg x 1. Kết quả: chụp x-quang ngực không ghi nhận gì bất thường, phân tích nước tiểu bình thường, ecg bình thường. điện tâm đồ là không ghi nhận gì bất thường. Ở nhà bệnh nhân đã sử dụng atenololtrong ngày."
+
+OUTPUT (25 entities - R10 LOOSE dedup, KHÔNG multi-pass, 1 LLM call):
+[{"text":"metoprolol 25mg po bid","type":"THUỐC","assertions":["isHistorical"]},{"text":"doxycycline","type":"THUỐC","assertions":["isHistorical"]},{"text":"viêm tuyến mồ hôi","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"atenolol","type":"THUỐC","assertions":["isHistorical"]},{"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"Khó thở nhẹ","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"cảm giác thắt chặt ngực vùng trước tim","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"Tăng đánh trống ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"buồn nôn","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"nôn","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"đổ mồ hôi","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"monitor holter","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"ngoại tâm thu nhĩ","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"ngoại tâm thu thất","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"siêu âm tim qua thành ngực","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"aspirin 325mg x 1","type":"THUỐC","assertions":[]},{"text":"chụp x-quang ngực","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"không ghi nhận gì bất thường","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"phân tích nước tiểu","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"bình thường","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"ecg bình thường","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"điện tâm đồ","type":"TÊN_XÉT_NGHIỆM","assertions":[]}]
+
+Note: Target 25 entities với 1 LLM call duy nhất (Qwen 2.5 7B). (1) **R10 LOOSE dedup**: "đánh trống ngực" xuất hiện 4 lần → 1 entity; "metoprolol 25mg po bid" xuất hiện 2 lần (dòng 3 + dòng "Bắt đầu dùng") → 1 entity; "atenolol" xuất hiện 2 lần (dòng 5 + dòng typo "atenololtrong") → 1 entity. (2) **R7 split**: "doxycycline cho viêm tuyến mồ hôi" → 2 entities (THUỐC + CHẨN_ĐOÁN). (3) **R14 verb DROP**: "Bắt đầu dùng metoprolol" → drop verb, giữ "metoprolol 25mg po bid" (nhưng đã có ở trên → dedup). (4) **R4 parens**: "atenolol (uống hôm nay)" → drop "(uống hôm nay)". (5) **R23 typo**: "atenololtrong" → "atenolol" (postprocess fallback). (6) **R19 negation chain**: "Không buồn nôn, nôn, đổ mồ hôi" → 3 TRIỆU riêng + isNegated TẤT CẢ. (7) **R13 ECG**: "ngoại tâm thu nhĩ/thất" → CHẨN_ĐOÁN (bất thường); "ecg bình thường" + "bình thường" + "không ghi nhận gì bất thường" → KẾT_QUẢ (bình thường). (8) **R16 separator**: "điện tâm đồ là không ghi nhận gì bất thường" → TÊN="điện tâm đồ" + KQ="không ghi nhận gì bất thường". (9) **R9 split**: "ngoại tâm thu nhĩ và ngoại tâm thu thất" → 2 CHẨN_ĐOÁN. (10) **isHistorical cho 4 entities Tiền sử**: metoprolol, doxycycline, viêm tuyến mồ hôi, atenolol.
+
+**Ex 19 - CHAIN-OF-THOUGHT DEMO (test 1 LLM call với reasoning)**
+
+INPUT: "Bệnh nhân nam 65 tuổi. Tiền sử THA. Khám: HA 165/95 mmHg, SpO2 96%. ECG: ST chênh lên V2-V4. Thuốc: amlodipine 5mg po daily."
+
+OUTPUT (chain-of-thought KHÔNG output, chỉ JSON):
+[{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"HA","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"165/95 mmHg","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"SpO2","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"96%","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"ST chênh lên V2-V4","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"amlodipine 5mg po daily","type":"THUỐC","assertions":[]}]
+
+Note: Test chain-of-thought. (1) **Bước 1 (SCAN)**: 1 CHẨN_ĐOÁN (THA), 3 cặp TÊN_XN+KQ (HA, SpO2, ECG-embedded), 1 ECG abnormal (ST chênh lên), 1 THUỐC. (2) **Bước 2 (PHÂN LOẠI)**: THA→CHẨN_ĐOÁN với isHistorical (Tiền sử), HA→TÊN_XN + 165/95 mmHg→KQ (R12 vital signs), SpO2→TÊN_XN + 96%→KQ, ST chênh lên V2-V4→CHẨN_ĐOÁN (R13 ECG bất thường), amlodipine→THUỐC. (3) **Bước 3 (DEDUP)**: không có duplicate. (4) **Kết quả**: 7 entities, không có lifestyle/social, KHÔNG verb phrase. (5) **Quan trọng**: KHÔNG output reasoning text vào JSON, chỉ output JSON array thuần. Reasoning phải ở trong "suy nghĩ" của LLM, không phải text trả về.
 </examples>
 
 <checklist>

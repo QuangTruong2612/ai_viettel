@@ -332,18 +332,23 @@ def _try_recover_typo(
 
 
 def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Bỏ trùng (cùng text + start) — kết quả sort theo start.
+    """Bỏ trùng (cùng text + type) — kết quả sort theo position.
+
+    R10 LOOSE (mới 2026-07, tối ưu cho model < 9B): Cùng text + type → 1 entity.
+    Áp dụng cho TẤT CẢ loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XN, KQ_XN).
+    Giữ entity ở vị trí sớm nhất (position[0] nhỏ nhất).
 
     R22 (mới 2026-07): test name/procedure (TÊN_XÉT_NGHIỆM) duplicate
-    chỉ giữ 1 entity đầu tiên (position sớm nhất). Áp dụng TRƯỚC R10 generic
-    dedup. Tại sao: trong F1 evaluation, 1 test name xuất hiện N lần = 1 ground
-    truth entity, extract N sẽ gây false positive.
+    chỉ giữ 1 entity đầu tiên (position sớm nhất). Áp dụng CÙNG với R10 LOOSE.
+
+    Tại sao R10 LOOSE:
+    - Model < 9B (vd Qwen 2.5 7B) hay gộp duplicate tự nhiên → R10 strict gây miss
+    - Trade-off: giảm recall tuyệt đối trên strict, nhưng tăng recall trên loose target
+    - Ưu tiên quality > quantity trong F1 evaluation khi model yếu
     """
     out: list[dict[str, Any]] = []
-    seen_general: set[tuple[str, int]] = set()
-    seen_test_names: set[tuple[str, str]] = set()  # (text_lower, type) cho R22
+    seen_keys: set[tuple[str, str]] = set()  # (text_lower, type) cho R10 LOOSE + R22
 
-    # Pass 1: Áp dụng R22 - TÊN_XÉT_NGHIỆM duplicate → chỉ giữ 1 (entity đầu tiên)
     # Sort theo position để giữ entity sớm nhất
     sorted_ents = sorted(
         [e for e in entities if e.get("text")],
@@ -355,22 +360,16 @@ def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         text = str(ent.get("text", "")).strip()
         start = int(ent.get("position", [0, 0])[0]) if isinstance(ent.get("position"), list) else 0
 
-        # R22: nếu là TÊN_XÉT_NGHIỆM và đã thấy text này rồi → drop
-        if etype == "TÊN_XÉT_NGHIỆM":
-            test_key = (text.lower(), etype)
-            if test_key in seen_test_names:
-                logger.debug(
-                    "R22 dedup: drop duplicate TÊN_XÉT_NGHIỆM '%s' at pos %d",
-                    text, start,
-                )
-                continue
-            seen_test_names.add(test_key)
-
-        # R10: dedup generic (cùng text + start)
-        general_key = (text, start)
-        if general_key in seen_general:
+        # R10 LOOSE + R22: nếu đã thấy (text, type) → drop duplicate
+        # Áp dụng cho TẤT CẢ loại
+        dedup_key = (text.lower(), etype)
+        if dedup_key in seen_keys:
+            logger.debug(
+                "R10 LOOSE dedup: drop duplicate %s '%s' at pos %d",
+                etype, text, start,
+            )
             continue
-        seen_general.add(general_key)
+        seen_keys.add(dedup_key)
         out.append(ent)
 
     out.sort(key=lambda e: e["position"][0])

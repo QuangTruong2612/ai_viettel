@@ -39,7 +39,38 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+_LOCAL_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
+# Path Kaggle cố định (chỉ đọc - chỉ dùng nếu user đã upload sẵn).
+# Bao gồm: embeddings (.npy) + index (.json) + translation cache (.json).
+# KHÔNG có: JSONL data source (icd10.jsonl) - phải dùng local.
+_KAGGLE_DATA_DIR = Path("/kaggle/input/datasets/quangtrg/data_match/data")
+
+
+def _detect_data_dir() -> Path:
+    """Auto-detect data directory: Kaggle cached nếu có, fallback local.
+
+    Trên Kaggle, embeddings + index files đã được upload sẵn để tránh
+    build lại (rất chậm). Đường dẫn: /kaggle/input/datasets/quangtrg/data_match/data/
+
+    Returns:
+        Path tới data directory ưu tiên cho EMBEDDINGS + INDEX.
+        JSONL data source LUÔN dùng local (không có trên Kaggle).
+    """
+    if (
+        _KAGGLE_DATA_DIR.exists()
+        and _KAGGLE_DATA_DIR.is_dir()
+        and any(_KAGGLE_DATA_DIR.iterdir())
+    ):
+        return _KAGGLE_DATA_DIR
+    return _LOCAL_DATA_DIR
+
+
+# DATA_DIR: cho EMBEDDINGS + INDEX (auto-detect Kaggle)
+DATA_DIR = _detect_data_dir()
+
+# JSONL_DATA_DIR: cho DATA SOURCE JSONL (luôn local vì Kaggle không có)
+JSONL_DATA_DIR = _LOCAL_DATA_DIR
 
 
 # ---------------------------------------------------------------------- #
@@ -384,10 +415,11 @@ class ICDRetriever:
         path = path or (DATA_DIR / "icd_index.json")
         if not path.exists():
             # Fallback chain: icd10.jsonl mới → BYT → ICD10_Data cũ
+            # NOTE: JSONL files LUÔN dùng local (Kaggle không có JSONL data source).
             seed_candidates = [
-                DATA_DIR / "icd10.jsonl",                # WHO 2019 VN+EN (mới nhất)
-                DATA_DIR / "DM_ICD10_19_8_BYT.json",    # BYT chính thức (lớn nhất)
-                DATA_DIR / "ICD10_Data.json",           # cũ
+                JSONL_DATA_DIR / "icd10.jsonl",                # WHO 2019 VN+EN (mới nhất)
+                JSONL_DATA_DIR / "DM_ICD10_19_8_BYT.json",    # BYT chính thức (lớn nhất)
+                JSONL_DATA_DIR / "ICD10_Data.json",           # cũ
             ]
             seed_path = next((c for c in seed_candidates if c.exists()), None)
             if seed_path:
@@ -708,11 +740,14 @@ class ICD10VectorSearch:
 
     @staticmethod
     def _pick_default_jsonl() -> Path:
-        """Chọn file JSON/JSONL mới nhất có sẵn (ưu tiên WHO 2019 VN+EN)."""
+        """Chọn file JSON/JSONL mới nhất có sẵn (ưu tiên WHO 2019 VN+EN).
+
+        NOTE: JSONL files LUÔN dùng local (Kaggle không có JSONL data source).
+        """
         candidates = [
-            DATA_DIR / "icd10.jsonl",                # WHO 2019 VN+EN (mới nhất)
-            DATA_DIR / "DM_ICD10_19_8_BYT.json",    # BYT chính thức (lớn nhất)
-            DATA_DIR / "ICD10_Data.json",           # cũ
+            JSONL_DATA_DIR / "icd10.jsonl",                # WHO 2019 VN+EN (mới nhất)
+            JSONL_DATA_DIR / "DM_ICD10_19_8_BYT.json",    # BYT chính thức (lớn nhất)
+            JSONL_DATA_DIR / "ICD10_Data.json",           # cũ
         ]
         for c in candidates:
             if c.exists():
@@ -1010,10 +1045,11 @@ class ICD10BM25Index:
     ) -> None:
         # Default: icd10.jsonl (WHO ICD-10 2019 VN+EN, 15,732 entries).
         # Fallback chain: BYT → ICD10_Data cũ.
+        # NOTE: JSONL files LUÔN dùng local (Kaggle không có JSONL data source).
         candidates = [
-            DATA_DIR / "icd10.jsonl",
-            DATA_DIR / "DM_ICD10_19_8_BYT.json",
-            DATA_DIR / "ICD10_Data.json",
+            JSONL_DATA_DIR / "icd10.jsonl",
+            JSONL_DATA_DIR / "DM_ICD10_19_8_BYT.json",
+            JSONL_DATA_DIR / "ICD10_Data.json",
         ]
         if jsonl_path is not None:
             self._jsonl_path = jsonl_path

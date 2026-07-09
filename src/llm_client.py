@@ -32,10 +32,11 @@ class LLMConfig:
     temperature: float = 0.0
     top_p: float = 1.0
 
-    # max_tokens=768 đủ chứa JSON ~25 entities (~30 chars mỗi).
-    # 9b có thể output dài hơn 4b; restore từ 512 → 768 cho đủ entities.
-    max_tokens: int = 1024
-    timeout: int = 300  # 5 phút/request (9b chậm hơn 7b, tránh timeout)
+    # max_tokens=4096 đủ chứa JSON ~40 entities + chain-of-thought reasoning.
+    # Tăng từ 1024 (2026-07) để support 1 LLM call extract đủ entities (R10 LOOSE target ~30-40).
+    # 4096 cho buffer thoải mái cho chain-of-thought + JSON output dài.
+    max_tokens: int = 4096
+    timeout: int = 600  # 10 phút/request (tăng từ 300 cho max_tokens cao + CoT reasoning)
     max_retries: int = 1  # giảm retry để fail fast
 
     # Ollama-specific: keep_alive. Default "0" → UNLOAD model sau mỗi request
