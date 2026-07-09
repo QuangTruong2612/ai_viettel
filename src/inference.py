@@ -266,20 +266,21 @@ def process_record(
     t0 = time.time()
     logger.info("[%d] Bắt đầu (len=%d)", rec_id, len(input_text))
     # Adaptive few-shot: tự giảm số examples khi user_prompt dài để tránh overflow.
-    # Quy tắc (mới 2026-07, tối ưu cho model < 9B + không giới hạn thời gian):
+    # Quy tắc (mới 2026-07-09, tối ưu cho model < 9B + không giới hạn thời gian):
     #   user_prompt > 5000 chars → chỉ giữ 2 few-shot (input rất dài)
-    #   user_prompt > 3000 chars → chỉ giữ 4 few-shot (input dài)
+    #   user_prompt > 3000 chars → chỉ giữ 6 few-shot (input vừa) ← TĂNG từ 4
     #   user_prompt <= 3000 chars → giữ nguyên CLI cap (ưu tiên quality)
-    # Lý do: Vì không giới hạn thời gian (constraint mới), ưu tiên QUALITY
-    # → giữ nhiều few-shot hơn so với logic cũ (bỏ hết khi > 2500).
+    # Lý do: Vì không giới hạn thời gian, ưu tiên QUALITY → giữ nhiều few-shot hơn.
+    # Test thực tế với input/1.txt (~2942 chars): few_shot=4 → chỉ 17 entities.
+    # Tăng lên 6 few-shot → dự kiến 20-22 entities.
     user_prompt_len = len(input_text)
     if user_prompt_len > 5000:
         adaptive_few_shot = few_shot[:2]    # input rất dài → 2 examples
         logger.debug("[%d] Adaptive: keep 2 few-shot (input len=%d > 5000)",
                       rec_id, user_prompt_len)
     elif user_prompt_len > 3000:
-        adaptive_few_shot = few_shot[:4]    # input dài → 4 examples
-        logger.debug("[%d] Adaptive: keep 4 few-shot (input len=%d > 3000)",
+        adaptive_few_shot = few_shot[:6]    # input vừa → 6 examples (tăng từ 4)
+        logger.debug("[%d] Adaptive: keep 6 few-shot (input len=%d > 3000)",
                       rec_id, user_prompt_len)
     else:
         adaptive_few_shot = few_shot       # input ngắn → giữ nguyên CLI cap
@@ -381,8 +382,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-few-shot",
         type=int,
-        default=8,
-        help="Số few-shot examples TỐI ĐA (default 8 cho model < 9B, tăng từ 5). "
+        default=12,
+        help="Số few-shot examples TỐI ĐA (default 12 cho model < 9B, tăng từ 8). "
              "Nhiều examples giúp model < 9B hiểu pattern tốt hơn.",
     )
     
@@ -459,6 +460,144 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     translator = Translator(llm_client=llm)
+    # === ENHANCED ICD EXACT MATCH (mới 2026-07-09) ===
+    # Thêm 30+ common VN terms vào exact match dict để L1 match ngay từ đầu.
+    # Tránh vector search noise (BGE-M3 có thể match sai như "ung thư phổi" → "A30 Cholera").
+    translator.preset({
+        # === Oncology (C00-D48) ===
+        "ung thư phổi": "lung cancer",
+        "ung thư phổi không tế bào nhỏ": "non-small cell lung cancer",
+        "ung thư phổi tế bào nhỏ": "small cell lung cancer",
+        "ung thư vú": "breast cancer",
+        "ung thư gan": "liver cancer",
+        "ung thư dạ dày": "stomach cancer",
+        "ung thư đại tràng": "colon cancer",
+        "ung thư trực tràng": "rectal cancer",
+        "ung thư phổi di căn": "secondary lung cancer",
+        "ung thư buồng trứng": "ovarian cancer",
+        "ung thư cổ tử cung": "cervical cancer",
+        "ung thư tuyến tiền liệt": "prostate cancer",
+        "ung thư bàng quang": "bladder cancer",
+        "ung thư não": "brain cancer",
+        "u não": "brain tumor",
+        "di căn não": "secondary brain cancer",
+        "di căn xương": "secondary bone cancer",
+        "di căn gan": "secondary liver cancer",
+        "di căn phổi": "secondary lung cancer",
+        # === Cardiovascular (I00-I99) ===
+        "tăng huyết áp": "essential hypertension",
+        "tăng huyết áp vô căn": "essential hypertension",
+        "tăng huyết áp thứ phát": "secondary hypertension",
+        "cao huyết áp": "essential hypertension",
+        "nhồi máu cơ tim": "acute myocardial infarction",
+        "nhồi máu cơ tim cấp": "acute myocardial infarction",
+        "đau thắt ngực": "angina pectoris",
+        "đau thắt ngực ổn định": "stable angina",
+        "đau thắt ngực không ổn định": "unstable angina",
+        "suy tim": "heart failure",
+        "suy tim sung huyết": "congestive heart failure",
+        "suy tim tâm thu": "systolic heart failure",
+        "suy tim tâm trương": "diastolic heart failure",
+        "rung nhĩ": "atrial fibrillation",
+        "cuồng nhĩ": "atrial flutter",
+        "ngoại tâm thu thất": "premature ventricular contraction",
+        "ngoại tâm thu nhĩ": "premature atrial contraction",
+        "nhịp xoang": "sinus rhythm",
+        "rung thất": "ventricular fibrillation",
+        "block nhĩ thất": "atrioventricular block",
+        "tắc mạch": "thrombosis",
+        "tắc mạch huyết khối": "thrombosis",
+        "huyết khối": "thrombosis",
+        "thuyên tắc phổi": "pulmonary embolism",
+        "sa van hai lá": "mitral valve prolapse",
+        "sa van 2 lá": "mitral valve prolapse",
+        "hở van hai lá": "mitral valve insufficiency",
+        "hở van 2 lá": "mitral valve insufficiency",
+        "hẹp van hai lá": "mitral valve stenosis",
+        "sa van động mạch chủ": "aortic valve prolapse",
+        # === Respiratory (J00-J99) ===
+        "viêm phổi": "pneumonia",
+        "hen phế quản": "asthma",
+        "hen suyễn": "asthma",
+        "bệnh phổi tắc nghẽn mạn tính": "copd",
+        "copd": "copd",
+        "viêm phế quản": "bronchitis",
+        "viêm phế quản cấp": "acute bronchitis",
+        "viêm phế quản mạn": "chronic bronchitis",
+        "tràn khí màng phổi": "pneumothorax",
+        "tràn dịch màng phổi": "pleural effusion",
+        # === Digestive (K00-K95) ===
+        "viêm dạ dày": "gastritis",
+        "loét dạ dày": "gastric ulcer",
+        "loét tá tràng": "duodenal ulcer",
+        "trào ngược dạ dày thực quản": "gerd",
+        "gerd": "gerd",
+        "viêm đại tràng": "colitis",
+        "viêm ruột thừa": "appendicitis",
+        "xơ gan": "liver cirrhosis",
+        "viêm gan b": "hepatitis b",
+        "viêm gan c": "hepatitis c",
+        "viêm gan": "hepatitis",
+        "sỏi mật": "gallstones",
+        "viêm tụy": "pancreatitis",
+        "thoát vị": "hernia",
+        "thoát vị đĩa đệm": "disc herniation",
+        "trĩ": "hemorrhoids",
+        # === Endocrine (E00-E90) ===
+        "đái tháo đường": "diabetes mellitus",
+        "đái tháo đường type 2": "type 2 diabetes mellitus",
+        "đái tháo đường type 1": "type 1 diabetes mellitus",
+        "đái tháo đường tuýp 2": "type 2 diabetes mellitus",
+        "đái tháo đường tuýp 1": "type 1 diabetes mellitus",
+        "suy giáp": "hypothyroidism",
+        "cường giáp": "hyperthyroidism",
+        "basedow": "graves disease",
+        "suy thượng thận": "adrenal insufficiency",
+        "hội chứng cushing": "cushing syndrome",
+        # === Renal/Urinary (N00-N99) ===
+        "suy thận": "renal failure",
+        "suy thận cấp": "acute renal failure",
+        "suy thận mạn": "chronic kidney disease",
+        "sỏi thận": "kidney stones",
+        "viêm bàng quang": "cystitis",
+        "viêm đường tiết niệu": "urinary tract infection",
+        "nhiễm trùng tiết niệu": "urinary tract infection",
+        "viêm thận": "nephritis",
+        "hội chứng thận hư": "nephrotic syndrome",
+        # === Neurology (G00-G99) ===
+        "đột quỵ": "stroke",
+        "tai biến mạch máu não": "stroke",
+        "nhồi máu não": "cerebral infarction",
+        "xuất huyết não": "cerebral hemorrhage",
+        "động kinh": "epilepsy",
+        "parkinson": "parkinsons disease",
+        "alzheimer": "alzheimers disease",
+        "đau nửa đầu": "migraine",
+        "đau đầu": "headache",
+        "viêm màng não": "meningitis",
+        # === Musculoskeletal (M00-M99) ===
+        "thoái hóa khớp": "osteoarthritis",
+        "thoái hóa cột sống": "spinal osteoarthritis",
+        "viêm khớp": "arthritis",
+        "viêm khớp dạng thấp": "rheumatoid arthritis",
+        "gout": "gout",
+        "loãng xương": "osteoporosis",
+        "thoát vị đĩa đệm cổ": "cervical disc herniation",
+        "thoát vị đĩa đệm thắt lưng": "lumbar disc herniation",
+        # === Blood (D50-D89) ===
+        "thiếu máu": "anemia",
+        "thiếu máu thiếu sắt": "iron deficiency anemia",
+        "xuất huyết giảm tiểu cầu": "thrombocytopenia",
+        "leukemia": "leukemia",
+        "lymphoma": "lymphoma",
+        # === Skin (L00-L99) ===
+        "viêm da": "dermatitis",
+        "viêm da cơ địa": "atopic dermatitis",
+        "vẩy nến": "psoriasis",
+        "eczema": "eczema",
+        "viêm tuyến mồ hôi mủ": "hidradenitis suppurativa",
+        "nhọt ổ gà": "hidradenitis suppurativa",
+    })
     retriever = RxNormRetriever()
     # VectorSearch: BGE-M3 vector search trên toàn bộ 71k mã ICD-10
     local_search = ICD10VectorSearch()

@@ -693,46 +693,28 @@ def _detect_assertions_from_context(
 ) -> list:
     """Detect assertions từ input context (LLM yếu hay quên).
 
-    Manh mối (case-insensitive):
-    - isHistorical: input có "Tiền sử:", "Tiền sử bệnh", "Trước đây:", "Đang dùng",
-      "Đang duy trì", "Thuốc trước", "Thuốc trước khi nhập viện", "Thuốc trước đây"
-      và entity nằm trong window 500 chars sau manh mối.
-    - isNegated: input có "không", "chưa", "âm tính", "không xuất hiện"
-      và nằm trong window 30 chars trước entity.
-    - isFamily: input có "bố", "mẹ", "anh", "chị", "em", "ông", "bà" + "bệnh nhân"
-      HOẶC "tiền sử gia đình" trong window 100 chars.
+    R26 (mới 2026-07-09): isHistorical CHỈ áp dụng cho entities trong section "Tiền sử".
+    Detect section header GẦN NHẤT TRƯỚC entity_pos. Nếu là "Tiền sử" → isHistorical.
+    Nếu section khác ("Tiền sử bệnh hiện tại", "Lý do nhập viện", "Đánh giá") → KHÔNG có isHistorical.
+
+    Manh mối khác:
+    - isNegated: "không", "chưa", "âm tính" trong window 30 chars trước entity.
+    - isFamily: "bố/mẹ/anh/chị/em/ông/bà" + "bệnh nhân" HOẶC "tiền sử gia đình".
     """
     if entity_type not in ("CHẨN_ĐOÁN", "THUỐC", "TRIỆU_CHỨNG"):
         return []
 
     text_lower = input_text.lower()
     pos = max(0, entity_pos)
-
-    # Window quanh entity (mở rộng 500 chars thay vì 200 để bắt THUỐC trong section
-    # "Tiền sử bệnh" + "Thuốc trước khi nhập viện" có thể cách xa header)
-    win_start = max(0, pos - 500)
-    win_end = min(len(input_text), pos + len(entity_text) + 200)
-    window_lower = text_lower[win_start:win_end]
-
-    # Window trước entity cho negation (20 chars) — đủ cho "không ", "chưa ".
-    pre_start = max(0, pos - 20)
-    pre_window = text_lower[pre_start:pos]
     found = []
 
-    # isHistorical (mở rộng markers + window)
-    historical_markers = [
-        "tiền sử bệnh", "tiền sử", "trước đây", "đang duy trì", "đang dùng",
-        "trước đó", "đã từng", "thuốc trước khi nhập viện", "thuốc trước",
-        "trước nhập viện", "trước đó",
-    ]
-    # Tìm TẤT CẢ markers trong window, không phải chỉ vị trí đầu tiên trong text
-    for m in historical_markers:
-        if m in window_lower:
-            # Mark vị trí của marker (ưu tiên vị trí gần entity nhất trong window)
-            marker_pos = window_lower.rfind(m) + win_start
-            if marker_pos >= 0 and abs(marker_pos - pos) < 500:
-                found.append("isHistorical")
-                break
+    # R26: Detect section header GẦN NHẤT TRƯỚC entity_pos
+    section_id = _find_current_section(input_text, pos)
+    is_in_tien_su = (section_id == "tien_su")
+
+    # isHistorical: CHỉ áp dụng nếu entity trong section "Tiền sử"
+    if is_in_tien_su:
+        found.append("isHistorical")
 
     # isFamily: cần word boundary để tránh "ông " match "không "
     family_patterns = [
@@ -747,8 +729,12 @@ def _detect_assertions_from_context(
         r"\bbà\s+([bệe]nh\s+)?nh[âa]n",        # bà (bệnh) nhân
         r"\bti[eề]n\s+s[ử]?\s*gia\s+[đd][ìi]nh",  # tiền sử gia đình
     ]
+    # Window 200 chars quanh entity cho family
+    family_win_start = max(0, pos - 200)
+    family_win_end = min(len(input_text), pos + len(entity_text) + 100)
+    family_window = text_lower[family_win_start:family_win_end]
     for pat in family_patterns:
-        if re.search(pat, window_lower):
+        if re.search(pat, family_window):
             found.append("isFamily")
             break
 
@@ -764,6 +750,133 @@ def _detect_assertions_from_context(
         found.append("isNegated")
 
     return found[:3]  # max 3 theo spec
+
+
+def _find_current_section(input_text: str, entity_pos: int) -> str:
+    """R26: Tìm section header GẦN NHẤT TRƯỚC entity_pos (chuẩn chung VN clinical notes).
+
+    Các section headers VN phổ biến (lowercase):
+    === "tien_su" - thuộc tiền sử/quá khứ (isHistorical=True) ===
+    - "Tiền sử bệnh" / "Tiền sử" / "Tiền sử nội khoa" / "Tiền sử ngoại khoa"
+    - "Tiền sử phẫu thuật" / "Tiền sử thủ thuật"
+    - "Tiền sử gia đình" / "Tiền sử dị ứng" / "Tiền sử xã hội"
+    - "Thuốc trước khi nhập viện" / "Thuốc đang dùng" / "Thuốc ra viện"
+    - "Thuốc trước đây" / "Thuốc cũ" / "Đang điều trị tại nhà"
+    - "Bệnh sử" / "Tiền căn" / "Tiền sử dùng thuốc"
+    - "Cách đây X năm/tháng/tuần" (trong mô tả)
+
+    === "hien_tai" - hiện tại (isHistorical=False) ===
+    - "Tiền sử bệnh hiện tại" / "Hiện tại"
+    - "Lý do nhập viện" / "Lý do vào viện" / "Lý do khám"
+    - "Triệu chứng hiện tại" / "Triệu chứng cơ năng" / "Triệu chứng thực thể"
+    - "Diễn biến bệnh" / "Diễn tiến" / "Quá trình bệnh"
+    - "Khám lúc vào viện" / "Khám hiện tại"
+    - "Bệnh sử hiện tại" / "Lịch sử bệnh hiện tại"
+
+    === "danh_gia" - đánh giá tại bệnh viện (isHistorical=False) ===
+    - "Đánh giá tại bệnh viện" / "Đánh giá"
+    - "Khám" / "Khám tại viện" / "Khám vào viện"
+    - "Xét nghiệm" / "CLS" / "Cận lâm sàng" / "Kết quả xét nghiệm"
+    - "Chẩn đoán hình ảnh" / "Hình ảnh" / "X-quang" / "Siêu âm" / "CT" / "MRI"
+    - "Điều trị" / "Phác đồ điều trị" / "Hướng xử trí" / "Kế hoạch"
+    - "Theo dõi" / "Tái khám" / "Ra viện" / "Tóm tắt" / "Kết luận"
+
+    Returns:
+        "tien_su" / "hien_tai" / "danh_gia" / "" (không xác định)
+    """
+    text_lower = input_text.lower()
+    pos = max(0, entity_pos)
+
+    # Section patterns (ưu tiên cao hơn cho cụm từ cụ thể)
+    section_patterns = [
+        # === TIỀN SỬ (isHistorical=True) ===
+        # Generic "Tiền sử" (không cần số prefix) - PRIORITY CAO để detect section tiền sử ở mọi vị trí
+        (r"\btiền sử bệnh\s*nội khoa", "tien_su", 95),
+        (r"\btiền sử bệnh\s*ngoại khoa", "tien_su", 95),
+        (r"\btiền sử phẫu thuật", "tien_su", 92),
+        (r"\btiền sử thủ thuật", "tien_su", 92),
+        (r"\btiền sử gia đình", "tien_su", 92),
+        (r"\btiền sử dị ứng", "tien_su", 92),
+        (r"\btiền sử xã hội", "tien_su", 92),
+        (r"\btiền sử bệnh", "tien_su", 88),
+        (r"\btiền sử", "tien_su", 85),
+        (r"\bbệnh sử", "tien_su", 85),
+        (r"\btiền căn", "tien_su", 85),
+        (r"thuốc trước khi nhập viện", "tien_su", 95),
+        (r"thuốc trước đây", "tien_su", 95),
+        (r"thuốc đang dùng", "tien_su", 90),
+        (r"thuốc ra viện", "hien_tai", 90),  # Thuốc ra viện = hiện tại
+        (r"đang điều trị tại nhà", "tien_su", 90),
+        (r"đang dùng thuốc", "tien_su", 85),
+        # Số prefix (ưu tiên cao hơn cho "1. Tiền sử bệnh")
+        (r"\d+\.\s*tiền sử bệnh\s*nội khoa", "tien_su", 100),
+        (r"\d+\.\s*tiền sử bệnh\s*ngoại khoa", "tien_su", 100),
+        (r"\d+\.\s*tiền sử bệnh", "tien_su", 95),
+        (r"\d+\.\s*tiền sử phẫu thuật", "tien_su", 95),
+        (r"\d+\.\s*tiền sử thủ thuật", "tien_su", 95),
+        (r"\d+\.\s*tiền sử gia đình", "tien_su", 95),
+        (r"\d+\.\s*tiền sử dị ứng", "tien_su", 95),
+        (r"\d+\.\s*tiền sử xã hội", "tien_su", 95),
+        (r"\d+\.\s*tiền sử", "tien_su", 80),
+        (r"\d+\.\s*bệnh sử", "tien_su", 90),
+        (r"\d+\.\s*tiền căn", "tien_su", 90),
+        # === HIỆN TẠI (isHistorical=False) ===
+        (r"\d+\.\s*tiền sử bệnh\s*hiện tại", "hien_tai", 100),
+        (r"\d+\.\s*bệnh sử hiện tại", "hien_tai", 100),
+        (r"\btiền sử bệnh\s*hiện tại", "hien_tai", 95),
+        (r"\bbệnh sử hiện tại", "hien_tai", 95),
+        (r"lý do nhập viện", "hien_tai", 95),
+        (r"lý do vào viện", "hien_tai", 95),
+        (r"lý do khám", "hien_tai", 95),
+        (r"triệu chứng hiện tại", "hien_tai", 90),
+        (r"triệu chứng cơ năng", "hien_tai", 90),
+        (r"triệu chứng thực thể", "hien_tai", 90),
+        (r"diễn biến bệnh", "hien_tai", 85),
+        (r"diễn tiến", "hien_tai", 80),
+        (r"quá trình bệnh", "hien_tai", 80),
+        (r"\bhiện tại", "hien_tai", 70),
+        # === ĐÁNH GIÁ (isHistorical=False) ===
+        (r"\d+\.\s*đánh giá tại bệnh viện", "danh_gia", 100),
+        (r"\d+\.\s*đánh giá", "danh_gia", 90),
+        (r"đánh giá tại bệnh viện", "danh_gia", 95),
+        (r"\bđánh giá", "danh_gia", 80),
+        (r"khám lúc vào viện", "danh_gia", 95),
+        (r"khám vào viện", "danh_gia", 95),
+        (r"khám tại viện", "danh_gia", 95),
+        (r"khám hiện tại", "danh_gia", 90),
+        (r"\bkhám:", "danh_gia", 80),
+        (r"\bkhám\b", "danh_gia", 70),
+        (r"xét nghiệm", "danh_gia", 80),
+        (r"\bcls\b", "danh_gia", 80),
+        (r"cận lâm sàng", "danh_gia", 80),
+        (r"kết quả xét nghiệm", "danh_gia", 85),
+        (r"chẩn đoán hình ảnh", "danh_gia", 85),
+        (r"hình ảnh", "danh_gia", 80),
+        (r"\bđiều trị", "danh_gia", 75),
+        (r"phác đồ điều trị", "danh_gia", 80),
+        (r"hướng xử trí", "danh_gia", 80),
+        (r"\btheo dõi", "danh_gia", 75),
+        (r"tái khám", "danh_gia", 70),
+        (r"ra viện", "danh_gia", 70),
+        (r"tóm tắt", "danh_gia", 70),
+        (r"kết luận", "danh_gia", 70),
+    ]
+
+    # Tìm tất cả matches TRƯỚC entity_pos
+    matches = []  # (start_pos, section_id, priority)
+    for pattern, section_id, priority in section_patterns:
+        for m in re.finditer(pattern, text_lower):
+            if m.start() < pos:
+                matches.append((m.start(), section_id, priority))
+
+    if not matches:
+        return ""
+
+    # Sort theo: (khoảng cách đến entity_pos giảm dần, priority giảm dần)
+    # → Match gần nhất + priority cao nhất
+    matches.sort(key=lambda x: (pos - x[0], -x[2]))
+
+    return matches[0][1]
 
 
 

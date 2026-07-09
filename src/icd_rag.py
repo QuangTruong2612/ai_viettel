@@ -1378,13 +1378,65 @@ _CHAPTER_RESTRICTIONS = [
     ({"đau thắt ngực", "đau ngực thắt", "đau thắt"}, "I20"),
     ({"suy tim", "suy tim ứ huyết"}, "I50"),
     ({"rung nhĩ"}, "I48"),
-    ({"tăng huyết áp", "tha", "cao huyết áp", "ha tăng"}, "I10"),
+    ({"tăng huyết áp", "tha", "cao huyết áp", "ha tăng", "huyết áp cao"}, "I10"),
     ({"đái tháo đường", "đtđ", "tiểu đường", "đái đường"}, "E11"),
     ({"hen phế quản", "hen suyễn", "hen"}, "J45"),
     ({"copd", "bệnh phổi tắc nghẽn mạn", "tắc nghẽn mạn"}, "J44"),
     ({"viêm phổi"}, "J12"),
     ({"viêm gan b", "viêm gan b cấp"}, "B16"),
     ({"viêm gan c", "viêm gan c cấp"}, "B17"),
+    # === MỚI 2026-07-09 (từ user feedback 19.txt) ===
+    ({"ung thư phổi", "k phổi", "carcinoma phổi", "u phổi"}, "C34"),  # Lung cancer
+    ({"di căn não", "di căn xương", "di căn gan", "di căn phổi", "second"}, "C79"),  # Secondary malignant
+    ({"sa van hai lá", "sa van 2 lá", "sa van mitral", "mitral valve prolapse", "hở van hai lá", "hở van 2 lá", "hở van mitral"}, "I34"),  # Mitral valve
+    ({"ung thư"}, "C"),  # Generic cancer → chapter C (all cancers)
+    ({"tắc mạch", "huyết khối", "thrombosis", "embolism"}, "I82"),  # Venous thrombosis/embolism
+    ({"phổi tắc nghẽn", "thuyên tắc phổi", "pe "}, "I26"),  # Pulmonary embolism
+    ({"u não", "khối u não", "brain tumor", "u trán", "u bán cầu não"}, "C71"),  # Brain tumor
+    ({"di căn"}, "C79"),  # All metastasis → secondary malignant
+    ({"tăng áp phổi", "tăng huyết áp phổi"}, "I27"),  # Pulmonary hypertension
+    ({"hở van", "hẹp van", "van tim"}, "I34"),  # Heart valve disease
+    ({"suy thận"}, "N18"),  # Chronic kidney disease
+    ({"thiếu máu"}, "D50"),  # Anemia
+    ({"đau thắt lưng"}, "M54"),  # Low back pain
+    ({"thoái hóa", "thoái hoá"}, "M15"),  # Osteoarthritis
+    ({"thoát vị"}, "K46"),  # Abdominal hernia (or M51 for disc)
+    ({"xơ gan"}, "K74"),  # Cirrhosis
+    ({"loét dạ dày", "loét tá tràng"}, "K25"),  # Peptic ulcer
+    ({"viêm dạ dày"}, "K29"),  # Gastritis
+    ({"trào ngược", "gerd", "gastroesophageal"}, "K21"),  # GERD
+    ({"viêm ruột"}, "K52"),  # Enteritis
+    ({"tiêu chảy"}, "K52"),  # Diarrhea
+    ({"táo bón"}, "K59"),  # Constipation
+    ({"viêm phúc mạc"}, "K65"),  # Peritonitis
+    ({"sỏi thận"}, "N20"),  # Kidney stones
+    ({"viêm đường tiết niệu", "viêm bàng quang", "viêm niệu"}, "N39"),  # UTI
+    ({"viêm phổi mắc phải cộng đồng", "vpmpccĐ"}, "J18"),  # CAP
+    ({"hen", "copd", "khó thở"}, "J"),  # Respiratory symptoms
+    ({"đau ngực"}, "R07"),  # Chest pain (symptom)
+    ({"đau bụng"}, "R10"),  # Abdominal pain
+    ({"sốt"}, "R50"),  # Fever
+    ({"ho"}, "R05"),  # Cough
+    ({"mệt mỏi"}, "R53"),  # Fatigue
+    ({"chóng mặt"}, "R42"),  # Dizziness
+    ({"buồn nôn"}, "R11"),  # Nausea
+    ({"nôn"}, "R11"),  # Vomiting
+    ({"tiêu hóa", "đại tràng", "ruột"}, "K"),  # GI chapter
+    ({"tim mạch", "tim", "mạch vành"}, "I"),  # Cardiovascular chapter
+    ({"hô hấp", "phế quản", "phổi"}, "J"),  # Respiratory chapter
+    ({"thần kinh", "não", "thần kinh trung ương"}, "G"),  # Neurology chapter
+    ({"cơ xương khớp", "khớp", "xương"}, "M"),  # Musculoskeletal chapter
+    ({"nội tiết", "tuyến giáp", "đái tháo đường"}, "E"),  # Endocrine chapter
+    ({"da liễu", "da"}, "L"),  # Dermatology chapter
+    ({"mắt"}, "H"),  # Ophthalmology chapter
+    ({"tai mũi họng", "tai", "họng"}, "H"),  # ENT chapter
+    ({"thận", "tiết niệu"}, "N"),  # Nephrology/Urology chapter
+    ({"máu", "huyết học"}, "D"),  # Hematology chapter
+    ({"sản phụ khoa", "phụ khoa", "thai"}, "O"),  # OB/GYN chapter
+    ({"nhi khoa"}, "P"),  # Pediatrics chapter
+    ({"tâm thần", "tâm lý"}, "F"),  # Psychiatry chapter
+    ({"ngoại khoa", "phẫu thuật"}, "Z"),  # Surgical/History chapter
+    ({"nội khoa"}, "Z"),  # Internal medicine history
     ({"viêm gan", "gan viêm"}, "K75"),
     ({"ung thư phổi", "k phổi", "carcinoma phổi"}, "C34"),
     ({"ung thư vú"}, "C50"),
