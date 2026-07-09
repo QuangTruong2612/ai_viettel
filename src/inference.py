@@ -382,16 +382,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-few-shot",
         type=int,
-        default=12,
-        help="Số few-shot examples TỐI ĐA (default 12 cho model < 9B, tăng từ 8). "
+        default=33,
+        help="Số few-shot examples TỐI ĐA (default 33 = tổng số examples hiện có, tăng từ 12). "
              "Nhiều examples giúp model < 9B hiểu pattern tốt hơn.",
     )
     
     parser.add_argument(
         "--target-ctx",
         type=int,
-        default=32768,
-        help="Context length Ollama (default 32768 cho qwen2.5:7b trên Kaggle). Nếu budget âm → ép 1 few-shot.",
+        default=65536,
+        help="Context length Ollama (default 65536 = nhiều few-shot hơn). Nếu budget âm → ép 1 few-shot.",
     )
     parser.add_argument("--log-file", type=Path, default=Path("predictions.log"))
     args = parser.parse_args(argv)

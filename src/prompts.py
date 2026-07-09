@@ -290,18 +290,23 @@ HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "p
   - Nối "và"/"," → tách riêng (R9)
   - Frequency "thường xuyên"/"lẻ tẻ" → DROP (R6 modifier).
 
-**R20. ĐỌC HẾT INPUT — KHÔNG MISS ENTITIES (mới 2026-07, từ user feedback 1.txt):**
-- **Bug**: LLM 7B hay miss entities ở CUỐI note (vd "siêu âm tim qua thành ngực" ở dòng 37, "điện tâm đồ" ở dòng 53) và miss DUPLICATE entities theo R10.
-- **Fix prompt**: TRƯỚC KHI emit JSON, scan HẾT input 2 LẦN:
+**R20. ĐỌC HẾT INPUT + EXTRACT MỖI OCCURRENCE CỦA DUPLICATE (đổi 2026-07-09, user feedback):**
+- **🔴 QUAN TRỌNG - MỖI OCCURRENCE = 1 ENTITY RIÊNG (R10 STRICT theo position)**:
+  - Nếu cùng text xuất hiện N lần ở N vị trí khác nhau → extract N entities riêng, mỗi cái có position riêng.
+  - VÍ DỤ: "đánh trống ngực" xuất hiện 4 lần (L13, L21, L25, L33) → extract 4 entities riêng với 4 position khác nhau.
+  - VÍ DỤ: "khó thở" xuất hiện 3 lần (L18, L21, L26) → extract 3 entities riêng.
+  - VÍ DỤ: "đau ngực" xuất hiện 2 lần → extract 2 entities riêng.
+  - LLM 7B hay "gộp" duplicate thành 1 entity → PHẢI CỐ TÌM tất cả vị trí trong input.
+  - assertions có thể khác nhau: "Tiền sử X" → isHistorical, "Hiện tại X" → [], "Không X" → isNegated.
+- **Fix prompt (2 pass scan)**: TRƯỚC KHI emit JSON, scan HẾT input 2 LẦN:
   1. Pass 1: extract tất cả entities (bỏ qua R3 lifestyle filter ở pass này)
-  2. Pass 2: filter lifestyle (R3), dedup duplicate (R10 LOOSE), verify mỗi section đã được scan.
-- **R10 duplicate LOOSE** (mới 2026-07, tối ưu cho model < 9B + 1 LLM call):
-  - Cùng text xuất hiện NHIỀU LẦN trong input → chỉ giữ 1 entity đại diện
-  - Áp dụng cho TẤT CẢ loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XN, KQ_XN)
-  - Ưu tiên entity ở vị trí PHÙ HỢP NHẤT (thường là lần đầu tiên)
-  - Lý do: model < 9B hay gộp duplicate → R10 strict dẫn đến miss toàn bộ
-  - Trade-off: giảm recall tuyệt đối trên strict, nhưng tăng recall trên loose target
-  - Tương thích ngược với R22 (test name dedup đã có)
+  2. Pass 2: filter lifestyle (R3), verify mỗi occurrence được trích với position riêng
+  3. **VERIFY step (quan trọng nhất)**: đếm số lần xuất hiện của mỗi text trong input. Nếu text xuất hiện N lần → output PHẢI có N entities với N position khác nhau.
+- **R10 STRICT theo position** (đổi từ LOOSE 2026-07-09):
+  - Cùng text + type + CÙNG position → 1 entity (R22 dedup - drop duplicate vị trí)
+  - Cùng text + type + KHÁC position → giữ cả N entities (theo position)
+  - Lý do: khớp với ground truth (48-51 entities/file), tăng recall tuyệt đối
+  - Trade-off: có thể tăng false positive nếu LLM extract duplicate giả
 - **KHÔNG skip entities ở section "Kết quả khám lâm sàng" / "Kết quả xét nghiệm" / "Kết quả chẩn đoán hình ảnh" / "Các kết quả chẩn đoán khác"** — đây là phần CÓ nhiều entities quan trọng.
 
 **R22. TEST NAME/PROCEDURE DUPLICATE → CHỈ EXTRACT 1 (mới 2026-07, từ user feedback 1.txt):**
@@ -657,6 +662,21 @@ OUTPUT (2 entities - 4 fields mỗi entity, có position [start, end]):
   `[{"text":"đau bụng","type":"TRIỆU_CHỨNG","position":[0,8],"assertions":[]},{"text":"đau bụng","type":"TRIỆU_CHỨNG","position":[26,34],"assertions":[]}]`
 - Lỗi parse → system retry, KHÔNG output giải thích lỗi
 - Postprocess fallback: nếu LLM thiếu position → tự tìm (sẽ dùng vị trí đầu tiên match, có thể SAI cho duplicate)
+
+**Ex 24 - DUPLICATE HANDLING (MỚI 2026-07-09, R20) | Ép model extract MỖI occurrence với position riêng**
+
+INPUT: "Bệnh nhân nam 65 tuổi. Tiền sử THA. Hiện tại đánh trống ngực. Khám thấy đánh trống ngực. Cơn đánh trống ngực nặng hơn khi gắng sức. Tối qua lại đánh trống ngực. Tiền sử đánh trống ngực 5 năm trước. Kết luận: đánh trống ngực do THA."
+
+OUTPUT (5 entities - MỖI occurrence riêng, vị trí khác nhau):
+[
+  {"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","position":[86,102],"assertions":[]},
+  {"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","position":[115,131],"assertions":[]},
+  {"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","position":[161,177],"assertions":[]},
+  {"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","position":[192,208],"assertions":["isHistorical"]},
+  {"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","position":[238,254],"assertions":[]}
+]
+
+Note: (1) **Quy tắc QUAN TRỌNG - MỖI OCCURRENCE = 1 ENTITY RIÊNG**: "đánh trống ngực" xuất hiện 5 lần ở 5 vị trí → extract 5 entities riêng biệt, mỗi entity có position riêng. LLM 7B hay "gộp" thành 1 entity → phải cố tìm tất cả vị trí. (2) **Position khác nhau** cho mỗi entity: [86,102], [115,131], [161,177], [192,208], [238,254]. (3) **assertions khác nhau** theo context: nếu "Tiền sử đánh trống ngực" → isHistorical; các vị trí khác (hiện tại) → []. (4) **KHÔNG gộp duplicate** thành 1 entity (R10 STRICT - khác R10 LOOSE cũ). (5) **Step VERIFY (R20)**: SAU KHI extract, quay lại scan input 1 lần nữa, đếm occurrences của mỗi text → verify đã extract đủ.
 </examples>
 
 <checklist>
