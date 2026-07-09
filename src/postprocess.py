@@ -1302,6 +1302,93 @@ def _validate_rescan_output(
 # ---------------------------------------------------------------------- #
 
 
+
+
+def _expand_duplicates(entities, input_text):
+    """Mở rộng duplicate entities dựa trên scan input thực tế (R20.1 mới 2026-07-09).
+
+    Vấn đề: LLM 7B hay "gộp" duplicate thành 1 entity dù đã có R20 + Ex 24.
+    Post-process aggressive: tự scan input text, tìm TẤT CẢ occurrences của mỗi
+    entity text, tạo thêm entities cho các positions khác.
+
+    Args:
+        entities: list entities từ LLM (đã validate position).
+        input_text: raw input text.
+
+    Returns:
+        list entities đã expand (có thể tăng số lượng nếu có duplicate).
+
+    Rules:
+    - Mỗi entity text xuất hiện N lần ở N vị trí khác nhau → giữ N entities
+      (giữ entity gốc của LLM + tạo thêm N-1 entities cho các vị trí còn lại).
+    - Mỗi entity text chỉ xuất hiện 1 lần → giữ nguyên.
+    - Text không tìm thấy trong input → giữ nguyên (fallback).
+    - Min text length = 3 chars để tránh false positive (vd "a", "có").
+    """
+    if not entities or not input_text:
+        return entities
+
+    expanded = list(entities)
+    for ent in entities:
+        text = str(ent.get("text", "")).strip()
+        if len(text) < 3:
+            continue
+
+        # Tìm tất cả positions của text trong input (case-insensitive)
+        # Bỏ qua position gốc của LLM (đã có 1 entity ở vị trí đó)
+        original_pos = ent.get("position", [0, 0])
+        original_start = original_pos[0] if isinstance(original_pos, list) and len(original_pos) >= 1 else 0
+
+        text_lower = text.lower()
+        input_lower = input_text.lower()
+
+        positions = []
+        start = 0
+        while True:
+            idx = input_lower.find(text_lower, start)
+            if idx < 0:
+                break
+            # Tính end position trong ORIGINAL text (case-preserved)
+            end = idx + len(text)
+            positions.append([idx, end])
+            start = idx + 1
+
+        # Nếu chỉ có 1 occurrence → giữ nguyên
+        if len(positions) <= 1:
+            continue
+
+        # Nếu có N occurrences > 1 entity hiện tại → tạo thêm N-1 entities
+        existing_positions_in_expanded = [
+            e.get("position", [0, 0])[0]
+            for e in expanded
+            if e.get("text", "").lower() == text_lower
+        ]
+        # Tìm các positions chưa có entity
+        missing_positions = [
+            p for p in positions
+            if p[0] not in existing_positions_in_expanded
+        ]
+
+        # Tạo entities mới cho các positions còn thiếu
+        for pos in missing_positions:
+            new_ent = {
+                "text": text,
+                "type": ent.get("type", ""),
+                "position": pos,
+                "assertions": list(ent.get("assertions", [])),
+                "candidates": [],
+            }
+            expanded.append(new_ent)
+            logger.debug(
+                "R20.1 expand duplicate: '%s' tại pos=%d (đã có tại %s)",
+                text, pos[0], existing_positions_in_expanded,
+            )
+
+    # Sort theo position
+    expanded.sort(key=lambda e: e.get("position", [0, 0])[0])
+    return expanded
+
+
 def assemble_record(
     input_text: str,
     raw_entities: Iterable[dict[str, Any]],
@@ -1324,6 +1411,7 @@ def assemble_record(
     nếu batch fail → fallback per-entity (giữ backward compat).
     """
     validated = validate_positions(input_text, raw_entities)
+    validated = _expand_duplicates(validated, input_text)
     validated = dedupe_entities(validated)
     # Fix: _drop_substring_entities đã được định nghĩa nhưng KHÔNG BAO GIỜ được gọi.
     # Gọi ở đây để dedup duplicate substring (vd: "cảm giác thắt chặt ngực vùng trước tim"
