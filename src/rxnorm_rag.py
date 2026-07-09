@@ -109,9 +109,12 @@ def _strip_route_freq(text: str) -> str:
 
 _DRUG_ALIASES: dict[str, str] = {
     # Analgesic / antipyretic
-    "panadol": "paracetamol", "panadol extra": "paracetamol",
-    "efferalgan": "paracetamol", "doliprane": "paracetamol",
-    "tylenol": "paracetamol", "acetaminophen": "paracetamol",
+    "panadol": "acetaminophen", "panadol extra": "acetaminophen",  # EU/UK → US generic in index
+    "efferalgan": "acetaminophen",  # FR
+    "doliprane": "acetaminophen",  # FR
+    "paracetamol": "acetaminophen",  # EU/UK → US generic in index
+    "tylenol": "acetaminophen",  # US
+    "acetaminophen": "acetaminophen",  # already generic (no-op)
     "aspirin": "aspirin",  # generic rồi
     "aspegic": "aspirin",  # aspirin lysine
     "bayer": "aspirin",
