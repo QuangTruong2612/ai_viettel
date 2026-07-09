@@ -211,6 +211,56 @@ _DRUG_NAME_BAD_PATTERNS = re.compile(
 )
 
 
+# Strip prescription suffix "x N + unit" trong drug text (R4 mới 2026-07).
+# KEEP "x 1" / "x 2" (dose count), DROP the unit word sau đó.
+# Patterns:
+#   "aspirin 325mg x 1 viên" → "aspirin 325mg x 1" (drop " viên")
+#   "aspirin 325mg x 1 viên sáng" → "aspirin 325mg x 1" (drop " viên sáng")
+#   "paracetamol 500mg x 2 lần/ngày" → "paracetamol 500mg x 2" (drop " lần/ngày")
+#   "aspirin 325mg x 1" → "aspirin 325mg x 1" (no unit → KEEP nguyên)
+# Lưu ý: "po bid" / "po daily" KHÔNG match (không có "x N").
+_DRUG_X_N_PATTERN = re.compile(
+    r"\s+(?:viên(?:\s+(?:sáng|tối|trưa))?|tablet|tab|lần(?:/ngày)?|ống|gói|ngày)\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+# SMART parens strip (R18 mới 2026-07): chỉ drop parens chứa admin instruction words.
+# KHÔNG drop parens có numerical/clinical info (giữ dose change, concentration, brand abbrev).
+# Admin keywords: uống, ăn, trước, sau, food, meal, hôm nay, cùng bữa, with food
+# Numerical/clinical: 50mg, 25mg, 5mg/ml, HCl, 200mg/5ml, etc. (digits present)
+#
+# Heuristic: nếu parens có ≥1 digit → KEEP (clinical data); nếu KHÔNG có digit + có admin word → DROP.
+_DRUG_PARENS_PATTERN = re.compile(
+    r"\s+\(([^)]*)\)",
+    re.UNICODE,
+)
+
+
+def _is_admin_parens(content: str) -> bool:
+    """True nếu parens content là admin instruction (DROP), False nếu clinical data (KEEP)."""
+    if not content:
+        return True  # empty parens → drop
+    # Có digit → clinical info (dose, conc, etc.) → KEEP
+    if re.search(r"\d", content):
+        return False
+    # Admin keywords (VN/EN)
+    admin_words = [
+        "uống", "ăn", "trước", "sau", "hôm nay", "cùng bữa",
+        "food", "meal", "with", "before", "after", "at bedtime",
+    ]
+    content_lower = content.lower()
+    for w in admin_words:
+        if w in content_lower:
+            return True
+    # Nếu không có digit + không có admin word → có thể là abbreviation (vd "(HCl)")
+    # Cẩn thận: nếu ngắn + uppercase → có thể là abbrev (HCl, NaCl). KEEP.
+    if content.isupper() and len(content) <= 5:
+        return False  # KEEP abbrev như "(HCl)"
+    # Mặc định: KEEP nếu không chắc chắn
+    return False
+
+
 # Note: _LIFESTYLE_BLACKLIST removed — LLM đã được dạy qua SYSTEM_PROMPT
 # để không extract các non-medical terms (lifestyle/social/sự kiện xã hội).
 
@@ -606,9 +656,32 @@ def _filter_lifestyle_entities(entities: list[dict]) -> list[dict]:
 
 
 def sanitize_drug_text(text: str) -> str:
-    """Bỏ một số chuỗi giả thuốc rõ ràng (placeholder)."""
-    if _DRUG_NAME_BAD_PATTERNS.match(text.strip()):
+    """Smart strip cho drug text (R4 + R18 mới 2026-07, KEEP x 1/x 2 per user).
+
+    Strip:
+      - "x N" + unit word: "aspirin 325mg x 1 viên" → "aspirin 325mg x 1" (KEEP "x 1", DROP " viên")
+      - Admin parens: "(uống trước ăn)", "(sau ăn)" → DROP (VN noise gây RAG miss)
+
+    KHÔNG strip:
+      - Bare "x N" without unit: "aspirin 325mg x 1" → KEEP nguyên "x 1"
+      - "x 2 lần/ngày" → "x 2" (drop " lần/ngày" unit)
+      - Numerical/clinical parens: "(reduced from 50mg to 25mg)" → KEEP
+      - Brand abbreviations: "(HCl)", "(NaCl)" → KEEP
+      - Concentration: "(5mg/ml)" → KEEP
+      - Route/freq only: "amiodarone 200mg po bid" → KHÔNG đổi
+    """
+    if not text:
+        return text
+    text = text.strip()
+    if _DRUG_NAME_BAD_PATTERNS.match(text):
         return ""
+    # Strip "x N" + unit word (R4) - KEEP "x N" (user yêu cầu), DROP unit
+    text = _DRUG_X_N_PATTERN.sub("", text).strip()
+    # Smart parens: chỉ drop nếu admin instruction (R18)
+    def _smart_parens_sub(m: re.Match) -> str:
+        content = m.group(1)
+        return "" if _is_admin_parens(content) else m.group(0)
+    text = _DRUG_PARENS_PATTERN.sub(_smart_parens_sub, text).strip()
     return text
 
 
@@ -1138,6 +1211,17 @@ def assemble_record(
             if not emitted_any:
                 continue
             continue
+
+        # Sanitize text cho THUỐC (R4 mới 2026-07) — strip "x N" + parens VN instructions.
+        # Update position nếu text bị thay đổi để tránh invalid position.
+        if etype == "THUỐC":
+            cleaned_text = sanitize_drug_text(text)
+            if cleaned_text and cleaned_text != text:
+                text = cleaned_text
+                # Re-find new position trong input
+                new_start = input_text.find(text, int(ent["position"][0]))
+                if new_start >= 0:
+                    ent["position"] = [new_start, new_start + len(text)]
 
         item: dict[str, Any] = {
             "text": text,

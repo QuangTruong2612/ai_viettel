@@ -490,13 +490,21 @@ class ICDRetriever:
                     kept = sorted_codes[:2]
                 kept = _filter_irrelevant_codes(kept, text, self.idx)
                 if kept:
-                    return kept
+                    # Chapter restriction (2026-07 fix L73.2 case): nếu text match
+                    # clinical keyword → restrict to relevant ICD chapter.
+                    restricted = _restrict_chapter(kept, text)
+                    if restricted:
+                        return restricted[:2]
+                    return kept[:2]
 
         # L4: Local fuzzy match trên names VN (threshold 85, cap 2)
         fuzzy_vn = self._fuzzy_local(text, threshold=85)
         if fuzzy_vn:
             fuzzy_vn = _filter_irrelevant_codes(fuzzy_vn, text, self.idx)
             if fuzzy_vn:
+                restricted = _restrict_chapter(fuzzy_vn[:2], text)
+                if restricted:
+                    return restricted
                 return fuzzy_vn[:2]
 
         # L5: BM25 fallback (top-2 — strict hơn cho Set-based F1)
@@ -505,6 +513,9 @@ class ICDRetriever:
             if bm25_codes:
                 bm25_codes = _filter_irrelevant_codes(bm25_codes, text, self.idx)
                 if bm25_codes:
+                    restricted = _restrict_chapter(bm25_codes[:2], text)
+                    if restricted:
+                        return restricted
                     return bm25_codes[:2]
 
         return []  # noqa: RET504
@@ -1289,6 +1300,72 @@ class ICD10HybridSearch:
         if k is None:
             return [c for c, _ in matched]
         return [c for c, _ in matched[:k]]
+
+
+# ---------------------------------------------------------------------- #
+# Chapter restriction — restrict RAG candidates to relevant ICD chapter
+# based on detected clinical keywords (mới 2026-07 fix L73.2 case).
+# Logic: nếu text chứa keyword → chỉ giữ codes thuộc chapter tương ứng.
+# Dùng cosine score TRONG chapter đã restrict.
+# ---------------------------------------------------------------------- #
+
+_CHAPTER_RESTRICTIONS = [
+    # (keywords_set, chapter_prefix)
+    ({"tuyến mồ hôi", "mồ hôi", "hidradenitis", "nhọt ổ gà"}, "L73"),
+    ({"viêm nang lông", "trứng cá", "mụn trứng cá", "acne"}, "L70"),
+    ({"nhồi máu cơ tim", "nmct"}, "I21"),
+    ({"đau thắt ngực", "đau ngực thắt", "đau thắt"}, "I20"),
+    ({"suy tim", "suy tim ứ huyết"}, "I50"),
+    ({"rung nhĩ"}, "I48"),
+    ({"tăng huyết áp", "tha", "cao huyết áp", "ha tăng"}, "I10"),
+    ({"đái tháo đường", "đtđ", "tiểu đường", "đái đường"}, "E11"),
+    ({"hen phế quản", "hen suyễn", "hen"}, "J45"),
+    ({"copd", "bệnh phổi tắc nghẽn mạn", "tắc nghẽn mạn"}, "J44"),
+    ({"viêm phổi"}, "J12"),
+    ({"viêm gan b", "viêm gan b cấp"}, "B16"),
+    ({"viêm gan c", "viêm gan c cấp"}, "B17"),
+    ({"viêm gan", "gan viêm"}, "K75"),
+    ({"ung thư phổi", "k phổi", "carcinoma phổi"}, "C34"),
+    ({"ung thư vú"}, "C50"),
+    ({"ung thư dạ dày", "k dạ dày"}, "C16"),
+    ({"ung thư đại tràng", "ung thư trực tràng", "k đại tràng", "ung thư ruột"}, "C18"),
+    ({"đột quỵ", "tai biến mạch máu não", "tbmmn"}, "I63"),
+    ({"suy thận"}, "N18"),
+    ({"viêm dạ dày"}, "K29"),
+    ({"loét dạ dày"}, "K25"),
+    ({"thoái hóa khớp"}, "M15"),
+    ({"viêm khớp dạng thấp"}, "M06"),
+    ({"thoát vị đĩa đệm"}, "M51"),
+    ({"trào ngược dạ dày"}, "K21"),
+    ({"rối loạn lipid máu", "tăng lipid máu", "rối loạn lipid"}, "E78"),
+    ({"viêm xoang"}, "J32"),
+    ({"viêm phế quản"}, "J20"),
+    ({"viêm họng"}, "J02"),
+    ({"viêm amidan"}, "J03"),
+    ({"viêm tai giữa"}, "H66"),
+    ({"nhiễm trùng tiết niệu", "nhiễm trùng đường tiết niệu"}, "N39"),
+    ({"sỏi thận"}, "N20"),
+    ({"block nhĩ thất", "block av"}, "I44"),
+    ({"ngoại tâm thu thất", "pvc"}, "I49"),
+    ({"ngoại tâm thu nhĩ", "pac"}, "I49"),
+]
+
+
+def _restrict_chapter(codes, entity_text):
+    """Restrict ICD codes to chapter dựa trên clinical keyword detection.
+
+    Nếu text chứa keyword → chỉ giữ codes thuộc chapter_prefix.
+    Nếu chapter-restricted rỗng → trả về codes gốc (fallback).
+    """
+    if not codes:
+        return codes
+    text_lower = entity_text.lower()
+    for keywords, chapter_prefix in _CHAPTER_RESTRICTIONS:
+        if any(kw in text_lower for kw in keywords):
+            restricted = [c for c in codes if c.startswith(chapter_prefix)]
+            if restricted:
+                return restricted
+    return codes
 
 
 # ---------------------------------------------------------------------- #

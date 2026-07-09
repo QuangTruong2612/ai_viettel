@@ -100,6 +100,100 @@ def _strip_route_freq(text: str) -> str:
     return " ".join(t for t in tokens if t not in skip_tokens)
 
 
+# ---------------------------------------------------------------------- #
+# Drug aliases — brand → generic (Vietnamese common drug names)
+# Mục đích: khi LLM extract "Panadol 500mg" → lookup RxNorm bằng "paracetamol".
+# Vì RxNorm index chủ yếu theo generic name, brand cần map về generic.
+# Cập nhật 2026-07.
+# ---------------------------------------------------------------------- #
+
+_DRUG_ALIASES: dict[str, str] = {
+    # Analgesic / antipyretic
+    "panadol": "paracetamol", "panadol extra": "paracetamol",
+    "efferalgan": "paracetamol", "doliprane": "paracetamol",
+    "tylenol": "paracetamol", "acetaminophen": "paracetamol",
+    "aspirin": "aspirin",  # generic rồi
+    "aspegic": "aspirin",  # aspirin lysine
+    "bayer": "aspirin",
+    # Anti-inflammatory / NSAID
+    "voltaren": "diclofenac", "voltaren gel": "diclofenac",
+    "ibuprofen": "ibuprofen", "advil": "ibuprofen", "motrin": "ibuprofen",
+    "celebrex": "celecoxib",
+    "meloxicam": "meloxicam", "mobic": "meloxicam",
+    "naproxen": "naproxen", "aleve": "naproxen",
+    # Cardiovascular - antihypertensive
+    "norvasc": "amlodipine", "istin": "amlodipine",
+    "lopressor": "metoprolol", "betaloc": "metoprolol",
+    "tenormin": "atenolol",
+    "coreg": "carvedilol", "dilatrend": "carvedilol",
+    "capoten": "captopril", "lopril": "captopril",
+    "zestril": "lisinopril",
+    "cozaar": "losartan", "cozaar plus": "losartan",
+    "diovan": "valsartan",
+    # Statin
+    "lipitor": "atorvastatin", "atorvastatin": "atorvastatin",
+    "zocor": "simvastatin", "simvastatin": "simvastatin",
+    "crestor": "rosuvastatin",
+    # Antiplatelet / anticoag
+    "plavix": "clopidogrel",
+    "eliquis": "apixaban",
+    "xarelto": "rivaroxaban",
+    "coumadin": "warfarin", "marevan": "warfarin",
+    # Diabetes
+    "glucophage": "metformin", "glucophage xr": "metformin",
+    "glucovance": "metformin",
+    "januvia": "sitagliptin",
+    "amaryl": "glimepiride",
+    "diamicron": "gliclazide",
+    # GI
+    "nexium": "esomeprazole",
+    "losec": "omeprazole", "prilosec": "omeprazole",
+    "pantoloc": "pantoprazole",
+    # Antibiotic
+    "augmentin": "amoxicillin",
+    "zithromax": "azithromycin",
+    "cipro": "ciprofloxacin",
+    "keflex": "cephalexin",
+    "vibramycin": "doxycycline",
+    # CNS
+    "stilnox": "zolpidem",
+    "xanax": "alprazolam",
+    "valium": "diazepam",
+    "lexapro": "escitalopram",
+    "zoloft": "sertraline",
+    "prozac": "fluoxetine",
+    "lyrica": "pregabalin",
+    "neurontin": "gabapentin",
+    # Misc
+    "ventolin": "albuterol", "salbutamol": "albuterol",
+    "symbicort": "budesonide",
+    "singulair": "montelukast",
+    "trileptal": "oxcarbazepine",
+    "depakote": "valproic acid",
+    "lamictal": "lamotrigine",
+}
+
+
+def _alias_to_generic(drug_text: str) -> str:
+    """Translate brand name in drug text → generic name.
+
+    VD: "Panadol 500mg" → "paracetamol 500mg"
+        "Voltaren gel 50g" → "diclofenac gel 50g" (giữ strength + form)
+    Logic: extract first word (likely drug name) → lookup in _DRUG_ALIASES → replace.
+    """
+    if not drug_text or not _DRUG_ALIASES:
+        return drug_text
+    text_lower = drug_text.lower().strip()
+    # Thử match từ đầu (longest first)
+    for brand in sorted(_DRUG_ALIASES.keys(), key=len, reverse=True):
+        if text_lower.startswith(brand + " ") or text_lower == brand:
+            generic = _DRUG_ALIASES[brand]
+            # Preserve rest of text (strength, route, etc.)
+            rest = drug_text[len(brand):].lstrip()
+            return f"{generic} {rest}".strip() if rest else generic
+    return drug_text
+
+
 def _parse_drug(text: str) -> tuple[str, str]:
     """Parse chuỗi thuốc → (ingredient_norm, strength_norm).
 
@@ -642,6 +736,10 @@ class RxNormRetriever:
             return []
 
         drug_text = drug_text.strip()
+
+        # Pre-step: Translate brand → generic (mới 2026-07).
+        # "Panadol 500mg" → "paracetamol 500mg" trước khi lookup RxNorm.
+        drug_text = _alias_to_generic(drug_text)
 
         # L1: Exact (ing, strength) — highest confidence, cap 1
         result = self.index.lookup(drug_text)

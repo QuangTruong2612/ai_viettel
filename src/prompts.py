@@ -34,7 +34,7 @@ Mọi hồ sơ bệnh án VN rơi vào 1 trong 5 dạng. Đọc cue → nhận d
 
 **DẠNG 4 — Medication list** (danh sách thuốc)
 - Cue: "Thuốc:" / "Thuốc ra viện:" / "Thuốc trước nhập viện:" / danh sách đánh số "1. amlodipine…".
-- Header KHÔNG trích. Mỗi mục = name + strength + route + freq (R1). Chỉ dẫn "(uống trước ăn)" trong tên thuốc GIỮ; đứng riêng DROP (R4).
+- Header KHÔNG trích. Mỗi mục = name + strength + route + freq (R1). Chỉ dẫn `(uống trước ăn)` trong tên thuốc cũng **DROP** theo R4 (RxNorm DB English, VN parenthetical noise → RAG miss).
 - Header "Thuốc ra viện / Thuốc trước nhập viện / Đang dùng" → isHistorical; có "không" trước thuốc → thêm isNegated.
 
 **DẠNG 5 — Procedure / imaging report**
@@ -100,8 +100,8 @@ Lưu ý: KHÔNG tự map drug name → ICD/RxNorm trong OUTPUT text — system t
 **2. Tên thuốc — brand hoặc generic, giữ nguyên text gốc:**
 "Panadol", "Stilnox", "Zithromax", "Glucophage", "Lovenox", "Coversyl" — tên thương mại phổ biến, giữ verbatim trong text (system map RxNorm sau). KHÔNG tự đổi brand → generic.
 
-**3. Tần suất dùng thuốc — giữ verbatim:**
-"bid/tid/qid" = 2/3/4 lần/ngày; "q4h/q6h/q8h" = mỗi 4/6/8 giờ; "prn" = khi cần; "hs" = trước ngủ; "po/iv/im/sc/sl" = uống/tĩnh mạch/cơ/dưới da/ngậm dưới lưỡi; "uống trước/sau ăn" — đi kèm tên thuốc thì giữ.
+**3. Tần suất dùng thuốc — giữ verbatim (chỉ phần route/freq, KHÔNG giữ parenthetical VN instruction):**
+"bid/tid/qid" = 2/3/4 lần/ngày; "q4h/q6h/q8h" = mỗi 4/6/8 giờ; "prn" = khi cần; "hs" = trước ngủ; "po/iv/im/sc/sl" = uống/tĩnh mạch/cơ/dưới da/ngậm dưới lưỡi. **KHÔNG giữ "(uống trước ăn)" / "(sau ăn)" — DROP theo R4.**
 
 **4. Đơn vị đo lường — giữ verbatim:**
 HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "pg/mL", "mmol/L", "µmol/L", "%"; nhịp: "lần/phút", "bpm". Số + đơn vị giữ theo cách viết gốc (có/không dấu cách).
@@ -130,7 +130,26 @@ HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "p
     - "Mới nghỉ việc" → DROP
   - Phân biệt: "tiền sử trầm cảm" / "rối loạn lo âu" (clinical diagnosis) VẪN trích CHẨN_ĐOÁN — chỉ general psychology dump.
 
-**R4. THUỐC** exclude: prescription context (e.g., "x 1" dose count, "(trước ăn)" instruction)
+**R4. THUỐC — chuẩn hoá prescription (R4 mới 2026-07, KEEP x N theo user):**
+- Pattern `x N` (dose count): **KEEP** verbatim (user yêu cầu 2026-07: "có x1 hay x2 vẫn để lại").
+  - VD: "aspirin 325mg x 1" → THUỐC = **"aspirin 325mg x 1"** (KEEP x 1)
+  - VD: "aspirin 325mg x 1 viên" → THUỐC = **"aspirin 325mg x 1"** (KEEP x 1, DROP "viên" - đơn vị)
+  - VD: "paracetamol 500mg x 2 lần/ngày" → THUỐC = **"paracetamol 500mg x 2"** (KEEP x 2, DROP "lần/ngày")
+- **Parenthetical chỉ dẫn `(...)` VN/EN: DROP** (RxNorm DB English, parens VN noise → RAG match sai).
+  - VD: **"atenolol 50mg (uống trước ăn) po daily" → THUỐC = "atenolol 50mg po daily"** (drop "(uống trước ăn)")
+  - Parens có numerical/clinical info (vd "(reduced from 50mg to 25mg)") → KEEP (R18 smart parens).
+- Anti-patterns (KHÔNG làm theo cách này):
+  - ❌ "aspirin 325mg" (drop x 1) → SAI; đúng: "aspirin 325mg x 1" (giữ x 1)
+  - ❌ "atenolol 50mg (uống trước ăn) po daily" → SAI; đúng: "atenolol 50mg po daily" (drop parens admin)
+
+**R15. DRUG CLASS NAME / VAGUE TERM → KHÔNG trích (mới 2026-07):**
+- "thuốc chống loạn nhịp", "thuốc hạ sốt", "thuốc chống viêm", "kháng sinh", "thuốc lợi tiểu", "thuốc chống đông" → DROP (chỉ là tên nhóm/cơ chế, KHÔNG có tên generic cụ thể).
+- Chỉ trích khi có tên thuốc cụ thể (vd "amiodarone 200mg", "furosemide 40mg", "apixaban 5mg").
+- Drug generic names chung vẫn trích: "insulin", "paracetamol", "aspirin", "amoxicillin" — đây là tên thuốc cụ thể.
+- Anti-patterns:
+  - ❌ "Đang điều trị bằng kháng sinh" → "kháng sinh" = CHỈ class name → DROP
+  - ❌ "Tiền sử dùng thuốc chống loạn nhịp" → DROP toàn bộ "thuốc chống loạn nhịp" (class term)
+  - ✅ "Đang dùng amiodarone 200mg po bid" → TRÍCH "amiodarone 200mg po bid" (specific drug)
 
 **R5. CHẨN_ĐOÁN** exclude: leading clause ("bệnh nhân nhập viện vì X" → X), duration ("X 5 năm" → X)
 
@@ -158,6 +177,36 @@ HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "p
   - "SpO2 96%" → TÊN="SpO2" + KQ="96%"
   - "nhịp tim 80 lần/phút" → TÊN="nhịp tim" + KQ="80 lần/phút"
   - "nhiệt độ 38°C" → TÊN="nhiệt độ" + KQ="38°C"
+
+**R13. ECG NORMAL FINDINGS → KẾT_QUẢ_XÉT_NGHIỆM (KHÔNG CHẨN_ĐOÁN)**
+  - "nhịp xoang", "nhịp xoang đều", "nhịp xoang chiếm ưu thế", "nhịp xoang bình thường", "ecg bình thường" → `KẾT_QUẢ_XÉT_NGHIỆM` (findings này là kết quả ECG bình thường, KHÔNG phải bệnh).
+  - Bất thường (ngoại tâm thu, rung nhĩ, ST chênh lên, block nhĩ thất, v.v.) → `CHẨN_ĐOÁN`.
+  - Kết hợp cả hai: "nhịp xoang đều, ngoại tâm thu nhĩ" → tách 2: KQ + CHẨN_ĐOÁN.
+
+**R14. KHÔNG trích pure verb / verb phrase / adverb làm entity**
+  - "đang điều trị", "đã tiến hành", "được phát hiện", "đang theo dõi", "Đã lấy cấy máu" → KHÔNG trích.
+  - "trước đây", "hiện nay", "gần đây" → KHÔNG phải entity (chỉ là adverb thời gian).
+  - Chỉ trích DANH TỪ y khoa (bệnh, triệu chứng, thuốc, xét nghiệm) — KHÔNG verb rời.
+
+**R16. LAB/VS SEPARATOR giữa TÊN và KQ** (mở rộng R8 cho các dạng separator):
+  - `:` (colon) — "WBC:14,43" → TÊN="WBC" + KQ="14,43"
+  - `là` — "ast là 319" → TÊN="ast (aspartate aminotransferase)" + KQ="319"
+  - `bằng` / `=`, `đạt` — "HA bằng 140/90" → TÊN="HA" + KQ="140/90"
+  - Ngăn cách space + số — "ast 319" → TÊN="ast" + KQ="319" (khi TÊN trước số)
+  - Rule: phần trước separator (TÊN_XN) và phần sau (KQ_XN) tách riêng.
+
+**R17. CLINICAL INTERPRETATION của lab → CHẨN_ĐOÁN (mới 2026-07):**
+  - "viêm gan do men" (interpreting elevated AST/ALT) → `CHẨN_ĐOÁN` (clinical finding, không phải raw lab value).
+  - "suy thận cấp", "thiếu máu", "tăng đường huyết" (interpreting lab values) → `CHẨN_ĐOÁN`.
+  - Ngược lại: raw values "AST 319", "Hgb 8.5", "creatinine 1.2" → TÊN_XN + KQ_XN riêng.
+  - Phân biệt: raw test name + value = TÊN + KQ; interpretation/clinical conclusion = CHẨN_ĐOÁN.
+
+**R18. SMART PARENS TRONG DRUG TEXT** (R4 mở rộng 2026-07):
+  - DROP parens chỉ chứa admin words: "(uống trước ăn)", "(sau ăn)", "(hôm nay)", "(with food)" → DROP.
+  - KEEP parens có numerical/clinical data: "(reduced from 50mg to 25mg daily)", "(HCl)", "(5mg/ml)" → KEEP.
+  - Heuristic: nếu parens có ≥1 digit → KEEP (clinical data); nếu chỉ admin words → DROP.
+  - VD: "atenolol 50mg (uống trước ăn) po daily" → "atenolol 50mg po daily"
+  - VD: "metoprolol (reduced from 50mg to 25mg daily)" → giữ nguyên (dose change info quan trọng)
 </rules>
 
 <entity_types>
@@ -179,6 +228,25 @@ HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "p
 - TRIỆU_CHỨNG: "đau ngực", "đau đầu", "khó thở", "sốt", "ngất", "buồn nôn", "nôn"
 - CHẨN_ĐOÁN: "nhồi máu cơ tim", "đau thắt ngực" (angina I20.x), "đau nửa đầu/migraine", "hen phế quản", "viêm ruột thừa"
 </entity_types>
+
+<common_errors>
+## LỖI THƯỜNG GẶP — KHÔNG LÀM THEO (mới 2026-07):
+
+Danh sách lỗi LLM hay mắc qua eval. Mỗi item là một anti-pattern cụ thể.
+
+1. ❌ Tách compound noun y khoa: "viêm phổi" → "viêm" + "phổi" → SAI. Giữ nguyên 1 entity (R1, clinical_expertise §3).
+2. ❌ Tách body part khỏi test name: "CT sọ não" → "CT" + "sọ não" → SAI. Giữ nguyên 1 entity (R11, standardization §1).
+3. ❌ Extract lifestyle/social: "căng thẳng", "cà phê", "mất việc" → TRIỆU_CHỨNG → SAI. DROP (R3 + postprocess).
+4. ❌ Drop severity: "suy tim độ III" → "suy tim" → SAI. Giữ "độ III" (R1, clinical_expertise §2).
+5. ❌ Extract verb/adverb: "đang điều trị", "trước đây", "gần đây" → SAI. KHÔNG trích (R14).
+6. ❌ Classify ECG normal thành CHẨN_ĐOÁN: "nhịp xoang đều" → CHẨN_ĐOÁN → SAI. Phải là KẾT_QUẢ (R13).
+7. ❌ Classify ECG abnormal thành KQ: "ST chênh lên" → KQ → SAI. Phải là CHẨN_ĐOÁN.
+8. ❌ Drop "x N" dose count in drug: "aspirin 325mg x 1" → strip to "aspirin 325mg" → SAI. R4 mới (2026-07): KEEP "x 1" verbatim, chỉ drop đơn vị. Đúng: "aspirin 325mg x 1 viên" → "aspirin 325mg x 1" (KEEP x 1, DROP "viên").
+9. ❌ Extract drug class name: "kháng sinh", "thuốc chống loạn nhịp" → THUỐC → SAI. DROP (R15 mới).
+10. ❌ Mở rộng viết tắt trong text: "THA" → text = "tăng huyết áp" → SAI. Giữ verbatim "THA" (clinical_expertise §1).
+11. ❌ Add random "x 1"/dose vào đầu output khi gặp TÊN_XN/KQ (vd thêm "1" vào values). Không bịa.
+12. ❌ Trả "[ ]" JSON rỗng khi extract được entity (nếu có entity → trả entity; rỗng chỉ khi input thực sự rỗng).
+</common_errors>
 
 <assertions>
 ## 3 ASSERTIONS (max 3, can combine)
@@ -250,9 +318,9 @@ Note: R6 "3 ngày"/"39 độ"/"kéo dài 2 tuần"/"khi gắng sức" đều dro
 INPUT: "Bệnh nhân NMCT cấp ST chênh lên, suy tim độ III. Tiền sử THA, ĐTĐ type 2, rối loạn lipid máu. Tiền sử dị ứng aspirin. Đã tiến hành tổng phân tích tế bào máu bằng máy lazer (tbm): TWBC:14,43; NEUT% (Tỷ lệ % bạch cầu trung tính):76,4; LYPH% (Tỷ lệ bạch cầu lympho):12,8. Đang dùng atenolol 50mg (uống trước ăn) po daily."
 
 OUTPUT (13 entities):
-[{"text":"NMCT cấp ST chênh lên","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"suy tim độ III","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"ĐTĐ type 2","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"rối loạn lipid máu","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"dị ứng aspirin","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"TWBC","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"14,43","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"NEUT% (Tỷ lệ % bạch cầu trung tính)","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"76,4","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"LYPH% (Tỷ lệ bạch cầu lympho)","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"12,8","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"atenolol 50mg (uống trước ăn) po daily","type":"THUỐC","assertions":["isHistorical"]}]
+[{"text":"NMCT cấp ST chênh lên","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"suy tim độ III","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"ĐTĐ type 2","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"rối loạn lipid máu","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"dị ứng aspirin","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"TWBC","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"14,43","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"NEUT% (Tỷ lệ % bạch cầu trung tính)","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"76,4","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"LYPH% (Tỷ lệ bạch cầu lympho)","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"12,8","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"atenolol 50mg po daily","type":"THUỐC","assertions":["isHistorical"]}]
 
-Note: DẠNG 2 + DẠNG 3 trộn. Phần "Bệnh nhân NMCT … Tiền sử dị ứng aspirin" → DẠNG 2, viết tắt VN giữ verbatim, "Tiền sử" → isHistorical. Phần "Đã tiến hành tổng phân tích tế bào máu bằng máy lazer (tbm):" → DẠNG 3: cụm verb + tên quy trình (drop thành entity). Sau dấu `:` đầu tiên là 3 cặp test:value ngăn bởi `;`. Tên test `NEUT% (Tỷ lệ % bạch cầu trung tính)` và `LYPH% (Tỷ lệ bạch cầu lympho)` GIỮ TRỌN phần trong ngoặc là một phần tên test (R8 + DẠNG 3). Giá trị "14,43"/"76,4"/"12,8" giữ dấu phẩy kiểu châu Âu (R8). "TWBC" alias WBC — verbatim. "atenolol … (uống trước ăn) po daily" → giữ ngoặc vì đi kèm tên thuốc liều (R4 edge), isHistorical vì "Đang dùng" header.
+Note: DẠNG 2 + DẠNG 3 trộn. Phần "Bệnh nhân NMCT … Tiền sử dị ứng aspirin" → DẠNG 2, viết tắt VN giữ verbatim, "Tiền sử" → isHistorical. Phần "Đã tiến hành tổng phân tích tế bào máu bằng máy lazer (tbm):" → DẠNG 3: cụm verb + tên quy trình (drop thành entity). Sau dấu `:` đầu tiên là 3 cặp test:value ngăn bởi `;`. Tên test `NEUT% (Tỷ lệ % bạch cầu trung tính)` và `LYPH% (Tỷ lệ bạch cầu lympho)` GIỮ TRỌN phần trong ngoặc là một phần tên test (R8 + DẠNG 3 — test names có parens GIỮ; drug names có parens instruction thì DROP — phân biệt). Giá trị "14,43"/"76,4"/"12,8" giữ dấu phẩy kiểu châu Âu (R8). "TWBC" alias WBC — verbatim. **"atenolol 50mg (uống trước ăn) po daily" → DROP "(uống trước ăn)" theo R4 mới (RxNorm DB English, parenthetical VN noise) → THUỐC = "atenolol 50mg po daily"**, isHistorical vì "Đang dùng" header. Lưu ý phân biệt: parens trong **test name** ("NEUT% (Tỷ lệ ...)") GIỮ, parens trong **drug instruction** ("(uống trước ăn)") DROP.
 
 **Ex 6 - DẠNG 5 Procedure report + DẠNG 1 narrative | ECG/LAB "và" (R9) + bình thường/bất thường + thuốc + triệu chứng**
 
@@ -268,9 +336,9 @@ Note: DẠNG 5 procedure report trộn với DẠNG 1 narrative. "nhập viện 
 INPUT: "Tiền sử THA 5 năm, đái tháo đường type 2. Tiền sử dị ứng aspirin. Thuốc trước nhập viện: 1. amlodipine 10mg po daily 2. metformin 500mg po bid. Thuốc ra viện: 1. furosemide 40mg po bid 2. atenolol 50mg (uống trước ăn) po daily."
 
 OUTPUT (7 entities):
-[{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"đái tháo đường type 2","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"dị ứng aspirin","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"amlodipine 10mg po daily","type":"THUỐC","assertions":["isHistorical"]},{"text":"metformin 500mg po bid","type":"THUỐC","assertions":["isHistorical"]},{"text":"furosemide 40mg po bid","type":"THUỐC","assertions":[]},{"text":"atenolol 50mg (uống trước ăn) po daily","type":"THUỐC","assertions":[]}]
+[{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"đái tháo đường type 2","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"dị ứng aspirin","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"amlodipine 10mg po daily","type":"THUỐC","assertions":["isHistorical"]},{"text":"metformin 500mg po bid","type":"THUỐC","assertions":["isHistorical"]},{"text":"furosemide 40mg po bid","type":"THUỐC","assertions":[]},{"text":"atenolol 50mg po daily","type":"THUỐC","assertions":[]}]
 
-Note: DẠNG 4 mix với DẠNG 2. "Tiền sử THA 5 năm" → CHẨN_ĐOÁN + isHistorical ("Tiền sử" header, R5 drop "5 năm"). "Tiền sử dị ứng aspirin" → CHẨN_ĐOÁN + isHistorical (R4: "dị ứng X" là CHẨN_ĐOÁN, không trích thuốc riêng). 2 header thuốc khác nhau → assertion khác nhau: "Thuốc trước nhập viện" → isHistorical; "Thuốc ra viện" → assertions = [] (thuốc hiện tại khi ra viện, là dữ kiện hiện tại trong input). R4 edge case: "atenolol 50mg (uống trước ăn) po daily" — chỉ dẫn "(uống trước ăn)" đi kèm tên thuốc trong cùng entry → GIỮ trong text (không drop như R4 với prescription context đứng riêng). Note liệt số "1.", "2." là numbering header KHÔNG trích thành entity.
+Note: DẠNG 4 mix với DẠNG 2. "Tiền sử THA 5 năm" → CHẨN_ĐOÁN + isHistorical ("Tiền sử" header, R5 drop "5 năm"). "Tiền sử dị ứng aspirin" → CHẨN_ĐOÁN + isHistorical (R4: "dị ứng X" là CHẨN_ĐOÁN, không trích thuốc riêng). 2 header thuốc khác nhau → assertion khác nhau: "Thuốc trước nhập viện" → isHistorical; "Thuốc ra viện" → assertions = [] (thuốc hiện tại khi ra viện, là dữ kiện hiện tại trong input). **"atenolol 50mg (uống trước ăn) po daily" → DROP "(uống trước ăn)" theo R4 mới (RxNorm DB English, parens VN noise) → THUỐC = "atenolol 50mg po daily"**. Note liệt số "1.", "2." là numbering header KHÔNG trích thành entity.
 
 **Ex 8 - DẠNG 2 Sectioned + DẠNG 5 Procedure | 3 thân nhân (Bố + Mẹ + Ông nội) + ECG ST chênh lên V1-V4 + nhịp xoang đều (mix bình thường/bất thường)**
 
@@ -316,7 +384,51 @@ OUTPUT (16 entities):
 [{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"ĐTĐ type 2","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"rung nhĩ","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"đau ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"khó thở","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"vã mồ hôi","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"HA","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"145/90 mmHg","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"SpO2","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"96%","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"nhịp tim","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"90 lần/phút","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"ST chênh lên V2-V4","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"metoprolol 50mg po bid","type":"THUỐC","assertions":[]},{"text":"metformin 500mg po bid","type":"THUỐC","assertions":[]},{"text":"apixaban 5mg po bid","type":"THUỐC","assertions":[]}]
 
 Note: Pattern triệu chứng kinh điển của hội chứng mạch vành cấp (ACS). (1) **Triệu chứng tổng quát**: "đau ngực" + "khó thở" + "vã mồ hôi" = TRIỆU riêng (KHÔNG trộn thành 1 entity) — quan trọng cho ICD IHD chưa xác định. (2) **R12 vital signs**: 3 cặp TÊN+KQ riêng: "HA"+"145/90 mmHg", "SpO2"+"96%", "nhịp tim"+"90 lần/phút" (R8 logic áp dụng cho vital signs). (3) ECG clause: "ST chênh lên V2-V4" = CHẨN_ĐOÁN (bất thường, ACS pattern, DẠNG 5 + clinical_expertise §4). (4) §10 drug class context: metoprolol = beta-blocker (THA/NMCT); metformin = ĐTĐ type 2; apixaban = kháng đông (rung nhĩ — đúng chỉ định). Class knowledge giúp xác nhận R7 split (drug cho disease). (5) "Đến khám vì" → drop leading verb (R + §9 trong clinical_expertise), lấy 3 triệu chứng. (6) VN viết tắt "THA"/"ĐTĐ" giữ verbatim (§1). (7) "type 2" giữ (§2 — ICD E11). (8) Frequency "po bid" = hai lần/ngày, giữ verbatim (standardization §3). (9) Assertions: 3 CHẨN_ĐOÁN đầu là tiền sử → isHistorical; các thuốc hiện tại → []. (10) **Syndrome recognition hint**: bộ 3 triệu chứng + ECG bất thường + tiền sử tim mạch — chỉ ra ACS, nhưng NER phải trích riêng từng entity, không gộp thành "hội chứng mạch vành cấp".
+
+**Ex 13 - ECG NORMAL vs ABNORMAL (R13) + VERB safety (R14) + retry cho tricky classification**
+
+INPUT: "Bệnh nhân nữ 50 tuổi. Tiền sử THA. Đến khám vì hồi hộp, đánh trống ngực. Không sốt. Đang điều trị thuốc chống loạn nhịp. ECG: nhịp xoang đều 75 lần/phút, ngoại tâm thu thất lẻ tẻ. HA 130/80 mmHg."
+
+OUTPUT (7 entities - test ECG normal + R14):
+[{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"hồi hộp","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"sốt","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"nhịp xoang đều","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"ngoại tâm thu thất","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"HA","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"130/80 mmHg","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]}]
+
+Note: Test ECG NORMAL vs ABNORMAL + R14 verb safety. (1) **R13 ECG normal**: "nhịp xoang đều" → KẾT_QUẢ (findings bình thường, KHÔNG phải CHẨN_ĐOÁN). Trước đây LLM hay gán nhầm thành CHẨN_ĐOÁN. (2) "ngoại tâm thu thất" → CHẨN_ĐOÁN (bất thường). (3) Trong cùng câu ECG: 1 KQ + 1 CHẨN_ĐOÁN riêng biệt (R9 split). (4) **R14 verb safety**: "Đang điều trị thuốc chống loạn nhịp" → DROP verb "đang điều trị"; "thuốc chống loạn nhịp" KHÔNG trích vì là NÚT (nhãn class) không phải thuốc cụ thể có tên generic. Nếu input không có tên thuốc (vd "amiodarone 200mg") thì KHÔNG trích. (5) "hồi hộp" — TRIỆU riêng, KHÔNG trộn với "đánh trống ngực". (6) "Không sốt" → "sốt" + isNegated (R pattern). (7) R12 vital signs: "HA" + "130/80 mmHg" tách riêng. (8) Edge case: ECG có số lần/phút "75 lần/phút" đi kèm — đó là hr value, có thể tách riêng hoặc giữ trong "nhịp xoang đều 75 lần/phút" → tùy LLM, không sai. Ở đây gộp trong TÊN_XN+KQ (vì HR là một phần của KQ ECG). (9) "Tiền sử THA" → CHẨN_ĐOÁN + isHistorical (Tiền sử header).
+
+**Ex 14 - DRUG PRESCRIPTION STRIP (R4 mới) + DRUG CLASS DROP (R15) + verbatim**
+
+INPUT: "Bệnh nhân nam 60 tuổi. Tiền sử THA. Hiện đang dùng aspirin 325mg x 1 viên sáng, paracetamol 500mg x 2 lần/ngày, và thuốc chống loạn nhịp amiodarone 200mg po bid. Không dùng kháng sinh. Đang theo dõi tiền sử hút thuốc lá."
+
+OUTPUT (4 entities - test R4 KEEP x N + DROP đơn vị + R15):
+[{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"aspirin 325mg x 1","type":"THUỐC","assertions":[]},{"text":"paracetamol 500mg x 2","type":"THUỐC","assertions":[]},{"text":"amiodarone 200mg po bid","type":"THUỐC","assertions":[]}]
+
+Note: Test 3 thứ. (1) **R4 KEEP "x N" + DROP đơn vị**: Input "aspirin 325mg x 1 viên sáng" → THUỐC = **"aspirin 325mg x 1"** (KEEP "x 1", DROP "viên sáng"). Tương tự "paracetamol 500mg x 2 lần/ngày" → **"paracetamol 500mg x 2"** (KEEP "x 2", DROP "lần/ngày"). Defense-in-depth: postprocess sanitize_drug_text tự strip đơn vị nếu LLM quên. (2) **R4 NOT strip "po bid"**: "amiodarone 200mg po bid" → giữ nguyên vì "po bid" là route+freq (R1), KHÔNG phải prescription instruction. (3) **R15 DROP class generic**: "thuốc chống loạn nhịp" → DROP class name, chỉ giữ tên generic kèm dosage "amiodarone 200mg po bid". (4) **R15 DROP "kháng sinh"**: "Không dùng kháng sinh" → "kháng sinh" là class name, KHÔNG trích. (5) **R3 lifestyle**: "tiền sử hút thuốc lá" → DROP. (6) "Đang dùng"/"Đang theo dõi" → verb phrase, DROP (R14).
+
+**Ex 15 - 3 CASE TEST (R16 'là' + R17 clinical interp + R18 smart parens)**
+
+INPUT: "Kết quả xét nghiệm: viêm gan do men, ast (aspartate aminotransferase) là 319, alt (alanine aminotransferase) là 690, phosphatase kiềm (ap) là 983, bilirubin toàn phần (tbili) là 2.4, bạch cầu (wbc) 11.6. Đã lấy cấy máu. Khám: ran nổ, phù phù, phân nâu dương tính guaiac. Thuốc: metoprolol (reduced from 50mg to 25mg daily)."
+
+OUTPUT (15 entities - test R16/R17/R18):
+[{"text":"viêm gan do men","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"ast (aspartate aminotransferase)","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"319","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"alt (alanine aminotransferase)","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"690","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"phosphatase kiềm (ap)","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"983","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"bilirubin toàn phần (tbili)","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"2.4","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"bạch cầu (wbc)","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"11.6","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"ran nổ","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"phù phù","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"phân nâu dương tính guaiac","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"metoprolol (reduced from 50mg to 25mg daily)","type":"THUỐC","assertions":[]}]
+
+Note: Test 3 case cùng lúc từ user feedback. (1) **R17 clinical interpretation**: "viêm gan do men" = CHẨN_ĐOÁN (clinical finding interpreting AST/ALT elevation), KHÔNG phải raw lab value. Nếu chỉ là raw test names thì TÊN_XN + KQ, nhưng đây là DIỄN GIẢI nên CHẨN_ĐOÁN. (2) **R16 separator "là"**: 5 lab tests dùng "là" làm separator (ast là 319, alt là 690, etc.) → TÊN_XN giữ phần trước "là", KQ_XN là phần số sau. (3) **R8 parens in test name GIỮ TRỌN**: 5 test names có parens với VN/EN description — vd "ast (aspartate aminotransferase)" — parens là phần tên test, KHÔNG drop (R8 + clinical_expertise §3). (4) **R14 verb DROP**: "Đã lấy cấy máu" → DROP (verb procedure, KHÔNG entity y khoa). (5) **TRIỆU_CHỨNG từ physical exam**: "ran nổ" (rale/crepitus phổi), "phù phù" (edema), "phân nâu dương tính guaiac" (melena) — 3 TRIỆU riêng biệt. (6) **R18 smart parens trong drug**: "metoprolol (reduced from 50mg to 25mg daily)" — parens có numerical/clinical data → KEEP nguyên vì dose change info quan trọng cho clinical context. KHÔNG drop như "(uống trước ăn)". Heuristic: parens có digit → KEEP; chỉ admin words → DROP. (7) KHÔNG extract "2L nasal cannula", "tại khoa Cấp cứu", "(khi đến MICU)" — đây là thông tin ngữ cảnh (device/location/time), không phải entity y khoa. (8) Tổng cộng 15 entities từ 3 case.
 </examples>
+
+<checklist>
+## CHECKLIST TỰ VERIFY — LLM kiểm tra output trước khi trả JSON
+
+Trước khi emit JSON array, tự verify:
+- □ Mỗi entity có đúng 3 fields (text, type, assertions), không có field thừa.
+- □ `text` xuất hiện verbatim trong input (case-sensitive). KHÔNG paraphrase, KHÔNG mở rộng, KHÔNG thu gọn.
+- □ `type` ∈ {THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM}.
+- □ `assertions` ≤ 3 phần tử, ⊂ {isHistorical, isNegated, isFamily}, uniqueItems.
+- □ KHÔNG extract lifestyle/social/psychology (R3 + postprocess filter sẽ drop nếu LLM sai).
+- □ KHÔNG extract verb/adverb ("đang điều trị", "trước đây", "gần đây").
+- □ ECG normal ("nhịp xoang", "ecg bình thường") → KẾT_QUẢ_XÉT_NGHIỆM; ECG abnormal → CHẨN_ĐOÁN.
+- □ Body part trong test name giữ nguyên (CT sọ não, MRI cột sống cổ).
+- □ Severity/type qualifier KHÔNG drop ("độ III", "type 2", "NYHA").
+- □ Duplicate occurrence → 2 entities riêng (R10).
+- □ Output là JSON array (không có markdown wrapper, không có giải thích).
+</checklist>
 
 <output_format>
 ## OUTPUT FORMAT (mandatory)
