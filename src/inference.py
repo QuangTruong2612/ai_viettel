@@ -158,9 +158,9 @@ def _log_token_budget(
 
     Giúp debug khi inference fail: biết ngay prompt có vượt num_ctx không.
     Không gửi tới LLM — chỉ log ở debug level.
-    Dùng chars/2.5 cho VN (real Qwen ratio) thay vì chars/4 (underestimate 60%).
+    Dùng chars/2 cho VN (Qwen2.5 ratio thực tế) - chars/2.5 underestimate 25%.
     """
-    # VN chars tokenize denser (~2.5 chars/token cho Qwen2.5, vs 4 chars/token heuristic)
+    # VN chars tokenize denser (~2 chars/token cho Qwen2.5, vs 4 chars/token heuristic)
     sys_tokens = len(SYSTEM_PROMPT) // 2
     few_shot_tokens = sum(len(m.get("content", "")) for m in few_shot) // 2
     user_prompt_tokens = len(user_prompt) // 2
@@ -168,7 +168,7 @@ def _log_token_budget(
     total_input = sys_tokens + few_shot_tokens + user_prompt_tokens
     total_with_output = total_input + max_output
     logger.debug(
-        "[%d] Token budget (VN-ratio): sys=%d few_shot=%d user=%d "
+        "[%d] Token budget (VN-ratio chars/2): sys=%d few_shot=%d user=%d "
         "total_in=%d total_io=%d (max_tokens=%d)",
         rec_id, sys_tokens, few_shot_tokens, user_prompt_tokens,
         total_input, total_with_output, max_output,
@@ -390,8 +390,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--target-ctx",
         type=int,
-        default=16384,
-        help="Context length Ollama (default 16384 cho qwen3.5:9b). Few-shot tự cap theo budget.",
+        default=32768,
+        help="Context length Ollama (default 32768 cho qwen2.5:7b trên Kaggle). Nếu budget âm → ép 1 few-shot.",
     )
     parser.add_argument("--log-file", type=Path, default=Path("predictions.log"))
     args = parser.parse_args(argv)
@@ -616,20 +616,26 @@ def main(argv: list[str] | None = None) -> int:
     all_examples = load_few_shot()
 
     # Estimate budget (target_ctx = Ollama Context Length, do user truyền)
-    # Dùng chars/2.5 cho VN text (thay vì chars/4 - underestimate 60%)
-    sys_tokens_real = int(len(SYSTEM_PROMPT) / 2.5)
-    max_output_tokens = llm.config.max_tokens  # 1024 sau khi giảm
+    # Dùng chars/2 cho VN text (chars/2.5 underestimate khiến budget âm → few_shot=0)
+    sys_tokens_real = int(len(SYSTEM_PROMPT) / 2)
+    max_output_tokens = llm.config.max_tokens  # 6144 sau khi tăng
     reserve_for_safety = 512  # buffer cho input + few-shot overhead
     budget_for_input = args.target_ctx - max_output_tokens - reserve_for_safety
     budget_for_sys_fewshot = budget_for_input
     remaining_for_fewshot = budget_for_sys_fewshot - sys_tokens_real
-    # Mỗi few-shot (user + assistant) ≈ 600 chars input mỗi (~240 tokens)
+    # Mỗi few-shot (user + assistant) ≈ 600 chars input mỗi (~300 tokens với chars/2)
     if remaining_for_fewshot < 0:
-        auto_few_shot = 0  # Không vừa, skip hết few-shot
+        # Budget âm: SYSTEM_PROMPT quá dài so với target_ctx.
+        # Ép dùng TỐI THIỂU 1 few-shot để có pattern (dù thiếu budget).
+        auto_few_shot = 1
+        logger.warning(
+            "Context budget ÂM (sys=%d > budget_in=%d). Ép dùng 1 few-shot.",
+            sys_tokens_real, budget_for_input,
+        )
     else:
-        # Each example ~ 240 real tokens (chars/2.5)
+        # Each example ~ 300 real tokens (chars/2)
         auto_few_shot = max(
-            0, min(remaining_for_fewshot // 240, len(all_examples), args.max_few_shot)
+            0, min(remaining_for_fewshot // 300, len(all_examples), args.max_few_shot)
         )
         # Ít nhất 1 example để có diversity, nhiều nhất theo budget
         auto_few_shot = max(0, min(auto_few_shot, args.max_few_shot))
