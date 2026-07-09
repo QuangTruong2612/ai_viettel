@@ -1466,8 +1466,8 @@ def assemble_record(
             pos = [0, 0]
 
         # Clean text + dedupe theo text+type (giữ entity đầu tiên)
-        from src.postprocess import _normalize_text_for_dedupe
-        norm_text = _normalize_text_for_dedupe(text)
+        # Không dùng _normalize_text_for_dedupe (function không tồn tại - dùng text trực tiếp)
+        norm_text = text.lower().strip()
         dedup_key = (norm_text, etype)
         if dedup_key in seen_text_type:
             continue
