@@ -1321,51 +1321,72 @@ def _expand_duplicates(entities, input_text):
     Rules:
     - Mỗi entity text xuất hiện N lần ở N vị trí khác nhau → giữ N entities
       (giữ entity gốc của LLM + tạo thêm N-1 entities cho các vị trí còn lại).
+    - Exact match: text từ LLM khớp 100% với substring trong input.
+    - Substring match: text LLM là CON trong input (vd "đánh trống ngực" trong "tăng đánh trống ngực").
+    - Modifiers strip: bỏ "tăng", "giảm", "có", "không" trước khi match.
     - Mỗi entity text chỉ xuất hiện 1 lần → giữ nguyên.
-    - Text không tìm thấy trong input → giữ nguyên (fallback).
-    - Min text length = 3 chars để tránh false positive (vd "a", "có").
+    - Min text length = 4 chars để tránh false positive.
     """
     if not entities or not input_text:
         return entities
 
+    # Modifiers VN cần strip trước khi match (R14/R25)
+    _MODIFIERS_PREFIX = re.compile(
+        r"^(tăng|giảm|có|không|đang|bị|bị\s+|nhẹ|nặng|vừa|"
+        r"rõ|rõ\s+rệt|ít|nhiều|hơi|khoảng|có\s+thể)\s+",
+        re.IGNORECASE | re.UNICODE,
+    )
+
     expanded = list(entities)
+
     for ent in entities:
         text = str(ent.get("text", "")).strip()
-        if len(text) < 3:
+        if len(text) < 4:
             continue
 
-        # Tìm tất cả positions của text trong input (case-insensitive)
-        # Bỏ qua position gốc của LLM (đã có 1 entity ở vị trí đó)
-        original_pos = ent.get("position", [0, 0])
-        original_start = original_pos[0] if isinstance(original_pos, list) and len(original_pos) >= 1 else 0
-
+        # Tìm TẤT CẢ occurrences của text trong input (case-insensitive)
         text_lower = text.lower()
         input_lower = input_text.lower()
 
-        positions = []
+        # Cách 1: exact substring match
+        positions_exact = []
         start = 0
         while True:
             idx = input_lower.find(text_lower, start)
             if idx < 0:
                 break
-            # Tính end position trong ORIGINAL text (case-preserved)
-            end = idx + len(text)
-            positions.append([idx, end])
+            positions_exact.append([idx, idx + len(text)])
             start = idx + 1
 
+        # Cách 2: stripped match (bỏ modifier "tăng", "giảm"...)
+        text_stripped = _MODIFIERS_PREFIX.sub("", text_lower).strip()
+        positions_stripped = []
+        if text_stripped and text_stripped != text_lower and len(text_stripped) >= 4:
+            start = 0
+            while True:
+                idx = input_lower.find(text_stripped, start)
+                if idx < 0:
+                    break
+                positions_stripped.append([idx, idx + len(text_stripped)])
+                start = idx + 1
+
+        # Merge: dùng exact positions (ưu tiên)
+        all_positions = positions_exact if positions_exact else positions_stripped
+
         # Nếu chỉ có 1 occurrence → giữ nguyên
-        if len(positions) <= 1:
+        if len(all_positions) <= 1:
             continue
 
-        # Nếu có N occurrences > 1 entity hiện tại → tạo thêm N-1 entities
+        # Nếu có N occurrences > 1 entity hiện tại → tạo thêm entities
         existing_positions_in_expanded = [
             e.get("position", [0, 0])[0]
             for e in expanded
             if e.get("text", "").lower() == text_lower
+            or _MODIFIERS_PREFIX.sub("", e.get("text", "").lower()).strip() == text_stripped
         ]
         # Tìm các positions chưa có entity
         missing_positions = [
-            p for p in positions
+            p for p in all_positions
             if p[0] not in existing_positions_in_expanded
         ]
 
@@ -1387,316 +1408,6 @@ def _expand_duplicates(entities, input_text):
     # Sort theo position
     expanded.sort(key=lambda e: e.get("position", [0, 0])[0])
     return expanded
-
-
-def assemble_record(
-    input_text: str,
-    raw_entities: Iterable[dict[str, Any]],
-    retriever: RxNormRetriever,
-    icd_retriever: Optional[ICDRetriever] = None,
-    llm_client: Any = None,
-) -> list[dict[str, Any]]:
-    """Build list thực thể cuối cùng cho một record.
-
-    - Validate position.
-    - Dedupe.
-    - Gán candidates:
-        + THUỐC → RxNorm (qua retriever)
-        + CHẨN_ĐOÁN → ICD-10 (qua icd_retriever; cần VN→EN translation)
-        + TRIỆU_CHỨNG → không gán candidates.
-    - Chuẩn hoá assertions (unique, sorted).
-    - Sắp xếp theo vị trí.
-
-    Rescan strategy: gọi LLM BATCH (1 call) cho tất cả entities có rescan;
-    nếu batch fail → fallback per-entity (giữ backward compat).
-    """
-    validated = validate_positions(input_text, raw_entities)
-    validated = _expand_duplicates(validated, input_text)
-    validated = dedupe_entities(validated)
-    # Fix: _drop_substring_entities đã được định nghĩa nhưng KHÔNG BAO GIỜ được gọi.
-    # Gọi ở đây để dedup duplicate substring (vd: "cảm giác thắt chặt ngực vùng trước tim"
-    # và "cảm giác thắt chặt ngực" cùng type → chỉ giữ entity dài hơn).
-    validated = _drop_substring_entities(validated)
-
-    # Lifestyle/social/psychology hard filter (defense-in-depth: drop entity match keyword)
-    # LLM 7B đôi khi extract "căng thẳng", "cà phê", "mất việc" thành TRIỆU_CHỨNG dù R3 đã cấm.
-    validated = _filter_lifestyle_entities(validated)
-
-    # Batch rescan: 1 LLM call cho N entities (giảm load Ollama 10-30x)
-    # → giảm 500 crash do resource pressure.
-    rescan_cache: dict[str, str] = batch_rescan_entities(validated, llm_client)
-
-    final: list[dict[str, Any]] = []
-    # Track text+type đã emit để dedupe (vd "doxycycline" trùng khi LLM trả 2 lần)
-    seen_signatures: set[tuple[str, str]] = set()
-    # Loại type được phép có candidates (per spec: CHỈ CHẨN_ĐOÁN + THUỐC)
-    CANDIDATES_ALLOWED_TYPES = {"CHẨN_ĐOÁN", "THUỐC"}
-    for ent in validated:
-        etype = ent.get("type", "")
-        text = str(ent.get("text", "")).strip()
-        if not text:
-            continue
-        if etype not in (
-            "THUỐC",
-            "TRIỆU_CHỨNG",
-            "TÊN_XÉT_NGHIỆM",
-            "KẾT_QUẢ_XÉT_NGHIỆM",
-            "CHẨN_ĐOÁN",
-        ):
-            continue
-
-        # Skip trùng với entity đã emit (vd LLM trả "doxycycline" + "doxycycline cho X")
-        sig = (text, etype)
-        if sig in seen_signatures:
-            continue
-        seen_signatures.add(sig)
-
-        # Assertions cleanup — chỉ giữ 3 giá trị hợp lệ
-        assertions = ent.get("assertions", []) or []
-        if not isinstance(assertions, list):
-            assertions = []
-        assertions = sorted(
-            {a for a in assertions if a in {"isNegated", "isFamily", "isHistorical"}}
-        )
-
-        # Bug history: LLM 7B hay gán nhầm tên thuốc → TÊN_XÉT_NGHIỆM.
-        # Fix: nếu text khớp common drug name → ép về THUỐC.
-        first_word = text.strip().split()[0].lower() if text.strip() else ""
-        if (
-            etype in ("TÊN_XÉT_NGHIỆM", "KẾT_QUẢ_XÉT_NGHIỆM", "TRIỆU_CHỨNG")
-            and first_word in _COMMON_DRUG_NAMES
-        ):
-            logger.debug(
-                "[%d] Rescue: '%s' %s → THUỐC (matches drug name)",
-                _seen_count,
-                text,
-                etype,
-            )
-            etype = "THUỐC"
-
-        # Rescue: Skip - dạy LLM qua prompt thay vì hardcode set.
-        # (LLM đã được dạy để phân biệt triệu chứng phổ biến vs chẩn đoán qua examples.)
-
-        # Bug history: LLM 7B gán isFamily cho mọi thứ trong "tiền sử",
-        # kể cả bệnh của bệnh nhân. Fix: verify family-context GẦN entity (window 200 chars).
-        if "isFamily" in assertions:
-            start_pos = int(ent["position"][0])
-            window_start = max(0, start_pos - 200)
-            window_end = start_pos  # check trước entity
-            nearby = input_text[window_start:window_end]
-            if not _IS_FAMILY_RE.search(nearby):
-                assertions = [a for a in assertions if a != "isFamily"]
-                logger.debug(
-                    "[%d] Drop isFamily: '%s' (no family-context nearby)",
-                    _seen_count,
-                    text,
-                )
-
-        # Lifestyle/behavior entities đã được dạy cho LLM qua SYSTEM_PROMPT
-        # để không extract. Nếu LLM vẫn extract → tin tưởng LLM (general standard).
-
-        # Bug history: LLM trả ra "A cho B" (drug cho disease) gán nhầm type THUỐC
-        # cho cả cụm. Fix: tách thành 2 entities nếu match. CHỈ emit mỗi phần nếu
-        # chưa có trong seen_signatures (tránh duplicate khi LLM trả 2 lần drug).
-        drug_part, diag_part = _split_drug_cho_pattern(text)
-        if diag_part is not None and drug_part != text:
-            # Find positions
-            drug_pos_start = input_text.find(drug_part, int(ent["position"][0]))
-            if drug_pos_start < 0:
-                drug_pos_start = int(ent["position"][0])
-            drug_pos_end = drug_pos_start + len(drug_part)
-            diag_pos_start = input_text.find(diag_part, drug_pos_end)
-            if diag_pos_start < 0:
-                diag_pos_start = drug_pos_end + len(" cho ")
-            diag_pos_end = diag_pos_start + len(diag_part)
-
-            emitted_any = False
-            # Emit drug part nếu chưa thấy
-            if (drug_part, "THUỐC") not in seen_signatures:
-                item: dict[str, Any] = {
-                    "text": drug_part,
-                    "type": "THUỐC",
-                    "position": [drug_pos_start, drug_pos_end],
-                    "assertions": list(assertions),
-                    "candidates": [],
-                }
-                cleaned = sanitize_drug_text(drug_part)
-                if cleaned:
-                    cand = retriever.lookup(cleaned)
-                    if cand:
-                        item["candidates"] = cand
-                final.append(item)
-                seen_signatures.add((drug_part, "THUỐC"))
-                emitted_any = True
-            # Emit diagnosis part nếu chưa thấy
-            diag_type = "CHẨN_ĐOÁN"
-            diag_lower = diag_part.lower().strip()
-            symptom_keywords = {
-                "ho",
-                "sốt",
-                "đau",
-                "nhức",
-                "khó thở",
-                "buồn nôn",
-                "nôn",
-                "táo bón",
-                "tiêu chảy",
-                "mất ngủ",
-                "lú lẫn",
-                "nói nhảm",
-                "sụt cân",
-                "chóng mặt",
-                "mệt mỏi",
-                "lo âu",
-                "tê",
-                "ngứa",
-                "khó nuốt",
-                "yếu nửa người",
-            }
-            if any(kw in diag_lower for kw in symptom_keywords):
-                diag_type = "TRIỆU_CHỨNG"
-
-            if (diag_part, diag_type) not in seen_signatures:
-                item2: dict[str, Any] = {
-                    "text": diag_part,
-                    "type": diag_type,
-                    "position": [diag_pos_start, diag_pos_end],
-                    "assertions": list(assertions),
-                    "candidates": [],
-                }
-                # Candidates chỉ cho CHẨN_ĐOÁN (Fix 3: apply rescan cho split diagnosis)
-                if diag_type == "CHẨN_ĐOÁN" and icd_retriever is not None:
-                    # Build other_entities list (đã loại bỏ chính diag_part)
-                    other_for_diag = [
-                        e for e in validated
-                        if e.get("text") != diag_part and e.get("type") != diag_type
-                    ]
-                    rescanned_diag = rescan_entity_context(
-                        diag_part, "CHẨN_ĐOÁN", input_text, llm_client,
-                        other_entities=other_for_diag,
-                        cache=rescan_cache,
-                    )
-                    cand2 = icd_retriever.lookup(
-                        rescanned_diag, other_entities=other_for_diag,
-                    )
-                    # Fix 13: Fallback cho split ICD
-                    if not cand2 and rescanned_diag != diag_part:
-                        cand2 = icd_retriever.lookup(
-                            diag_part, other_entities=other_for_diag,
-                        )
-                    if cand2:
-                        item2["candidates"] = cand2
-                final.append(item2)
-                seen_signatures.add((diag_part, diag_type))
-                emitted_any = True
-            # Nếu không emit gì thì skip (đã có từ entity trước)
-            if not emitted_any:
-                continue
-            continue
-
-        # Sanitize text cho THUỐC (R4 mới 2026-07) — strip "x N" + parens VN instructions.
-        # Update position nếu text bị thay đổi để tránh invalid position.
-        if etype == "THUỐC":
-            cleaned_text = sanitize_drug_text(text)
-            if cleaned_text and cleaned_text != text:
-                text = cleaned_text
-                # Re-find new position trong input
-                new_start = input_text.find(text, int(ent["position"][0]))
-                if new_start >= 0:
-                    ent["position"] = [new_start, new_start + len(text)]
-
-        item: dict[str, Any] = {
-            "text": text,
-            "type": etype,
-            "position": [int(ent["position"][0]), int(ent["position"][1])],
-            "assertions": assertions,
-            "candidates": [],   # SPEC: luôn có field, [] cho non-allowed types
-        }
-        # Postprocess smart-assert: NẾU LLM quên assertions, detect từ input context.
-        if not assertions:
-            assertions = _detect_assertions_from_context(
-                text, input_text, etype, int(ent["position"][0]),
-            )
-            item["assertions"] = assertions
-        # Candidates CHỈ được populate cho CHẨN_ĐOÁN và THUỐC (per spec).
-        # 3 type còn lại (TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM)
-        # sẽ có candidates=[] empty list.
-        # Bước rescan: dùng LLM rà soát ngữ cảnh để sinh câu truy vấn tối ưu
-        if etype == "THUỐC":
-            # Rescan để lấy query chuẩn hóa (gom liều, đường dùng từ văn bản)
-            # Pass other_entities để LLM có indication context (Fix 6)
-            # Use cache từ batch_rescan để giảm LLM calls
-            other_for_drug = [e for e in validated if e.get("text") != text]
-            rescanned = rescan_entity_context(
-                text, etype, input_text, llm_client,
-                other_entities=other_for_drug,
-                cache=rescan_cache,
-            )
-            cleaned = sanitize_drug_text(rescanned)
-            cand: list[str] = []
-            if cleaned:
-                cand = retriever.lookup(cleaned)
-            # Fix 13: Fallback strategy - nếu LLM rescan trả [] (do LLM confused hoặc
-            # API fail), thử lại với text gốc.
-            if not cand:
-                cleaned_orig = sanitize_drug_text(text)
-                if cleaned_orig and cleaned_orig != cleaned:
-                    cand = retriever.lookup(cleaned_orig)
-                    if cand:
-                        logger.debug(
-                            "[%d] Rescan fallback cho '%s': dùng text gốc → %d candidates",
-                            _seen_count, text, len(cand),
-                        )
-            if cand:
-                item["candidates"] = cand
-        elif etype == "CHẨN_ĐOÁN" and icd_retriever is not None:
-            # Rescan để lấy query EN chuẩn hóa (gom mức độ, biến chứng)
-            # Pass other_entities để LLM có indication context (Fix 6)
-            # KHÔNG truyền context_query cho BGE-M3 (Fix 7 contaminated embeddings)
-            # Use cache từ batch_rescan
-            other_for_diag = [e for e in validated if e.get("text") != text]
-            rescanned = rescan_entity_context(
-                text, etype, input_text, llm_client,
-                other_entities=other_for_diag,
-                cache=rescan_cache,
-            )
-            cand = icd_retriever.lookup(
-                rescanned, other_entities=other_for_diag,
-            )
-            # Fix 13: Fallback cho ICD - nếu rescan fail, thử text gốc
-            if not cand and rescanned != text:
-                cand = icd_retriever.lookup(
-                    text, other_entities=other_for_diag,
-                )
-                if cand:
-                    logger.debug(
-                        "[%d] ICD rescan fallback cho '%s': dùng text gốc → %d candidates",
-                        _seen_count, text, len(cand),
-                    )
-            if cand:
-                item["candidates"] = cand
-        elif etype == "TÊN_XÉT_NGHIỆM":
-            # SPEC: không có field `result`. Mối liên hệ TÊN_XÉT_NGHIỆM ↔ KẾT_QUẢ
-            # được handle NGẦM bằng position proximity (cùng section trong input).
-            # Logging ở debug level để debug, không ghi vào output.
-            linked_results = _link_test_results(
-                text, int(ent["position"][0]), int(ent["position"][1]), validated,
-            )
-            if linked_results:
-                logger.debug(
-                    "[%d] TÊN_XÉT_NGHIỆM '%s' ↔ %d KQ (link ngầm qua position)",
-                    _seen_count, text, len(linked_results),
-                )
-        final.append(item)
-
-    # Defense-in-depth: đảm bảo MỌI entity có field `candidates` (schema required).
-    # Nếu LLM quên, auto-fill [] (theo spec: chỉ THUỐC/CHẨN_ĐOÁN mới có codes).
-    for ent in final:
-        if "candidates" not in ent:
-            ent["candidates"] = []
-    return final
-
-
 def _link_test_results(
     test_name: str,
     test_start: int,
