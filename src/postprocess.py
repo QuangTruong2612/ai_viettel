@@ -407,6 +407,18 @@ _DRUG_X_N_PATTERN = re.compile(
 )
 
 
+# SMART parens strip (R18 mới 2026-07): chỉ drop parens chứa admin instruction words.
+# KHÔNG drop parens có numerical/clinical info (giữ dose change, concentration, brand abbrev).
+# Admin keywords: uống, ăn, trước, sau, food, meal, hôm nay, cùng bữa, with food
+# Numerical/clinical: 50mg, 25mg, 5mg/ml, HCl, 200mg/5ml, etc. (digits present)
+#
+# Heuristic: nếu parens có ≥1 digit → KEEP (clinical data); nếu KHÔNG có digit + có admin word → DROP.
+_DRUG_PARENS_PATTERN = re.compile(
+    r"\s+\(([^)]*)\)",
+    re.UNICODE,
+)
+
+
 def _is_admin_parens(content: str) -> bool:
     """True nếu parens content là admin instruction (DROP), False nếu clinical data (KEEP)."""
     if not content:
