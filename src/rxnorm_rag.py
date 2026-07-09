@@ -604,7 +604,9 @@ class RxNormRetriever:
         index: Optional[RxNormIndex] = None,
         index_path: Optional[Path] = None,
         use_hybrid: bool = True,
-        hybrid_threshold: float = 0.7,
+        hybrid_threshold: float = 0.78,  # nâng từ 0.7 (2026-07 fix theo Kaggle eval):
+                                        # - 0.7 quá thoáng → trả nhiều candidates noise
+                                        # - 0.78 precision cao hơn, chỉ match rõ ràng
     ) -> None:
         if index is not None:
             self.index = index
@@ -629,34 +631,40 @@ class RxNormRetriever:
     # ------------------------------------------------------------------ #
 
     def lookup(self, drug_text: str) -> list[str]:
-        """Tra RxNorm cho chuỗi thuốc VN/EN → list [rxcui] (0 hoặc 1)."""
+        """Tra RxNorm cho chuỗi thuốc VN/EN → list [rxcui] (0 hoặc 1 code, HIGH precision).
+
+        2026-07 fix theo Kaggle eval:
+        - Hybrid threshold nâng 0.7→0.78 (tránh candidates noise)
+        - Top_k=1 đã đúng → đảm bảo "1 mã thuốc" semantic, KHÔNG list nhiều
+        - Nếu confidence thấp → return [], KHÔNG đoán sai
+        """
         if not drug_text:
             return []
 
         drug_text = drug_text.strip()
 
-        # L1: Exact (ing, strength)
+        # L1: Exact (ing, strength) — highest confidence, cap 1
         result = self.index.lookup(drug_text)
         if result:
-            return result
+            return result[:1]
 
-        # L2: Hybrid search (BGE-M3 + BM25) — handles VN/EN fuzzy
+        # L2: Hybrid search — threshold 0.78 strict, top_k=1
         if self.use_hybrid and self.hybrid_search is not None:
             try:
-                result = self.hybrid_search.search(drug_text, top_k=1)
+                result = self.hybrid_search.search(
+                    drug_text, top_k=1, threshold=0.78
+                )
                 if result:
-                    return result
+                    return result[:1]
             except Exception as exc:
                 logger.warning("Hybrid search fail (%s): %s", drug_text[:30], exc)
 
-        # L3: Fuzzy match trên names
-        result = self._fuzzy_local(drug_text)
+        # L3: Fuzzy match với threshold 80 (strict hơn 70 cũ)
+        result = self._fuzzy_local(drug_text, threshold=80)
         if result:
-            return result
+            return result[:1]
 
-        return []
-
-    # ------------------------------------------------------------------ #
+        return []  # confidence thấp → empty
 
     def _fuzzy_local(self, query: str, threshold: int = 70) -> list[str]:
         """Fuzzy match trên name list (rapidfuzz)."""

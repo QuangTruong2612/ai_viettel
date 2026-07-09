@@ -21,6 +21,8 @@ Mọi hồ sơ bệnh án VN rơi vào 1 trong 5 dạng. Đọc cue → nhận d
   - "Tiền sử: / Tiền căn: / Trước đây: / Cách đây / Đã từng / Đang dùng / Đang duy trì" → isHistorical.
   - "Chẩn đoán: / Chẩn đoán ra viện:" → assertions = [].
   - "Tiền sử gia đình:" / "Bố bệnh nhân …" → isFamily (± isHistorical).
+  - "Hiện tại:" → assertions = [] (đang khám hiện tại — triệu chứng cơ năng).
+  - "Triệu chứng cơ năng:" → isHistorical (triệu chứng lúc nhập viện — ghi nhận tại thời điểm nhập viện, treated as admission-time record).
 
 **DẠNG 3 — Lab report** (phiếu xét nghiệm)
 - Cue: "Đã tiến hành …" / "Xét nghiệm:" / "Kết quả:" / "Công thức máu:" / "Sinh hóa:" / cụm `test:value; test:value`.
@@ -115,11 +117,18 @@ HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "p
 
 **R2. candidates: []** - system fills ICD/RxNorm. NEVER fill yourself.
 
-**R3. NEVER extract LIFESTYLE/SOCIAL** (even in "Tiền sử:"):
-  - Lifestyle: "hút thuốc lá", "thuốc lá", "uống rượu bia", "cà phê" (with/without caffeine), "trà", "tập/luyện tập thể dục", "căng thẳng", "stress", "chế độ ăn"
-  - Social events: "mất việc", "ly hôn", "chuyển nhà", "kết hôn", "sinh con", "thất nghiệp"
-  - General psychology (unless clinical): "vui", "buồn", "lo lắng", "cô đơn"
-  - Yếu tố nguy cơ (RF) = NOT entity NER
+**R3. NEVER extract LIFESTYLE / SOCIAL / PSYCHOLOGICAL** (kể cả trong "Tiền sử:" hoặc bất kỳ context nào):
+  - Lifestyle / risk factor: "hút thuốc lá", "thuốc lá", "uống rượu bia", "rượu bia", "cà phê" (kể cả "có caffeine", "không caffeine", "cà phê đen", v.v.), "trà", "tập/luyện tập thể dục", "căng thẳng", "stress", "chế độ ăn", "ăn kiêng", "ngủ ít"
+  - Social events: "mất việc", "mất việc làm", "mới nghỉ việc", "ly hôn", "chuyển nhà", "kết hôn", "sinh con", "thất nghiệp", "bị sa thải"
+  - General psychology (KHÔNG phải clinical depression/anxiety): "vui", "buồn", "lo lắng", "cô đơn", "giận", "sợ", "lo", "bực"
+  - → KHÔNG trích thành bất kỳ entity nào, **KHÔNG kể cả TRIỆU_CHỨNG**. Đây KHÔNG phải entity y khoa, chỉ là risk factor / context.
+  - Anti-examples (KHÔNG trích):
+    - "Hút thuốc lá 20 năm" → DROP hoàn toàn
+    - "Căng thẳng công việc" → DROP
+    - "Cà phê có caffeine" → DROP
+    - "Mất việc làm 8 ngày trước" → DROP
+    - "Mới nghỉ việc" → DROP
+  - Phân biệt: "tiền sử trầm cảm" / "rối loạn lo âu" (clinical diagnosis) VẪN trích CHẨN_ĐOÁN — chỉ general psychology dump.
 
 **R4. THUỐC** exclude: prescription context (e.g., "x 1" dose count, "(trước ăn)" instruction)
 

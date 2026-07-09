@@ -390,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-few-shot",
         type=int,
-        default=3,
+        default=5,
         help="Số few-shot examples TỐI ĐA (default 3; giảm để giảm token overhead, "
              "tăng nếu model cần thêm ví dụ)",
     )

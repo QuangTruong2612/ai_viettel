@@ -443,43 +443,69 @@ class ICDRetriever:
 
         text = self._strip_clinical_prefix(vn_text)
 
-        # L1: Exact (nếu input đã chuẩn - vd "viêm phổi cộng đồng")
+        # L1: Exact (cao độ tin cậy nhất — cap 2)
         key = text.lower()
         if key in self.idx.exact:
-            return sorted(set(self.idx.exact[key]))
+            return sorted(set(self.idx.exact[key]))[:2]
 
         # L2: Build query có context cho BM25 (dùng nearby drugs/symptoms)
         bm25_query = build_context_query(text, "CHẨN_ĐOÁN", other_entities)
         # Vector vẫn dùng text gốc (không contaminate embedding - bug history #4)
 
-        # L3: Hybrid search (BGE-M3 cosine ≥ 0.5 + BM25 mở rộng candidates)
-        # Threshold 0.5 (không phải 0.7) vì:
-        # - VN query vs EN+VN concatenated desc: cosine ~0.55-0.70
-        # - 0.7 quá strict → miss 70% medical terms
-        # - 0.5 balance giữa precision và recall
+        # L3: Hybrid search với adaptive confidence-based cap (2026-07 fix):
+        # Ý tưởng: KHÔNG list ra hết mã đúng — chỉ return codes có cosine CAO
+        # và CÓ score gap tốt so với top-1. Nguyên tắc:
+        # 1. Threshold CAO (0.75) lọc ra codes chắc chắn liên quan
+        # 2. Adaptive cap: nếu top-1 cosine rất cao → return 1 code; nếu các top
+        #    scores gần nhau (gap < 0.10) → cap về 2-3 codes
+        # 3. "KHÔNG list ra hết mã đúng" → giảm precision penalty Set-based F1.
         if self.local_search is not None:
-            local_results = self.local_search.search(
-                text, threshold=0.5  # giảm từ 0.7 để bắt VN→EN semantic
-            )
-            if local_results:
-                local_results = _filter_irrelevant_codes(local_results, text, self.idx)
-                if local_results:
-                    return local_results
+            # Lấy TẤT CẢ candidates match threshold cao (để xếp hạng bằng gap, không cap)
+            all_matched = self.local_search.search(
+                text, threshold=0.75, top_k=50  # lấy rộng, sort sau
+            ) or []
+            if all_matched:
+                # Lấy scores để áp gap filter
+                all_scores = self.local_search.vector_search.score_codes(
+                    text, all_matched
+                ) if hasattr(self.local_search, 'vector_search') else {}
+                # Sort by cosine desc
+                if all_scores:
+                    sorted_codes = sorted(
+                        all_matched,
+                        key=lambda c: -all_scores.get(c, 0.0),
+                    )
+                else:
+                    sorted_codes = all_matched
+                # Adaptive cap: keep codes within score gap < 0.10 of top-1
+                if sorted_codes and all_scores:
+                    top1_score = all_scores.get(sorted_codes[0], 0.0)
+                    kept = [
+                        c for c in sorted_codes
+                        if all_scores.get(c, 0.0) >= top1_score - 0.10
+                    ]
+                    # Final cap top-2 (Set-based F1 với expected ~1-2 codes thì OK)
+                    kept = kept[:2]
+                else:
+                    kept = sorted_codes[:2]
+                kept = _filter_irrelevant_codes(kept, text, self.idx)
+                if kept:
+                    return kept
 
-        # L4: Local fuzzy match trên names VN (low threshold để bắt substring)
-        fuzzy_vn = self._fuzzy_local(text, threshold=70)
+        # L4: Local fuzzy match trên names VN (threshold 85, cap 2)
+        fuzzy_vn = self._fuzzy_local(text, threshold=85)
         if fuzzy_vn:
             fuzzy_vn = _filter_irrelevant_codes(fuzzy_vn, text, self.idx)
             if fuzzy_vn:
-                return fuzzy_vn
+                return fuzzy_vn[:2]
 
-        # L5: BM25 fallback (nếu hybrid fail)
+        # L5: BM25 fallback (top-2 — strict hơn cho Set-based F1)
         if self.local_search is not None and hasattr(self.local_search, 'bm25_index'):
-            bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=5)
+            bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=2)
             if bm25_codes:
                 bm25_codes = _filter_irrelevant_codes(bm25_codes, text, self.idx)
                 if bm25_codes:
-                    return bm25_codes
+                    return bm25_codes[:2]
 
         return []  # noqa: RET504
 

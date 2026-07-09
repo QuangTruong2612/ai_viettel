@@ -34,7 +34,7 @@ class LLMConfig:
 
     # max_tokens=768 đủ chứa JSON ~25 entities (~30 chars mỗi).
     # 9b có thể output dài hơn 4b; restore từ 512 → 768 cho đủ entities.
-    max_tokens: int = 768
+    max_tokens: int = 1024
     timeout: int = 300  # 5 phút/request (9b chậm hơn 7b, tránh timeout)
     max_retries: int = 1  # giảm retry để fail fast
 

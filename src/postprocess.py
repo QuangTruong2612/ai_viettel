@@ -236,6 +236,31 @@ _IS_FAMILY_PATTERNS = [
 _IS_FAMILY_RE = re.compile("|".join(_IS_FAMILY_PATTERNS), re.IGNORECASE | re.UNICODE)
 
 
+# Bug history: LLM 7B extract nhầm lifestyle/social/psychology words thành
+# TRIỆU_CHỨNG dù đã có R3 trong prompt (vd "căng thẳng", "cà phê có caffeine",
+# "mất việc làm 8 ngày trước"). Fix: hard filter trong postprocess — drop entity
+# có text khớp keyword lifestyle/social/psychology. Defense-in-depth để LLM
+# vẫn gặp score cao khi extract thì vẫn bị filter.
+_LIFESTYLE_KEYWORDS: set[str] = {
+    # Lifestyle / risk factor
+    "hút thuốc lá", "thuốc lá", "hút thuốc", "uống rượu", "rượu bia",
+    "cà phê", "trà", "tập thể dục", "luyện tập", "căng thẳng", "stress",
+    "chế độ ăn", "ăn kiêng", "ngủ ít", "ngủ nhiều", "ngủ đủ",
+    # Social events
+    "mất việc", "mất việc làm", "mới nghỉ việc", "nghỉ việc",
+    "ly hôn", "ly thân", "chuyển nhà", "kết hôn", "sinh con",
+    "thất nghiệp", "bị sa thải", "sa thải",
+    # General psychology (non-clinical)
+    "vui", "buồn", "lo lắng", "cô đơn", "giận", "sợ", "lo", "bực",
+    "căng", "áp lực", "mệt mỏi tinh thần",
+}
+
+_LIFESTYLE_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in sorted(_LIFESTYLE_KEYWORDS, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
 # Counter cho logging
 _seen_count: int = 0
 
@@ -553,6 +578,31 @@ def _drop_substring_entities(entities: list[dict]) -> list[dict]:
                 )
 
     return [ent for idx, ent in enumerate(entities) if idx not in drop_indices]
+
+
+def _filter_lifestyle_entities(entities: list[dict]) -> list[dict]:
+    """Drop entities khớp lifestyle / social / psychology keywords.
+
+    Defense-in-depth: dù SYSTEM_PROMPT R3 đã cấm, LLM 7B đôi khi vẫn extract
+    (vd "căng thẳng", "cà phê có caffeine", "mất việc làm 8 ngày trước") thành
+    TRIỆU_CHỨNG. Filter này DROP chúng để khỏi tính F1.
+
+    Return: list entities đã lọc.
+    """
+    out: list[dict] = []
+    for ent in entities:
+        text = str(ent.get("text", "")).strip()
+        if not text:
+            out.append(ent)
+            continue
+        if _LIFESTYLE_RE.search(text):
+            logger.debug(
+                "[%d] Drop lifestyle/social/psych entity '%s' (kw match)",
+                _seen_count, text,
+            )
+            continue
+        out.append(ent)
+    return out
 
 
 def sanitize_drug_text(text: str) -> str:
@@ -912,6 +962,10 @@ def assemble_record(
     # Gọi ở đây để dedup duplicate substring (vd: "cảm giác thắt chặt ngực vùng trước tim"
     # và "cảm giác thắt chặt ngực" cùng type → chỉ giữ entity dài hơn).
     validated = _drop_substring_entities(validated)
+
+    # Lifestyle/social/psychology hard filter (defense-in-depth: drop entity match keyword)
+    # LLM 7B đôi khi extract "căng thẳng", "cà phê", "mất việc" thành TRIỆU_CHỨNG dù R3 đã cấm.
+    validated = _filter_lifestyle_entities(validated)
 
     # Batch rescan: 1 LLM call cho N entities (giảm load Ollama 10-30x)
     # → giảm 500 crash do resource pressure.
