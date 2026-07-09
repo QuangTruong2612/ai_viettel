@@ -509,13 +509,20 @@ class ICDRetriever:
                     restricted = _restrict_chapter(kept, text)
                     if restricted:
                         return restricted[:2]
-                    # Fallback 2026-07: nếu text match chapter keyword (vd "tuyến mồ hôi"
-                    # → L73) mà `kept` không có code L73 nào → thử VN prefix exact match
-                    # trong index (desc_vi bắt đầu bằng text) thay vì trả bacterial codes.
+                    # Fallback 2026-07-09 (R27.2): nếu text match chapter keyword
+                    # (vd "tuyến mồ hôi" → L73) mà `kept` không có code L73 nào
+                    # → thử VN substring match trong index (re-search toàn bộ).
+                    # Nếu substring match thành công → trả codes đúng.
+                    # Nếu vẫn rỗng → return [] (KHÔNG fallback về kept SAI).
                     if _text_matches_chapter_keyword(text):
+                        # Try prefix match first (nếu desc_vi bắt đầu bằng text)
                         prefix_codes = self._exact_match_vn_prefix(text)
                         if prefix_codes:
                             return sorted(set(prefix_codes))[:2]
+                        # Try substring match (desc_vi chứa text)
+                        chapter_codes = self._chapter_codes_lookup(text)
+                        if chapter_codes:
+                            return sorted(set(chapter_codes))[:2]
                     return kept[:2]
 
         # L4: Local fuzzy match trên names VN (threshold 85, cap 2)
@@ -530,6 +537,10 @@ class ICDRetriever:
                     prefix_codes = self._exact_match_vn_prefix(text)
                     if prefix_codes:
                         return sorted(set(prefix_codes))[:2]
+                    # R27.2: thử substring match trong ICD index
+                    chapter_codes = self._chapter_codes_lookup(text)
+                    if chapter_codes:
+                        return sorted(set(chapter_codes))[:2]
                 return fuzzy_vn[:2]
 
         # L5: BM25 fallback (top-2 — strict hơn cho Set-based F1)
@@ -545,6 +556,10 @@ class ICDRetriever:
                         prefix_codes = self._exact_match_vn_prefix(text)
                         if prefix_codes:
                             return sorted(set(prefix_codes))[:2]
+                        # R27.2: thử substring match trong ICD index
+                        chapter_codes = self._chapter_codes_lookup(text)
+                        if chapter_codes:
+                            return sorted(set(chapter_codes))[:2]
                     return bm25_codes[:2]
 
         return []  # noqa: RET504
@@ -630,6 +645,197 @@ class ICDRetriever:
                 if code not in out:
                     out.append(code)
         return out
+
+    def _exact_match_vn_substring(self, text: str) -> list[str]:
+        """Match VN substring: tìm codes có desc_vi chứa text (substring match).
+
+        Fix ICD candidates SAI (R27.2, 2026-07-09):
+        - Vector search trả codes không thuộc chapter đúng (vd "ung thư phổi" → B21.0)
+        - Chapter restriction `_restrict_chapter(kept, text)` → restricted = []
+        - Fallback: thử VN prefix exact match (nếu desc_vi bắt đầu bằng text)
+        - Nếu prefix rỗng → RE-SEARCH bằng substring (desc_vi chứa text)
+
+        Ví dụ:
+        - "Ung thư phổi" → desc_vi có "Ung thư phổi không tế bào nhỏ"
+          → substring match → code C34.x (KHÔNG phải B21.0)
+        - "Tăng huyết áp" → desc_vi có "Tăng huyết áp vô căn"
+          → substring match → code I10 (KHÔNG phải I15)
+        - "Di căn não" → desc_vi có "Di căn não"
+          → substring match → code C79.31 (KHÔNG phải D56.4)
+
+        Min substring length = 5 chars để tránh false positive (vd "đau" match nhiều).
+        """
+        if not text or len(text) < 5:
+            return []
+        text_lower = text.lower().strip()
+        import re as _re
+        out: list[str] = []
+        for name, idx in self.idx.name_to_idx.items():
+            name_lower = name.lower().strip()
+            name_clean = _re.sub(r"\s*[\[\(].*?[\]\)]\s*", " ", name_lower).strip()
+            # Substring match (text là 1 phần của desc_vi)
+            if text_lower in name_clean:
+                code = self.idx.codes[idx]
+                if code not in out:
+                    out.append(code)
+        return out
+
+    # ICD direct mapping (R27.5, 2026-07-09): VN → exact ICD codes
+        # Vì desc_en BYT VN không exact match EN translation (vd "lung cancer" vs
+        # "Malignant neoplasm of bronchus and lung") → cần dict mapping trực tiếp.
+        self._icd_vn_to_codes = {
+            "ung thư phổi": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
+            "ung thư phổi không tế bào nhỏ": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
+            "ung thư phổi tế bào nhỏ": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
+            "u ác tính phổi": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
+            "k phổi": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
+            "ung thư não": ["C71", "C71.0", "C71.1", "C71.2", "C71.3", "C71.4", "C71.5", "C71.6", "C71.7", "C71.8", "C71.9"],
+            "u não": ["C71", "C71.0", "C71.1", "C71.2", "C71.3", "C71.4", "C71.5", "C71.6", "C71.7", "C71.8", "C71.9"],
+            "u ác tính não": ["C71", "C71.0", "C71.1", "C71.2", "C71.3", "C71.4", "C71.5", "C71.6", "C71.7", "C71.8", "C71.9"],
+            "di căn não": ["C79.3", "C79.30", "C79.31", "C79.32"],
+            "u ác tính thứ phát ở não": ["C79.3", "C79.30", "C79.31", "C79.32"],
+            "di căn xương": ["C79.5"],
+            "di căn gan": ["C78.7"],
+            "di căn phổi": ["C78.0"],
+            "di căn": ["C79", "C79.0", "C79.1", "C79.2", "C79.3", "C79.4", "C79.5", "C79.6", "C79.7", "C79.8", "C79.9"],
+            "ung thư vú": ["C50", "C50.0", "C50.1", "C50.2", "C50.3", "C50.4", "C50.5", "C50.6", "C50.8", "C50.9"],
+            "ung thư gan": ["C22", "C22.0", "C22.1", "C22.2", "C22.3", "C22.4", "C22.7", "C22.8", "C22.9"],
+            "ung thư dạ dày": ["C16", "C16.0", "C16.1", "C16.2", "C16.3", "C16.4", "C16.5", "C16.6", "C16.8", "C16.9"],
+            "ung thư đại tràng": ["C18", "C18.0", "C18.1", "C18.2", "C18.3", "C18.4", "C18.5", "C18.6", "C18.7", "C18.8", "C18.9"],
+            "ung thư trực tràng": ["C20"],
+            "tăng huyết áp": ["I10"],
+            "tăng huyết áp vô căn": ["I10"],
+            "tăng huyết áp thứ phát": ["I15"],
+            "cao huyết áp": ["I10"],
+            "nhồi máu cơ tim": ["I21", "I21.0", "I21.1", "I21.2", "I21.3", "I21.4", "I21.9"],
+            "đau thắt ngực": ["I20", "I20.0", "I20.1", "I20.8", "I20.9"],
+            "suy tim": ["I50", "I50.0", "I50.1", "I50.9"],
+            "rung nhĩ": ["I48", "I48.0", "I48.1", "I48.2", "I48.3", "I48.4", "I48.9"],
+            "ngoại tâm thu thất": ["I49.3"],
+            "ngoại tâm thu nhĩ": ["I49.1"],
+            "sa van hai lá": ["I34.1"],
+            "sa van 2 lá": ["I34.1"],
+            "sa van mitral": ["I34.1"],
+            "hở van hai lá": ["I34.0"],
+            "hở van 2 lá": ["I34.0"],
+            "hẹp van hai lá": ["I34.2"],
+            "tắc mạch huyết khối": ["I82", "I82.0", "I82.1", "I82.2", "I82.3", "I82.8", "I82.9"],
+            "tắc mạch": ["I82", "I82.0", "I82.1", "I82.2", "I82.3", "I82.8", "I82.9"],
+            "huyết khối": ["I82"],
+            "hen phế quản": ["J45", "J45.0", "J45.1", "J45.8", "J45.9"],
+            "hen suyễn": ["J45", "J45.0", "J45.1", "J45.8", "J45.9"],
+            "viêm phổi": ["J12", "J13", "J14", "J15", "J16", "J17", "J18"],
+            "viêm tuyến mồ hôi mủ": ["L73.2"],
+            "nhọt ổ gà": ["L73.2"],
+            "đái tháo đường": ["E11", "E11.0", "E11.1", "E11.2", "E11.3", "E11.4", "E11.5", "E11.6", "E11.7", "E11.8", "E11.9"],
+            "đái tháo đường type 2": ["E11"],
+            "suy thận": ["N17", "N18", "N19"],
+            "suy thận cấp": ["N17"],
+            "suy thận mạn": ["N18", "N18.1", "N18.2", "N18.3", "N18.4", "N18.5", "N18.6", "N18.9"],
+            "viêm gan b": ["B16", "B18.1"],
+            "viêm gan c": ["B17.1", "B18.2"],
+            "xơ gan": ["K74", "K74.0", "K74.1", "K74.2", "K74.3", "K74.4", "K74.5", "K74.6"],
+            "sỏi thận": ["N20", "N20.0", "N20.1", "N20.2", "N20.9"],
+            "thoát vị đĩa đệm": ["M51", "M51.0", "M51.1", "M51.2", "M51.3", "M51.4", "M51.5", "M51.6", "M51.7", "M51.8", "M51.9"],
+            "đột quỵ": ["I63", "I64"],
+            "tai biến mạch máu não": ["I63", "I64"],
+            "thiếu máu": ["D50", "D50.0", "D50.1", "D50.2", "D50.3", "D50.4", "D50.5", "D50.6", "D50.7", "D50.8", "D50.9"],
+        }
+
+    def _chapter_codes_lookup(self, text: str) -> list[str]:
+        """Lookup codes thuộc chapter cụ thể dựa trên keyword match.
+
+        R27.5 (2026-07-09): 5-tier lookup để fix ICD candidates SAI:
+        1. Direct ICD mapping (VN → exact codes) → trả codes đúng (vd "ung thư phổi" → C34.x)
+        2. VN substring match (desc_vi chứa text)
+        3. Drop modifiers → substring match lại
+        4. Translator VN→EN → match desc_en
+        5. Drop more modifiers → return [] (KHÔNG fallback về kept SAI)
+
+        Returns:
+            list codes thuộc chapter đúng, hoặc [] nếu không tìm được.
+        """
+        import re as _re
+
+        # Tier 1: Direct ICD mapping (R27.5) - exact VN → ICD codes
+        # (ưu tiên cao nhất vì chính xác, không phụ thuộc desc_vi)
+        text_lower = text.lower().strip()
+        if hasattr(self, '_icd_vn_to_codes'):
+            if text_lower in self._icd_vn_to_codes:
+                return list(self._icd_vn_to_codes[text_lower])
+            # Tier 1b: Prefix match - dict key là prefix của text
+            # (vd "tắc mạch huyết khối" là prefix của "tắc mạch huyết khối tĩnh mạch chủ dưới...")
+            for key in self._icd_vn_to_codes:
+                if text_lower.startswith(key) and len(key) >= 8:
+                    return list(self._icd_vn_to_codes[key])
+            # Tier 1c: Text là prefix của dict key (vd text = "di căn não" match dict key "di căn não vùng trán phải")
+            for key in self._icd_vn_to_codes:
+                if key.startswith(text_lower) and len(text_lower) >= 6:
+                    return list(self._icd_vn_to_codes[key])
+
+        # Tier 2: VN substring match trong ICD index (desc_vi)
+        codes = self._exact_match_vn_substring(text)
+        if codes:
+            return codes
+
+        # Tier 3: Drop modifiers từ text, thử substring match lại
+        # Drop: "không tế bào nhỏ", "tế bào nhỏ", "có/không", ...
+        modifiers_pattern = _re.compile(
+            r"\s+(không tế bào nhỏ|tế bào nhỏ|không tế bào lớn|tế bào lớn|"
+            r"vô căn|thứ phát|nguyên phát|có hoặc không|ở trẻ em|ở người lớn|"
+            r"mạn tính|cấp tính|không đặc hiệu)$",
+            _re.IGNORECASE
+        )
+        text_clean = modifiers_pattern.sub("", text.strip()).strip()
+        if text_clean != text and text_clean:
+            if text_clean in self._icd_vn_to_codes:
+                return list(self._icd_vn_to_codes[text_clean])
+            codes = self._exact_match_vn_substring(text_clean)
+            if codes:
+                return codes
+            # Cũng thử VN → EN translation cho text_clean
+            try:
+                en_text = self.translator.translate(text_clean) if self.translator else text_clean
+                if en_text and en_text.lower() != text_clean.lower():
+                    en_lower = en_text.lower().strip()
+                    for name, idx in self.idx.name_to_idx.items():
+                        if en_lower in name.lower():
+                            code = self.idx.codes[idx]
+                            if code not in codes:
+                                codes.append(code)
+                    if codes:
+                        return codes
+            except Exception:
+                pass
+
+        # Tier 4: Try direct VN → EN translation (full text)
+        try:
+            en_text = self.translator.translate(text) if self.translator else text
+            if en_text and en_text.lower() != text.lower():
+                en_lower = en_text.lower().strip()
+                for name, idx in self.idx.name_to_idx.items():
+                    if en_lower in name.lower():
+                        code = self.idx.codes[idx]
+                        if code not in codes:
+                            codes.append(code)
+                if codes:
+                    return codes
+        except Exception:
+            pass
+
+        # Tier 5: Drop more modifiers (suffix)
+        text_clean2 = _re.sub(
+            r"\s+(do\s+\S+|vô căn|không đặc hiệu)$",
+            "", text.strip(), flags=_re.IGNORECASE
+        ).strip()
+        if text_clean2 != text and text_clean2 != text_clean:
+            if text_clean2 in self._icd_vn_to_codes:
+                return list(self._icd_vn_to_codes[text_clean2])
+            codes = self._exact_match_vn_substring(text_clean2)
+            if codes:
+                return codes
+
+        return []
 
     # ------------------------------------------------------------------ #
 

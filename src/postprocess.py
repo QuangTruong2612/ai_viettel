@@ -388,6 +388,25 @@ def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
     out.sort(key=lambda e: e["position"][0])
     return out
+
+
+# ---------------------------------------------------------------------- #
+# Drug text sanitization (R4 + R18)
+# ---------------------------------------------------------------------- #
+
+_DRUG_NAME_BAD_PATTERNS = re.compile(
+    r"^(thuốc|drug|medication|thuoc)\s*$", re.IGNORECASE
+)
+
+
+# Strip prescription suffix "x N + unit" trong drug text (R4 mới 2026-07).
+# KEEP "x 1" / "x 2" (dose count), DROP the unit word.
+_DRUG_X_N_PATTERN = re.compile(
+    r"\s+(?:viên(?:\s+(?:sáng|tối|trưa))?|tablet|tab|lần(?:/ngày)?|ống|gói|ngày)\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
 def _is_admin_parens(content: str) -> bool:
     """True nếu parens content là admin instruction (DROP), False nếu clinical data (KEEP)."""
     if not content:
