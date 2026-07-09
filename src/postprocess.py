@@ -1408,6 +1408,110 @@ def _expand_duplicates(entities, input_text):
     # Sort theo position
     expanded.sort(key=lambda e: e.get("position", [0, 0])[0])
     return expanded
+
+
+
+def assemble_record(
+    input_text: str,
+    raw_entities: Iterable[dict[str, Any]],
+    retriever: RxNormRetriever,
+    icd_retriever: Optional[ICDRetriever] = None,
+    llm_client: Any = None,
+) -> list[dict[str, Any]]:
+    """Build list thực thể cuối cùng cho một record.
+
+    - Validate position.
+    - Expand duplicate (R20.1) từ input thực tế.
+    - Dedupe.
+    - Gán candidates:
+        + THUỐC → RxNorm (qua retriever)
+        + CHẨN_ĐOÁN → ICD-10 (qua icd_retriever; cần VN→EN translation)
+        + TRIỆU_CHỨNG → không gán candidates.
+    - Chuẩn hoá assertions (unique, sorted).
+    - Sắp xếp theo vị trí.
+
+    Rescan strategy: gọi LLM BATCH (1 call) cho tất cả entities có rescan;
+    nếu batch fail → fallback per-entity (giữ backward compat).
+    """
+    validated = validate_positions(input_text, raw_entities)
+    validated = _expand_duplicates(validated, input_text)
+    validated = dedupe_entities(validated)
+    # Fix: _drop_substring_entities đã được định nghĩa nhưng KHÔNG BAO GIỜ được gọi.
+    # Gọi ở đây để dedup duplicate substring (vd: "cảm giác thắt chặt ngực vùng trước tim"
+    # và "cảm giác thắt chặt ngực" cùng type → chỉ giữ entity dài hơn).
+    validated = _drop_substring_entities(validated)
+
+    # Lifestyle/social/psychology hard filter (defense-in-depth: drop entity match keyword)
+    # LLM 7B đôi khi extract "căng thẳng", "cà phê", "mất việc" thành TRIỆU_CHỨNG dù R3 đã cấm.
+    validated = _filter_lifestyle_entities(validated)
+
+    # Batch rescan: 1 LLM call cho N entities (giảm load Ollama 10-30x)
+    # → giảm 500 crash do resource pressure.
+    rescan_cache: dict[str, str] = batch_rescan_entities(validated, llm_client)
+
+    final: list[dict[str, Any]] = []
+    # Track text+type đã emit để dedupe (vd "doxycycline" trùng khi LLM trả 2 lần)
+    seen_text_type: set[tuple[str, str]] = set()
+    for ent in validated:
+        text = str(ent.get("text", "")).strip()
+        etype = ent.get("type", "")
+        if not text or etype not in (
+            "THUỐC", "CHẨN_ĐOÁN", "TRIỆU_CHỨNG", "TÊN_XÉT_NGHIỆM", "KẾT_QUẢ_XÉT_NGHIỆM"
+        ):
+            continue
+
+        # Lấy position từ _expand_duplicates (đã chuẩn hóa)
+        pos = ent.get("position", [0, 0])
+        if not (isinstance(pos, list) and len(pos) == 2 and all(isinstance(p, int) for p in pos)):
+            pos = [0, 0]
+
+        # Clean text + dedupe theo text+type (giữ entity đầu tiên)
+        from src.postprocess import _normalize_text_for_dedupe
+        norm_text = _normalize_text_for_dedupe(text)
+        dedup_key = (norm_text, etype)
+        if dedup_key in seen_text_type:
+            continue
+        seen_text_type.add(dedup_key)
+
+        # Build record
+        rec: dict[str, Any] = {
+            "text": text,
+            "type": etype,
+            "position": [int(pos[0]), int(pos[1])],
+            "assertions": sorted({
+                a for a in ent.get("assertions", [])
+                if a in {"isNegated", "isFamily", "isHistorical"}
+            }),
+            "candidates": [],
+        }
+
+        # Lookup candidates theo type
+        if etype == "THUỐC" and retriever is not None:
+            # Cần lookup với cleaned drug text (R4 + R18)
+            drug_query = sanitize_drug_text(text)
+            if drug_query:
+                codes = retriever.lookup(drug_query)
+                rec["candidates"] = list(codes) if codes else []
+        elif etype == "CHẨN_ĐOÁN" and icd_retriever is not None:
+            # ICD lookup cần other_entities context (drugs/symptoms nearby)
+            other_ents = [
+                e for e in validated
+                if e.get("text", "").strip() and e is not ent
+            ]
+            # Rescan to EN via batch_rescan_entities cache
+            rescan = rescan_cache.get(text)
+            query = rescan if rescan else text
+            try:
+                codes = icd_retriever.lookup(query, other_entities=other_ents)
+                rec["candidates"] = list(codes) if codes else []
+            except Exception as exc:
+                logger.warning("ICD lookup fail for '%s': %s", text, exc)
+
+        final.append(rec)
+
+    # Sort theo position
+    final.sort(key=lambda e: e["position"][0])
+    return final
 def _link_test_results(
     test_name: str,
     test_start: int,
