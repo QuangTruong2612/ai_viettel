@@ -2,9 +2,4 @@
 .venv
 kaggle
 
-# Generated indexes and embeddings
-data/*_index.json
-data/*_embeddings.npy
-data/*_tokens.jsonl.gz
-data/translation_cache.json
-output/
+output/
