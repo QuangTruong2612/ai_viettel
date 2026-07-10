@@ -21,10 +21,13 @@ Mọi hồ sơ bệnh án VN rơi vào 1 trong 5 dạng. Đọc cue → nhận d
 - Cue: "Tiền sử:" / "Tiền căn:" / "Chẩn đoán:" / "Thuốc:" / "Triệu chứng:" / "Khám:" / "Xét nghiệm:" / "Điều trị:" / "Lý do nhập viện:".
 - Header KHÔNG trích. Mỗi dòng gạch đầu dòng là một nhóm riêng (drop "5 năm", R5). Assertion theo header:
   - "Tiền sử: / Tiền căn: / Trước đây: / Cách đây / Đã từng / Đang dùng / Đang duy trì" → isHistorical.
+  - **"Thuốc trước khi nhập viện:" / "Thuốc trước nhập viện:"** → isHistorical (đang dùng TRƯỚC khi vào viện).
   - "Chẩn đoán: / Chẩn đoán ra viện:" → assertions = [].
   - "Tiền sử gia đình:" / "Bố bệnh nhân …" → isFamily (± isHistorical).
   - "Hiện tại:" → assertions = [] (đang khám hiện tại — triệu chứng cơ năng).
   - "Triệu chứng cơ năng:" → isHistorical (triệu chứng lúc nhập viện — ghi nhận tại thời điểm nhập viện, treated as admission-time record).
+  - ⚠️ **"Tiền sử bệnh hiện tại:" / "Lý do nhập viện:" / "Các triệu chứng hiện tại:" / "Đặc điểm triệu chứng khi khám:"** → assertions = [] (là triệu chứng CỦA ĐỢT NÀY, KHÔNG phải tiền sử xa). Chứa chữ "Tiền sử" nhưng mô tả bệnh hiện tại.
+  - ⚠️ **"Đánh giá tại bệnh viện:" / "Kết quả khám lâm sàng:" / "Kết quả xét nghiệm:" / "Các kết quả chẩn đoán khác:"** → assertions = [] (khám hiện tại tại viện).
 
 **DẠNG 3 — Lab report** (phiếu xét nghiệm)
 - Cue: "Đã tiến hành …" / "Xét nghiệm:" / "Kết quả:" / "Công thức máu:" / "Sinh hóa:" / cụm `test:value; test:value`.
@@ -421,13 +424,15 @@ HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "p
   - Đứng SAU phần danh từ y khoa chính
 - **Quy tắc**: chỉ giữ phần text trước verb clause đầu tiên.
 
-**R26. isHistorical CHỈ áp dụng cho entities trong section "Tiền sử" (MỚI 2026-07-09, từ user feedback 19.txt):**
-- **Bug**: postprocess `_detect_assertions_from_context` window 500 quá rộng → match "Tiền sử" ở đầu note → tất cả entities đều bị gán `isHistorical` (sai).
-- **Rule chuẩn**:
-  - `isHistorical` chỉ áp dụng cho entities trong section **"Tiền sử bệnh" / "Tiền sử"** (đầu note, giữa section "1." và "2.").
-  - Entities trong **"Tiền sử bệnh hiện tại" / "Lý do nhập viện" / "Triệu chứng hiện tại"** → KHÔNG có `isHistorical` (là hiện tại).
-  - Entities trong **"Đánh giá tại bệnh viện"** → KHÔNG có `isHistorical` (đang khám).
-  - **Postprocess fix**: dùng header context (window 200 chars + check header type), KHÔNG dùng window 500.
+**R26. isHistorical — PHÂN BIỆT section theo tên header (MỚI 2026-07-09, update 2026-07-10):**
+- **Rule cốt lõi**: Chữ "Tiền sử" TRONG section header KHÔNG luôn có nghĩa là isHistorical. Phải đọc TOÀN BỘ header.
+- **isHistorical = True**: Chỉ entities trong section **"Tiền sử bệnh" / "Tiền sử:" / "Tiền căn:"** (bệnh sử xa, không phải đợt hiện tại) hoặc **"Thuốc trước khi nhập viện"**.
+- **isHistorical = False** (assertions = []): 
+  - **"Tiền sử bệnh hiện tại"** — mô tả diễn biến đợt bệnh hiện tại (Lý do nhập viện, triệu chứng hiện tại)
+  - **"Lý do nhập viện:"** / **"Các triệu chứng hiện tại:"** / **"Đặc điểm triệu chứng khi khám:"**
+  - **"Đánh giá tại bệnh viện:"** / **"Kết quả khám lâm sàng:"** / **"Kết quả xét nghiệm:"**
+- **Anti-example (sai)**: Gặp header "Tiền sử bệnh hiện tại" → gán isHistorical cho cả section ← **SAI**.
+- **Correct example**: "Tiền sử bệnh: THA 5 năm" → isHistorical; "Tiền sử bệnh hiện tại: đánh trống ngực" → assertions = [].
 
 **R16. LAB/VS SEPARATOR giữa TÊN và KQ** (mở rộng R8 cho các dạng separator):
   - `:` (colon) — "WBC:14,43" → TÊN="WBC" + KQ="14,43"

@@ -1336,60 +1336,114 @@ def _find_all_occurrences(text_lower: str, phrase: str) -> list:
 
 
 def _preprocess_highlight_duplicates(input_text: str, top_n: int = 30) -> str:
-    """Đánh dấu duplicate trong input_text để LLM không miss (R20.2 mới 2026-07-10).
+    """Đánh dấu duplicate medical phrases trong input_text để LLM không miss (R20.2).
 
-    Vấn đề: LLM 7B không tự đếm được số lần xuất hiện của mỗi text trong input.
-    Post-process `_expand_duplicates` giúp được phần nào, nhưng pre-process + mark
-    sẽ giúp LLM extract ĐỦ ngay từ đầu.
+    Chỉ mark các phrase CÓ KHẢ NĂNG là medical entity (tên bệnh, triệu chứng, thuốc, xét nghiệm).
+    KHÔNG mark generic verbs/stopwords (xuất hiện, ghi nhận, tiến hành, triệu chứng, ...).
 
     Cách hoạt động:
-    1. Tìm các phrase VN phổ biến (2-3 từ) xuất hiện >= 2 lần trong input
-    2. Tìm TẤT CẢ occurrences (non-overlapping) trên ORIGINAL text
-    3. Loại bỏ spans overlap nhau
-    4. Thêm marker `[xN]` sau mỗi occurrence (N = tổng số lần xuất hiện)
-    5. LLM thấy marker → tự extract N entities riêng
+    1. Tìm phrases 2-4 từ xuất hiện >= 2 lần
+    2. Lọc bỏ: (a) stop words/verbs y tế, (b) phrase < 6 chars, (c) phrase chứa toàn number/punct
+    3. Thêm marker [xN] sau mỗi occurrence trong original text
+    4. LLM thấy marker → extract N entities với N positions riêng
 
     Args:
         input_text: raw input text.
-        top_n: số lượng phrase tối đa để mark (mặc định 30).
+        top_n: số phrase tối đa để mark (mặc định 30).
 
     Returns:
-        input_text đã được mark (phrase có `[xN]` ở cuối mỗi occurrence).
+        input_text đã được mark (medical phrases có [xN] ở cuối mỗi occurrence).
     """
     if not input_text or len(input_text) < 100:
         return input_text
 
     import re as _re
 
-    # Tìm phrases 2-3 từ bằng substring search
-    # Tránh common stop words
-    stop_words = {"bệnh", "nhân", "viện", "tình", "trạng", "trước", "trong",
-                  "ngoài", "bằng", "theo", "sang", "qua", "cách", "thuốc", "thể",
-                  "cũng", "đang", "khác", "nếu", "khi", "hay", "mới", "sau",
-                  "trên", "dưới", "tại", "từ"}
+    # ---- Blacklist: từ đơn KHÔNG phải medical entity ----
+    # Generic VN clinical verbs / nouns không có value y tế riêng
+    _GENERIC_WORDS = {
+        # Verbs hành động lâm sàng
+        "xuất hiện", "ghi nhận", "tiến hành", "phát hiện", "khám", "điều trị",
+        "nhập viện", "nhập", "viện", "bệnh nhân", "bệnh", "nhân", "theo dõi",
+        "được", "đang", "đã", "sẽ", "vào", "ra", "lại", "khi", "hay", "hay nôn",
+        "liên quan", "kết quả", "chẩn đoán", "triệu chứng", "kèm theo",
+        "khởi phát", "diễn biến", "tiền sử", "lúc", "giờ", "ngày", "tuần",
+        "tháng", "năm", "phút", "giây", "nhiều", "thường xuyên",
+        # Section headers (không phải medical entity)
+        "kết quả khám", "kết quả xét", "xét nghiệm", "thời điểm", "các yếu tố",
+        "các triệu", "các kết", "yếu tố nguy", "yếu tố liên",
+    }
 
-    # Tokenize bằng regex (giữ cả từ)
+    # ---- Blacklist prefixes: phrase bắt đầu bằng những từ này thường không phải medical ----
+    _BLACKLIST_PREFIXES = (
+        "các ", "kết quả", "tiền sử", "theo ", "lý do", "thời điểm",
+        "yếu tố", "diễn biến", "đặc điểm", "triệu chứng ", "tình trạng",
+    )
+
+    # ---- Whitelist prefixes/keywords: phrase chứa những từ này CÓ KHẢ NĂNG là medical ----
+    _MEDICAL_KEYWORDS = {
+        # Triệu chứng
+        "đánh trống", "khó thở", "đau ngực", "đau bụng", "đau đầu", "sốt",
+        "buồn nôn", "nôn", "chóng mặt", "mệt mỏi", "ho", "khò khè", "ngất",
+        "phù", "mất ngủ", "yếu liệt", "đổ mồ hôi", "run", "co giật",
+        "thắt chặt", "tức ngực", "tim đập", "hồi hộp",
+        # Chẩn đoán
+        "tăng huyết", "nhồi máu", "rung nhĩ", "ngoại tâm", "tâm thu",
+        "suy tim", "suy thận", "viêm phổi", "viêm phế", "đái tháo", "ung thư",
+        "xơ gan", "xuất huyết", "nhịp xoang", "block", "cuồng nhĩ",
+        # Thuốc (drug names handled via drug list below)
+        "metoprolol", "atenolol", "bisoprolol", "amlodipine", "aspirin",
+        "warfarin", "apixaban", "losartan", "doxycycline", "paracetamol",
+        # Xét nghiệm
+        "x-quang", "siêu âm", "điện tâm", "monitor holter", "phân tích nước",
+        "công thức máu", "chụp",
+    }
+
+    # Tokenize bằng regex
     words = _re.findall(r"[\wÀ-ỹ]+", input_text)
 
-    freq = {}
+    freq: dict[str, int] = {}
     # 2 từ phrases
     for i in range(len(words) - 1):
         w1, w2 = words[i].lower(), words[i+1].lower()
-        if len(w1) >= 4 and len(w2) >= 4 and w1 not in stop_words and w2 not in stop_words:
-            phrase = f"{w1} {w2}"
+        # Cả 2 từ phải đủ dài (>= 3 chars) để tránh noise
+        if len(w1) < 3 or len(w2) < 3:
+            continue
+        phrase = f"{w1} {w2}"
+        if phrase not in _GENERIC_WORDS:
             freq[phrase] = freq.get(phrase, 0) + 1
 
     # 3 từ phrases
     for i in range(len(words) - 2):
         w1, w2, w3 = words[i].lower(), words[i+1].lower(), words[i+2].lower()
-        if len(w1) >= 4 and w2 not in stop_words and w3 not in stop_words:
-            phrase = f"{w1} {w2} {w3}"
+        if len(w1) < 3:
+            continue
+        phrase = f"{w1} {w2} {w3}"
+        if phrase not in _GENERIC_WORDS:
             freq[phrase] = freq.get(phrase, 0) + 1
 
-    # Lấy top N phrase có freq >= 2
-    # Sort deterministic: count desc, phrase asc (tie-breaker để ổn định)
+    # Lấy top N phrase có freq >= 2, lọc thêm:
+    # - Không bắt đầu bằng blacklist prefix
+    # - Phải có ít nhất 1 medical keyword HOẶC phrase dài >= 8 chars
+    def _is_medical_candidate(phrase: str) -> bool:
+        # Check blacklist prefix
+        for bp in _BLACKLIST_PREFIXES:
+            if phrase.startswith(bp):
+                return False
+        # Check nếu phrase là generic word
+        if phrase in _GENERIC_WORDS:
+            return False
+        # Check nếu chứa medical keyword
+        for mk in _MEDICAL_KEYWORDS:
+            if mk in phrase:
+                return True
+        # Phrase dài hơn 10 chars + không phải generic → có khả năng là medical
+        if len(phrase) >= 10:
+            return True
+        return False
+
     top_texts = sorted(
-        [(t, c) for t, c in freq.items() if c >= 2],
+        [(t, c) for t, c in freq.items() if c >= 2 and _is_medical_candidate(t)],
         key=lambda x: (-x[1], x[0])
     )[:top_n]
 
@@ -1397,7 +1451,6 @@ def _preprocess_highlight_duplicates(input_text: str, top_n: int = 30) -> str:
         return input_text
 
     # Bước 2: Tìm TẤT CẢ occurrences trong ORIGINAL text (non-overlapping)
-    # Build danh sách spans (start, end, count). KHÔNG modify input_text ở đây.
     text_lower = input_text.lower()
     all_spans = []  # (start, end, count)
     for phrase, count in top_texts:
@@ -1409,15 +1462,14 @@ def _preprocess_highlight_duplicates(input_text: str, top_n: int = 30) -> str:
     if not all_spans:
         return input_text
 
-    # Sort spans by start ASC, length DESC (ưu tiên match dài hơn khi overlap)
+    # Sort: start ASC, length DESC (ưu tiên match dài khi overlap)
     all_spans.sort(key=lambda x: (x[0], -(x[1] - x[0])))
 
-    # Bước 3: Build kết quả, skip overlapping spans (giữ span đầu tiên)
+    # Bước 3: Build kết quả, skip overlapping spans
     result_parts = []
     cursor = 0
     for s, e, count in all_spans:
         if s < cursor:
-            # Overlapping với span trước → skip (đã được mark bởi span dài hơn/đầu hơn)
             continue
         result_parts.append(input_text[cursor:s])
         result_parts.append(input_text[s:e])
