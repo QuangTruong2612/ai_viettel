@@ -18,23 +18,21 @@ Cách chạy:
 
 from __future__ import annotations
 
+import argparse
+import concurrent.futures as cf
+import json
+import logging
+import re
 import sys
+import time
 from pathlib import Path
+from typing import Any, Optional
 
 # Đảm bảo có thể chạy trực tiếp `python src/inference.py` (không chỉ `python -m src.inference`)
 # bằng cách thêm thư mục cha của src/ vào sys.path.
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
-
-import argparse
-import concurrent.futures as cf
-import json
-import logging
-import re
-import time
-from pathlib import Path
-from typing import Any, Optional
 
 from src.llm_client import LLMClient
 from src.icd_rag import ICDRetriever, ICD10VectorSearch, Translator

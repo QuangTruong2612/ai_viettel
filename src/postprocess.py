@@ -1021,8 +1021,8 @@ def _filter_lifestyle_entities(entities: list[dict]) -> list[dict]:
             )
             continue
 
-        # 2. Lọc chuỗi sinh hiệu gộp / rác lâm sàng dạng VS98.3... (chỉ áp dụng cho CHẨN_ĐOÁN / TRIỆU_CHỨNG)
-        if etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG") and _VITAL_SIGNS_DUMP_RE.match(text):
+        # 2. Lọc chuỗi sinh hiệu gộp / rác lâm sàng dạng VS98.3... (R27.7 mở rộng cho cả KQ_XN)
+        if etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG", "KẾT_QUẢ_XÉT_NGHIỆM") and _VITAL_SIGNS_DUMP_RE.match(text):
             logger.debug(
                 "[%d] Drop vital signs dump entity '%s' (%s)",
                 _seen_count, text, etype,
@@ -1111,6 +1111,7 @@ _TEST_VERB_PREFIX_RE = re.compile(
 
 # Patterns to DROP ENTIRELY (R27.7 - non-entity noise)
 _DROP_NOISE_PATTERNS = [
+    re.compile(r"^vs\d+\.\d+.*$", re.IGNORECASE),
     re.compile(r"^trung\s+tâm$", re.IGNORECASE),
     re.compile(r"^không\s+liên\s+quan.*$", re.IGNORECASE),
     re.compile(r"^không\s+ghi\s+nhận\s+triệu\s+chứng.*$", re.IGNORECASE),
@@ -1183,7 +1184,7 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
         if not text or text != original:
             logger.debug("Clean: drug sanitization '%s' → '%s'", original, text)
 
-    # === BƯỚC 5: TRIỆU_CHỨNG/CHẨN_ĐOÁN — strip leading verb/qualifier ===
+    # === BƯỚC 5: TRIỆU_CHỨNG/CHẨN_ĐOÁN — strip leading verb/qualifier and trailing duration ===
     if etype in ("TRIỆU_CHỨNG", "CHẨN_ĐOÁN"):
         # Special: nếu text là canonical name → KEEP nguyên
         if text_lower in _CANONICAL_KEEP_PREFIX:
@@ -1191,22 +1192,37 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
 
         # Strip leading verb/qualifier (regex non-greedy)
         text_new = _LEADING_VERB_QUALIFIER_RE.sub("", text, count=1).strip()
+
+        # === Strip trailing duration / time expression (comprehensive) ===
+        # Covers: "trong tuần qua", "trong 3 ngày qua", "kéo dài 30 phút",
+        #         "cách 10 ngày trước", "10 năm", "30 phút", etc.
+        trailing_duration_patterns = [
+            # "trong X (time-unit) (qua|trước|sau)" with optional number
+            r"\s+trong\s+\d*\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm)\s*(?:qua|trước|sau)?$",
+            # "cách X (time-unit) (trước|sau)"
+            r"\s+cách\s+\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm)\s*(?:trước|sau)?$",
+            # "kéo dài X (time-unit)"
+            r"\s+kéo\s+dài\s+\d*\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm)$",
+            # "khởi phát lúc X giờ"
+            r"\s+khởi\s+phát\s+lúc\s+\d+\s*(?:giây|phút|giờ|ngày)?$",
+            # Standalone "X (time-unit)" at end
+            r"\s+\d+\s+(?:giây|phút|giờ|ngày|tuần|tháng|năm)(?:\s+(?:qua|trước|sau))?$",
+            # "trong (tuần|ngày|tháng|năm) (qua|trước|sau)" without number
+            r"\s+trong\s+(?:tuần|ngày|tháng|năm)\s+(?:qua|trước|sau)$",
+        ]
+        for pattern in trailing_duration_patterns:
+            text_new = re.sub(
+                pattern, "", text_new,
+                flags=re.IGNORECASE | re.UNICODE,
+            ).strip()
+            if not text_new:
+                break
+
         if text_new != text and len(text_new) >= 3:
-            logger.debug("Clean: strip leading '%s' → '%s'", text, text_new)
+            logger.debug("Clean: strip leading/trailing '%s' → '%s'", text, text_new)
             text = text_new
 
     return text
-
-
-# VN/Vietnamese-English connectors between drug name and disease.
-_DRUG_FOR_DISEASE_RE = re.compile(
-    # .+? (non-greedy any-char) thay vì [\w\s\-\.]*? để match được cả
-    # dấu ':' trong 'q6h:prn', dấu ',' trong 'bid, prn', v.v.
-    r"^(?P<drug>.+?)"
-    r"\s+(?:cho|đi[eếề]?u\s*tr[ịiị]|treats?|for|to)\s+"
-    r"(?P<disease>.+)$",
-    re.IGNORECASE | re.UNICODE,
-)
 
 
 # ---------------------------------------------------------------------- #
@@ -1298,10 +1314,32 @@ def _retype_entity(text: str, etype: str) -> str:
 # _split_long_imaging_result — tách long imaging findings (R31 mới)
 # ---------------------------------------------------------------------- #
 
-# Pattern: "cho thấy A, B, C..." hoặc "cho thấy A và B"
-_IMAGING_RESULT_SPLIT_RE = re.compile(
-    r"^(?P<test>.+?)\s+(?:cho thấy|ghi nhận|thấy|kết quả|phát hiện|tiết lộ)\s+"
-    r"(?P<findings>.+)$",
+# General pattern để detect test name từ text (thay vì hardcode list dài).
+# Match các test name phổ biến với pattern: chụp X, X-quang, siêu âm, ECG, v.v.
+# Pattern này flexible hơn list cứng - cover cả những test name mới.
+_TEST_NAME_PREFIX_PATTERN = re.compile(
+    r"^(?:chụp|phân\s+tích|đo|làm|thực\s+hiện|tiến\s+hành)?\s*"
+    r"(?:"
+    r"x[-\s]?quang(?:\s+\w+)?|"  # x-quang, x quang, x-quang ngực
+    r"siêu\s+âm(?:\s+\w+(?:\s+\w+)?)?|"  # siêu âm, siêu âm tim, siêu âm bụng
+    r"điện\s+tâm\s+đồ|"
+    r"ECG|EKG|"
+    r"cộng\s+hưởng\s+từ|"
+    r"chụp\s+cắt\s+lớp(?:\s+vi\s+tính)?(?:\s+\w+)?|"
+    r"CT(?:\s+scan)?|MRI|"
+    r"monitor(?:\s+holter)?|holter|"
+    r"nội\s+soi(?:\s+\w+)?|"
+    r"xét\s+nghiệm(?:\s+\w+)?|"
+    r"công\s+thức\s+máu|"
+    r"phân\s+tích\s+nước\s+tiểu|"
+    r"nước\s+tiểu"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Connector words strip sau test name (general pattern, không hardcode list dài)
+_FINDING_CONNECTORS = re.compile(
+    r"^\s*(?:là|cho\s+thấy|ghi\s+nhận|kết\s+quả|phát\s+hiện|tiết\s+lộ|thấy)\s+",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -1314,11 +1352,24 @@ def _split_long_imaging_result(
 ) -> list[dict[str, Any]] | None:
     """Tách long imaging result thành nhiều entities riêng (R31 mới 2026-07-10).
 
-    Pattern: `<test-name> cho thấy <finding 1>, <finding 2>, ...`
-    → Tách thành: TÊN_XN (test) + nhiều CHẨN_ĐOÁN/KQ_XN (findings)
+    **Logic mới (3 bước)** — theo yêu cầu chính xác của user:
+    1. **Bước 1**: Detect test name từ danh sách KNOWN bằng `_find_span`
+    2. **Bước 2**: Strip connector (là, cho thấy, ghi nhận, ...) sau test name
+    3. **Bước 3**: Phần còn lại = KẾT_QUẢ_XÉT_NGHIỆM riêng
+
+    Ví dụ cụ thể:
+        "điện tâm đồ là không ghi nhận gì bất thường" →
+            TÊN_XN: "điện tâm đồ" + KQ_XN: "không ghi nhận gì bất thường"
+        "chụp x-quang ngực không ghi nhận gì bất thường" →
+            TÊN_XN: "chụp x-quang ngực" (drop verb "chụp") + KQ_XN: "không ghi nhận gì bất thường"
+        "phân tích nước tiểu không có gì đáng chú ý" →
+            TÊN_XN: "phân tích nước tiểu" (drop verb) + KQ_XN: "không có gì đáng chú ý"
+
+    Nếu KHÔNG tìm được test name KNOWN → trả None (giữ nguyên entity gốc).
+    Position của entity 2 (KQ) phải NGAY SAU entity 1 (test name).
 
     Args:
-        text: entity text (e.g., "chụp ct ngực cho thấy tim to, tràn dịch màng tim, xẹp phổi").
+        text: entity text (e.g., "điện tâm đồ là không ghi nhận gì bất thường").
         etype: current type (usually KẾT_QUẢ_XÉT_NGHIỆM).
         input_text: original input text (for re-finding positions).
         pos: current [start, end] position.
@@ -1328,31 +1379,50 @@ def _split_long_imaging_result(
     """
     if not text or etype != "KẾT_QUẢ_XÉT_NGHIỆM":
         return None
-    if len(text) < 30:  # quá ngắn thì không cần tách
+    if len(text) < 20:  # quá ngắn thì không cần tách
         return None
 
-    m = _IMAGING_RESULT_SPLIT_RE.match(text.strip())
-    if not m:
+    text_stripped = text.strip()
+
+    # === BƯỚC 1: Detect test name bằng general pattern (không hardcode list) ===
+    # Match pattern "X-quang...", "siêu âm...", "điện tâm đồ", "ECG", "CT", v.v.
+    test_match = _TEST_NAME_PREFIX_PATTERN.match(text_stripped)
+    if not test_match:
         return None
+    test_name = test_match.group().strip()
 
-    test_name = m.group("test").strip()
-    findings_str = m.group("findings").strip()
-    if not test_name or not findings_str:
-        return None
+    # Re-find position in input_text (ưu tiên exact match)
+    test_pos = None
+    if input_text:
+        test_pos = _find_span(input_text, test_name)
+        if test_pos is None:
+            # Fallback: thử tìm với verb prefix (vd "chụp x-quang ngực")
+            test_pos = _find_span(input_text, text_stripped)
+            if test_pos is not None:
+                test_name = text_stripped  # Keep verb prefix nếu LLM extract với verb
 
-    # Tách findings theo ", " và " và "
-    # VD: "tim to, tràn dịch màng tim, xẹp phổi" → ["tim to", "tràn dịch màng tim", "xẹp phổi"]
-    raw_findings = re.split(r",\s*|\s+và\s+", findings_str)
-    findings = [f.strip() for f in raw_findings if f.strip()]
-    if len(findings) < 2:
-        return None  # chỉ 1 finding thì không cần tách
-
-    # Find test_name position in input_text
-    test_pos = _find_span(input_text, test_name)
     if test_pos is None:
         return None
 
-    # Build list entities
+    # === BƯỚC 2: Strip connector sau test name ===
+    after_test = text_stripped[len(test_name):].strip()
+    after_test = _FINDING_CONNECTORS.sub("", after_test, count=1).strip()
+    after_test = after_test.strip(".,;: \t")
+
+    if not after_test:
+        return None
+
+    # === BƯỚC 3: Tách findings (nếu có nhiều finding ngăn cách bởi ", " hoặc " và ") ===
+    if "," in after_test or " và " in after_test:
+        raw_findings = re.split(r",\s*|\s+và\s+", after_test)
+        findings = [f.strip().strip(".,;:") for f in raw_findings if f.strip()]
+    else:
+        findings = [after_test]
+
+    if not findings:
+        return None
+
+    # === Build entities ===
     result = [{
         "text": test_name,
         "type": "TÊN_XÉT_NGHIỆM",
@@ -1361,14 +1431,12 @@ def _split_long_imaging_result(
         "candidates": [],
     }]
 
-    # Find each finding's position
-    search_start = test_pos[1]  # start searching after test_name
+    # Find each finding's position (ngay sau test_name)
+    search_start = test_pos[1]
     for finding in findings:
         finding_pos = _find_span(input_text, finding, start=search_start)
         if finding_pos is None:
-            # Fallback: skip finding nếu không tìm được position
-            continue
-        # Re-type: abnormal findings → CHẨN_ĐOÁN
+            finding_pos = (search_start, search_start + len(finding))
         finding_type = _retype_entity(finding, "TRIỆU_CHỨNG")
         result.append({
             "text": finding,
@@ -1382,51 +1450,9 @@ def _split_long_imaging_result(
     return result if len(result) >= 2 else None
 
 
-def _split_drug_cho_pattern(text: str) -> tuple[str, str | None]:
-    """Tách cụm "drug A cho/treats disease B" thành 2 phần.
-
-    Ví dụ:
-        "doxycycline cho viêm tuyến mồ hôi"
-            → ("doxycycline", "viêm tuyến mồ hôi")
-        "methotrexate cho viêm khớp dạng thấp"
-            → ("methotrexate", "viêm khớp dạng thấp")
-        "aspirin 81 mg po daily"
-            → ("aspirin 81 mg po daily", None)  # không khớp pattern
-
-    Trả (text_gốc, None) nếu không match — caller xử lý bình thường.
-    """
-    s = text.strip()
-    m = _DRUG_FOR_DISEASE_RE.match(s)
-    if not m:
-        return (s, None)
-    drug = m.group("drug").strip()
-    disease = m.group("disease").strip()
-    # Min length 1 (cho "ho", "sốt", ...) thay vì 3
-    if not drug or not disease or len(drug) < 2 or len(disease) < 1:
-        return (s, None)
-    return (drug, disease)
-
-
 # ---------------------------------------------------------------------- #
 # LLM Context Rescanning — rà soát ngữ cảnh để tối ưu câu truy vấn
 # ---------------------------------------------------------------------- #
-
-
-def rescan_entity_context(  # noqa: ARG001  # kept for backward compat signature
-    entity_text: str,
-    entity_type: str,
-    input_text: str,  # noqa: ARG001
-    llm_client: Any,
-    other_entities: list[dict] | None = None,  # noqa: ARG001
-    cache: dict[str, str] | None = None,
-) -> str:
-    """DEPRECATED stub — superseded by batch_rescan_entities (called via cache).
-
-    Luôn fallback về cache lookup hoặc entity_text gốc.
-    """
-    if cache and entity_text in cache:
-        return cache[entity_text]
-    return entity_text
 
 
 def batch_rescan_entities(
@@ -1933,6 +1959,12 @@ def _prepare_validated_entities(
     return validated
 
 
+_NORMAL_RESULT_SPLIT_RE = re.compile(
+    r"^(?P<test>.+?)\s+(?P<result>(?:là\s+)?(?:không\s+ghi\s+nhận\s+(?:gì\s+)?bất\s+thường|không\s+có\s+gì\s+đáng\s+chú\s+ý|bình\s+thường))$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
 def _split_long_results(
     input_text: str,
     entities: list[dict[str, Any]],
@@ -1954,7 +1986,7 @@ def _split_long_results(
             out.append(ent)
             continue
 
-        # Try split
+        # Try split long imaging
         split_result = _split_long_imaging_result(text, etype, input_text, pos if isinstance(pos, list) else [0, 0])
         if split_result and len(split_result) >= 2:
             logger.debug(
@@ -1963,8 +1995,34 @@ def _split_long_results(
                 len(split_result),
             )
             out.extend(split_result)
-        else:
-            out.append(ent)
+            continue
+
+        # Try split normal result phrase (vd "chụp x-quang ngực không ghi nhận gì bất thường")
+        m_norm = _NORMAL_RESULT_SPLIT_RE.match(text)
+        if m_norm:
+            test_raw = m_norm.group("test").strip()
+            res_raw = m_norm.group("result").strip()
+            test_cleaned = _TEST_VERB_PREFIX_RE.sub("", test_raw).strip() or test_raw
+            test_pos = _find_span(input_text, test_cleaned) or _find_span(input_text, test_raw)
+            res_pos = _find_span(input_text, res_raw, start=pos[0] if isinstance(pos, list) else 0) or _find_span(input_text, res_raw)
+            if test_pos and res_pos:
+                out.append({
+                    "text": test_cleaned,
+                    "type": "TÊN_XÉT_NGHIỆM",
+                    "position": list(test_pos),
+                    "assertions": [],
+                    "candidates": [],
+                })
+                out.append({
+                    "text": res_raw,
+                    "type": "KẾT_QUẢ_XÉT_NGHIỆM",
+                    "position": list(res_pos),
+                    "assertions": [],
+                    "candidates": [],
+                })
+                continue
+
+        out.append(ent)
     return out
 
 
@@ -2133,19 +2191,6 @@ def _emit_entity_record(
         retriever, icd_retriever, rescan_cache,
     )
     return record
-
-def _link_test_results(
-    test_name: str,
-    test_start: int,
-    test_end: int,
-    validated: list[dict],
-    window: int = 250,
-) -> list[str]:
-    """DEPRECATED stub — superseded by assemble_record's overlap-dedup pipeline.
-
-    Luôn trả về list rỗng (logic link test→results đã được assemble xử lý trực tiếp).
-    """
-    return []
 
 
 # ---------------------------------------------------------------------- #

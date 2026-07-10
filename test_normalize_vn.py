@@ -13,7 +13,7 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.icd_rag import _normalize_vn_term, _VN_ABBREVIATIONS, ICDRetriever
+from src.icd_rag import _normalize_vn_term, ICDRetriever
 
 
 def test_1_normalize_abbreviation_exact():

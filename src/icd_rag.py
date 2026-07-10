@@ -576,6 +576,15 @@ class ICDRetriever:
         # (THA → tăng huyết áp, u ác → u ác tính, ...) để tăng hit rate.
         text = _normalize_vn_term(text)
 
+        # R27.7 mới 2026-07-10: short-circuit khi có direct match trong _icd_vn_to_codes
+        # (mapping VN → exact ICD codes). Tránh vector search reroute qua embedding
+        # cho known terms (vd "ngoại tâm thu nhĩ" → I48.x sai thay vì I49.1).
+        if hasattr(self, '_icd_vn_to_codes'):
+            key_lower = text.lower().strip()
+            if key_lower in self._icd_vn_to_codes:
+                logger.debug("L0 short-circuit direct match: '%s' → %s", text, self._icd_vn_to_codes[key_lower])
+                return sorted(set(self._icd_vn_to_codes[key_lower]))[:2]
+
         # L1: Exact (cao độ tin cậy nhất — cap 2)
         key = text.lower()
         if key in self.idx.exact:
@@ -910,6 +919,7 @@ class ICDRetriever:
             "hen phế quản": ["J45", "J45.0", "J45.1", "J45.8", "J45.9"],
             "hen suyễn": ["J45", "J45.0", "J45.1", "J45.8", "J45.9"],
             "viêm phổi": ["J12", "J13", "J14", "J15", "J16", "J17", "J18"],
+            "viêm tuyến mồ hôi": ["L73.2"],  # mới 2026-07-10: R27.7 — match L73.2 (Hidradenitis suppurativa)
             "viêm tuyến mồ hôi mủ": ["L73.2"],
             "nhọt ổ gà": ["L73.2"],
             "đái tháo đường": ["E11", "E11.0", "E11.1", "E11.2", "E11.3", "E11.4", "E11.5", "E11.6", "E11.7", "E11.8", "E11.9"],
