@@ -16,22 +16,20 @@ Cách chạy:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-# Đảm bảo có thể chạy trực tiếp `python src/postprocess.py`
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
-
 import json
 import logging
 import re
+import sys
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from src.icd_rag import ICDRetriever
 from src.rxnorm_rag import RxNormRetriever
+
+# Đảm bảo có thể chạy trực tiếp `python src/postprocess.py`
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 logger = logging.getLogger(__name__)
 
@@ -121,21 +119,27 @@ def preprocess_input_for_llm(
 # ---------------------------------------------------------------------- #
 
 
-def _find_span(text: str, snippet: str) -> tuple[int, int] | None:
-    """Tìm vị trí đầu tiên của snippet trong text; trả [start, end) hoặc None."""
+def _find_span(text: str, snippet: str, start: int = 0) -> tuple[int, int] | None:
+    """Tìm vị trí đầu tiên của snippet trong text (từ start); trả [start, end) hoặc None.
+
+    Args:
+        text: full input text.
+        snippet: text cần tìm.
+        start: vị trí bắt đầu tìm (default 0).
+    """
     if not snippet:
         return None
-    idx = text.find(snippet)
+    idx = text.find(snippet, start)
     if idx >= 0:
         return idx, idx + len(snippet)
-    # Fallback: lowercase
-    idx = text.lower().find(snippet.lower())
+    # Fallback: lowercase (từ start)
+    idx = text.lower().find(snippet.lower(), start)
     if idx >= 0:
         return idx, idx + len(snippet)
     # Fallback: bỏ khoảng trắng thừa ở hai đầu
     stripped = snippet.strip()
     if stripped != snippet:
-        idx = text.find(stripped)
+        idx = text.find(stripped, start)
         if idx >= 0:
             return idx, idx + len(stripped)
     return None
@@ -1075,6 +1079,118 @@ def sanitize_drug_text(text: str) -> str:
     return text
 
 
+# ---------------------------------------------------------------------- #
+# _clean_entity_text — post-fix entity text LLM hay miss (R27.7, 2026-07-10)
+# ---------------------------------------------------------------------- #
+
+# Leading verb/qualifier cần STRIP khi ở đầu TRIỆU_CHỨNG/CHẨN_ĐOÁN
+# (giữ lại canonical names như "tăng huyết áp" qua whitelist)
+_LEADING_VERB_QUALIFIER_RE = re.compile(
+    r"^(cảm\s+giác|cảm\s+thấy|thấy|có\s+dấu\s+hiệu|có\s+triệu\s+chứng|"
+    r"có\s+cảm\s+giác|nhận\s+thấy|ghi\s+nhận|"
+    r"có\s+|bị\s+|xuất\s+hiện\s+|biểu\s+hiện\s+|xảy\s+ra\s+|phát\s+hiện\s+|gặp\s+phải\s+|"
+    r"tăng\s+|giảm\s+|nhiều\s+|ít\s+)\s*",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Canonical CHẨN_ĐOÁN names chứa "tăng"/"giảm" prefix - KHÔNG strip
+_CANONICAL_KEEP_PREFIX = {
+    "tăng huyết áp", "tăng đường huyết", "tăng cholesterol",
+    "tăng lipid máu", "tăng triglyceride máu",
+    "giảm tiểu cầu", "giảm bạch cầu", "giảm dung nạp gắng sức",
+    "rối loạn lipid máu", "rối loạn chuyển hóa",
+}
+
+# Verb prefix cần STRIP khỏi TÊN_XÉT_NGHIỆM (DẠNG A - verb NGOÀI tên)
+# KHÔNG strip "siêu âm", "nội soi", "monitor", "điện tâm đồ" (compound names)
+_TEST_VERB_PREFIX_RE = re.compile(
+    r"^(chụp\s+|phân\s+tích\s+|đo\s+|làm\s+|thực\s+hiện\s+|tiến\s+hành\s+|"
+    r"đã\s+(?:tiến\s+hành|làm|thực\s+hiện|chụp|đo|phân\s+tích)\s+)\s*",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Patterns to DROP ENTIRELY (R27.7 - non-entity noise)
+_DROP_NOISE_PATTERNS = [
+    re.compile(r"^trung\s+tâm$", re.IGNORECASE),
+    re.compile(r"^không\s+liên\s+quan.*$", re.IGNORECASE),
+    re.compile(r"^không\s+ghi\s+nhận\s+triệu\s+chứng.*$", re.IGNORECASE),
+    re.compile(r"^tại\s+thời\s+điểm\s+nhập\s+viện$", re.IGNORECASE),
+    re.compile(r"^khi\s+đến\s+tầng$", re.IGNORECASE),
+    re.compile(r"^khi\s+đến\s+khoa.*$", re.IGNORECASE),
+    re.compile(r"^vào\s+lúc.*$", re.IGNORECASE),
+]
+
+# Pure duration (R28.2) - standalone time expression should not be entity
+_PURE_DURATION_ENHANCED_RE = re.compile(
+    r"^(\d+\s+(giây|phút|giờ|ngày|tuần|tháng|năm)(\s+(qua|trước|sau))?$|"
+    r"^(10|11|12|13|14|15|16|17|18|19|20)\s+(giây|phút|giờ|ngày|tuần|tháng|năm)(\s+(qua|trước|sau))?$|"
+    r"^(kéo\s+dài|khởi\s+phát\s+lúc|bắt\s+đầu\s+lúc|cách\s+\d+|trong\s+vòng)\s+\d+\s*(giây|phút|giờ|ngày|tuần|tháng|năm)?(\s+(qua|trước|sau))?$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _clean_entity_text(text: str, etype: str) -> str | None:
+    """Post-fix entity text LLM hay miss (R27.7 mới 2026-07-10).
+
+    Auto-clean các patterns:
+    1. Leading verb/qualifier strip ("cảm giác", "tăng", "có", "bị", "xuất hiện", ...)
+       → TRỪ canonical names (vd "tăng huyết áp" GIỮ)
+    2. Verb prefix trong TÊN_XÉT_NGHIỆM strip ("chụp", "phân tích", "đo", ...)
+    3. Parens admin trong THUỐC strip ("(uống trước ăn)" → DROP)
+    4. Pure duration DROP (return None → caller drop entity)
+
+    Args:
+        text: entity text gốc từ LLM.
+        etype: entity type (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, ...).
+
+    Returns:
+        Cleaned text. None nếu entity nên bị DROP (vd pure duration, noise).
+    """
+    if not text:
+        return text
+    original = text
+    text_lower = text.strip().lower()
+
+    # === BƯỚC 1: DROP noise patterns (return None để caller drop) ===
+    for pattern in _DROP_NOISE_PATTERNS:
+        if pattern.match(text_lower):
+            logger.debug("Clean: drop noise entity '%s'", original)
+            return None
+
+    # === BƯỚC 2: Pure duration → DROP (R28.2) ===
+    if etype in ("TRIỆU_CHỨNG", "CHẨN_ĐOÁN"):
+        if _PURE_DURATION_ENHANCED_RE.match(text_lower):
+            logger.debug("Clean: drop pure duration entity '%s'", original)
+            return None
+
+    # === BƯỚC 3: TÊN_XÉT_NGHIỆM — strip verb prefix ===
+    if etype == "TÊN_XÉT_NGHIỆM":
+        text_new = _TEST_VERB_PREFIX_RE.sub("", text).strip()
+        if text_new != text and text_new:
+            logger.debug("Clean: strip verb prefix '%s' → '%s'", text, text_new)
+            text = text_new
+
+    # === BƯỚC 4: THUỐC — strip admin parens (R18) ===
+    if etype == "THUỐC":
+        text = sanitize_drug_text(text)
+        if not text or text != original:
+            logger.debug("Clean: drug sanitization '%s' → '%s'", original, text)
+
+    # === BƯỚC 5: TRIỆU_CHỨNG/CHẨN_ĐOÁN — strip leading verb/qualifier ===
+    if etype in ("TRIỆU_CHỨNG", "CHẨN_ĐOÁN"):
+        # Special: nếu text là canonical name → KEEP nguyên
+        if text_lower in _CANONICAL_KEEP_PREFIX:
+            return text
+
+        # Strip leading verb/qualifier (regex non-greedy)
+        text_new = _LEADING_VERB_QUALIFIER_RE.sub("", text, count=1).strip()
+        if text_new != text and len(text_new) >= 3:
+            logger.debug("Clean: strip leading '%s' → '%s'", text, text_new)
+            text = text_new
+
+    return text
+
+
 # VN/Vietnamese-English connectors between drug name and disease.
 _DRUG_FOR_DISEASE_RE = re.compile(
     # .+? (non-greedy any-char) thay vì [\w\s\-\.]*? để match được cả
@@ -1084,6 +1200,179 @@ _DRUG_FOR_DISEASE_RE = re.compile(
     r"(?P<disease>.+)$",
     re.IGNORECASE | re.UNICODE,
 )
+
+
+# ---------------------------------------------------------------------- #
+# _retype_entity — auto-correct entity type dựa trên text patterns (R31 mới)
+# ---------------------------------------------------------------------- #
+
+# Abnormal findings trên imaging → CHẨN_ĐOÁN (không phải TRIỆU_CHỨNG/KQ_XN)
+_ABNORMAL_FINDING_TO_CHAN_DOAN = re.compile(
+    r"^(tràn dịch màng phổi|tràn dịch màng tim|tràn dịch ổ bụng|cổ trướng|"
+    r"tràn khí màng phổi|tràn khí trung thất|"
+    r"tim to|gan to|lách to|thận to|"
+    r"xẹp phổi|tràn khí phổi|giãn phế quản|"
+    r"xơ phổi|khí phế thủng|giãn phế nang|"
+    r"gan nhiễm mỡ|xơ gan|thoát vị hoành|"
+    r"giãn đường mật|tắc nghẽn đường mật|sỏi mật|"
+    r"phù phổi|phù não|"
+    r"gãy xương \w+|gãy \w+ xương|"
+    r"chấn thương sọ não|chấn thương \w+|"
+    r"vết thương hở \w+|"
+    r"hở van (hai lá|ba lá|động mạch chủ|động mạch phổi|2 lá)|"
+    r"hẹp van (hai lá|ba lá|động mạch chủ|động mạch phổi|2 lá)|"
+    r"hở van \w+ (nhẹ|vừa|nặng|mild|moderate|severe)|"
+    r"hẹp van \w+ (nhẹ|vừa|nặng|mild|moderate|severe)|"
+    r"mất vận động vùng đỉnh|rối loạn vận động vùng đỉnh|"
+    r"giãn \w+ buồng tim|"
+    r"u ác tính|khối u ác tính|khối u \w+|"
+    r"viêm \w+ (nặng|cấp|mạn))$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Procedures/surgeries → TÊN_XÉT_NGHIỆM (không phải THUỐC)
+_PROCEDURE_TO_TEN_XN = re.compile(
+    r"^(phẫu thuật|nội soi|chọc dò|đặt stent|đặt ống|"
+    r"thủ thuật|nội soi|can thiệp|cắt \w+|"
+    r"xạ trị|hóa trị|"
+    r"siêu âm|chụp \w+|"
+    r"đo \w+|test \w+ \w+)$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Treatment modalities → CHẨN_ĐOÁN (không phải THUỐC cụ thể)
+_TREATMENT_MODALITY_TO_CHAN_DOAN = re.compile(
+    r"^(liệu pháp \w+|điều trị \w+|phác đồ \w+|"
+    r"phương pháp \w+|kỹ thuật \w+)$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _retype_entity(text: str, etype: str) -> str:
+    """Auto-correct entity type dựa trên text patterns (R31 mới 2026-07-10).
+
+    Logic:
+    - Abnormal findings (tim to, tràn dịch, gãy xương, hở van, ...) → CHẨN_ĐOÁN
+      (không phải TRIỆU_CHỨNG/KQ_XN)
+    - Procedures (phẫu thuật, nội soi, chọc dò, ...) → TÊN_XÉT_NGHIỆM
+      (không phải THUỐC)
+    - Treatment modalities (liệu pháp, ...) → CHẨN_ĐOÁN
+
+    Args:
+        text: entity text (đã được _clean_entity_text clean).
+        etype: current type từ LLM.
+
+    Returns:
+        Corrected type (có thể giữ nguyên nếu đúng).
+    """
+    if not text:
+        return etype
+    text_stripped = text.strip()
+
+    # 1. Abnormal findings → CHẨN_ĐOÁN (override TRIỆU_CHỨNG hoặc KQ_XN)
+    if etype in ("TRIỆU_CHỨNG", "KẾT_QUẢ_XÉT_NGHIỆM"):
+        if _ABNORMAL_FINDING_TO_CHAN_DOAN.match(text_stripped):
+            logger.debug("Retype: '%s' %s → CHẨN_ĐOÁN (abnormal finding)", text, etype)
+            return "CHẨN_ĐOÁN"
+
+    # 2. Procedures → TÊN_XÉT_NGHIỆM (override THUỐC)
+    if etype == "THUỐC":
+        if _PROCEDURE_TO_TEN_XN.match(text_stripped):
+            logger.debug("Retype: '%s' THUỐC → TÊN_XÉT_NGHIỆM (procedure)", text)
+            return "TÊN_XÉT_NGHIỆM"
+        if _TREATMENT_MODALITY_TO_CHAN_DOAN.match(text_stripped):
+            logger.debug("Retype: '%s' THUỐC → CHẨN_ĐOÁN (treatment modality)", text)
+            return "CHẨN_ĐOÁN"
+
+    return etype
+
+
+# ---------------------------------------------------------------------- #
+# _split_long_imaging_result — tách long imaging findings (R31 mới)
+# ---------------------------------------------------------------------- #
+
+# Pattern: "cho thấy A, B, C..." hoặc "cho thấy A và B"
+_IMAGING_RESULT_SPLIT_RE = re.compile(
+    r"^(?P<test>.+?)\s+(?:cho thấy|ghi nhận|thấy|kết quả|phát hiện|tiết lộ)\s+"
+    r"(?P<findings>.+)$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _split_long_imaging_result(
+    text: str,
+    etype: str,
+    input_text: str,
+    pos: list[int],
+) -> list[dict[str, Any]] | None:
+    """Tách long imaging result thành nhiều entities riêng (R31 mới 2026-07-10).
+
+    Pattern: `<test-name> cho thấy <finding 1>, <finding 2>, ...`
+    → Tách thành: TÊN_XN (test) + nhiều CHẨN_ĐOÁN/KQ_XN (findings)
+
+    Args:
+        text: entity text (e.g., "chụp ct ngực cho thấy tim to, tràn dịch màng tim, xẹp phổi").
+        etype: current type (usually KẾT_QUẢ_XÉT_NGHIỆM).
+        input_text: original input text (for re-finding positions).
+        pos: current [start, end] position.
+
+    Returns:
+        List of new entities đã tách, hoặc None nếu không khớp pattern.
+    """
+    if not text or etype != "KẾT_QUẢ_XÉT_NGHIỆM":
+        return None
+    if len(text) < 30:  # quá ngắn thì không cần tách
+        return None
+
+    m = _IMAGING_RESULT_SPLIT_RE.match(text.strip())
+    if not m:
+        return None
+
+    test_name = m.group("test").strip()
+    findings_str = m.group("findings").strip()
+    if not test_name or not findings_str:
+        return None
+
+    # Tách findings theo ", " và " và "
+    # VD: "tim to, tràn dịch màng tim, xẹp phổi" → ["tim to", "tràn dịch màng tim", "xẹp phổi"]
+    raw_findings = re.split(r",\s*|\s+và\s+", findings_str)
+    findings = [f.strip() for f in raw_findings if f.strip()]
+    if len(findings) < 2:
+        return None  # chỉ 1 finding thì không cần tách
+
+    # Find test_name position in input_text
+    test_pos = _find_span(input_text, test_name)
+    if test_pos is None:
+        return None
+
+    # Build list entities
+    result = [{
+        "text": test_name,
+        "type": "TÊN_XÉT_NGHIỆM",
+        "position": list(test_pos),
+        "assertions": [],
+        "candidates": [],
+    }]
+
+    # Find each finding's position
+    search_start = test_pos[1]  # start searching after test_name
+    for finding in findings:
+        finding_pos = _find_span(input_text, finding, start=search_start)
+        if finding_pos is None:
+            # Fallback: skip finding nếu không tìm được position
+            continue
+        # Re-type: abnormal findings → CHẨN_ĐOÁN
+        finding_type = _retype_entity(finding, "TRIỆU_CHỨNG")
+        result.append({
+            "text": finding,
+            "type": finding_type,
+            "position": list(finding_pos),
+            "assertions": [],
+            "candidates": [],
+        })
+        search_start = finding_pos[1]
+
+    return result if len(result) >= 2 else None
 
 
 def _split_drug_cho_pattern(text: str) -> tuple[str, str | None]:
@@ -1116,94 +1405,20 @@ def _split_drug_cho_pattern(text: str) -> tuple[str, str | None]:
 # ---------------------------------------------------------------------- #
 
 
-def rescan_entity_context(
+def rescan_entity_context(  # noqa: ARG001  # kept for backward compat signature
     entity_text: str,
     entity_type: str,
-    input_text: str,
+    input_text: str,  # noqa: ARG001
     llm_client: Any,
-    other_entities: list[dict] | None = None,  # deprecated, kept for signature compat
-    cache: dict[str, str] | None = None,  # batch_rescan cache từ assemble_record
+    other_entities: list[dict] | None = None,  # noqa: ARG001
+    cache: dict[str, str] | None = None,
 ) -> str:
-    """Dùng LLM dịch/chuẩn hóa entity text sang EN để tra mã.
+    """DEPRECATED stub — superseded by batch_rescan_entities (called via cache).
 
-    Với THUỐC: chuẩn hóa tên thuốc + liều + đường dùng + tần suất.
-    Với CHẨN_ĐOÁN: dịch sang EN clinical phrase (giữ nguyên modifier có trong text).
-
-    General principles (Fix 14 — applies to ALL entity types):
-    1. Translate VERBATIM — không thêm modifier không có trong entity text.
-    2. KHÔNG dùng nearby entities để infer context (đã gây bug ICD sai).
-    3. Output phải ngắn gọn (< 100 chars), chỉ chứa thông tin y khoa.
-
-    Args:
-        other_entities: DEPRECATED — không còn dùng để thêm vào prompt.
-            Giữ để tương thích signature.
-        cache: optional dict {original_text: rescanned_text} từ batch_rescan.
-            Nếu entity_text có trong cache → dùng luôn, KHÔNG gọi LLM.
-
-    Returns: câu truy vấn tiếng Anh chuẩn hóa, hoặc entity_text gốc nếu LLM fail.
+    Luôn fallback về cache lookup hoặc entity_text gốc.
     """
-    if llm_client is None:
-        return entity_text
-
-    # Check cache first (từ batch_rescan_entities)
     if cache and entity_text in cache:
         return cache[entity_text]
-
-    # Validate entity_text trước khi gọi LLM
-    if not entity_text or not entity_text.strip():
-        return entity_text
-
-    if entity_type == "THUỐC":
-        prompt = (
-            "You are a clinical pharmacology expert. Translate the following Vietnamese drug name "
-            "into a standardized English RxNorm-searchable phrase.\n\n"
-            "STRICT RULES:\n"
-            "1. Translate the drug entity VERBATIM — keep generic name, strength, route, frequency.\n"
-            "2. DO NOT add indications or modifiers not in the entity text.\n"
-            "3. Strip VN parentheticals like '(uống hôm nay)', '(sau ăn)'.\n"
-            "4. Convert Vietnamese abbreviations: 'thuốc kháng sinh' → 'antibiotic'.\n"
-            "Output format: 'drug_name strength route frequency' (e.g., 'amlodipine 10 mg oral daily').\n"
-            "Output ONLY the phrase. No explanation.\n\n"
-            f'Drug entity: "{entity_text}"\n\n'
-            "Standardized English drug query:"
-        )
-    elif entity_type == "CHẨN_ĐOÁN":
-        prompt = (
-            "You are a clinical coding expert. Translate the following Vietnamese diagnosis "
-            "into a precise English clinical phrase that can be used to search ICD-10-CM codes.\n\n"
-            "STRICT RULES:\n"
-            "1. Translate the entity text VERBATIM — keep ALL modifiers (severity, location, cause) "
-            "that are present in the entity text.\n"
-            "2. DO NOT add modifiers that are NOT in the entity text. "
-            "E.g., entity='hepatic encephalopathy' → output 'hepatic encephalopathy' "
-            "(NOT 'alcohol-induced hepatic encephalopathy' even if note has alcohol history).\n"
-            "3. If the entity text includes cause (e.g., 'xơ gan do rượu' = 'alcoholic cirrhosis'), "
-            "keep the cause in the translation.\n"
-            "4. DO NOT use nearby entities (drugs/symptoms) to ADD context to the diagnosis. "
-            "Nearby entities are for context awareness only — keep diagnosis translation literal.\n\n"
-            "Output ONLY the English clinical phrase. No explanation, no ICD code.\n\n"
-            f'Diagnosis entity: "{entity_text}"\n\n'
-            "Standardized English diagnosis query:"
-        )
-    else:
-        return entity_text
-
-    try:
-        msg = [{"role": "user", "content": prompt}]
-        resp = llm_client._client.chat.completions.create(  # noqa: SLF001
-            model=llm_client.config.model,
-            messages=msg,
-            temperature=0.0,
-            max_tokens=128,
-        )
-        result = (resp.choices[0].message.content or "").strip().strip('"').strip("'")
-        # Fix 14: Validate rescan output — reject suspicious results
-        if result and _validate_rescan_output(result, entity_text, entity_type):
-            logger.debug("Rescan '%s' (%s) → '%s'", entity_text, entity_type, result)
-            return result
-        logger.debug("Rescan '%s' rejected (invalid output): %r", entity_text, result)
-    except Exception as exc:
-        logger.warning("Rescan lỗi (%r): %s", entity_text, exc)
     return entity_text
 
 
@@ -1661,151 +1876,257 @@ def assemble_record(
 ) -> list[dict[str, Any]]:
     """Build list thực thể cuối cùng cho một record.
 
-    - Validate position.
-    - Expand duplicate (R20.1) từ input thực tế.
-    - Dedupe.
-    - Gán candidates:
-        + THUỐC → RxNorm (qua retriever)
-        + CHẨN_ĐOÁN → ICD-10 (qua icd_retriever; cần VN→EN translation)
-        + TRIỆU_CHỨNG → không gán candidates.
-    - Chuẩn hoá assertions (unique, sorted).
-    - Sắp xếp theo vị trí.
+    Pipeline:
+      1. Chuẩn hoá entities (validate position, expand duplicate, dedup, drop noise)
+      2. Batch rescan VN→EN cho ICD lookup (giảm load Ollama)
+      3. Clean từng entity text (strip modifiers, verbs, parens, drop duration)
+      4. Dedup cuối cùng (R10 STRICT + overlap dedup + R22 cho TÊN_XN)
+      5. Gán candidates (RxNorm cho THUỐC, ICD cho CHẨN_ĐOÁN)
+      6. Sort theo position
+    """
+    validated = _prepare_validated_entities(input_text, raw_entities)
+    rescan_cache = batch_rescan_entities(validated, llm_client)
 
-    Rescan strategy: gọi LLM BATCH (1 call) cho tất cả entities có rescan;
-    nếu batch fail → fallback per-entity (giữ backward compat).
+    seen_test_names: set[str] = set()
+    seen_entities: list[tuple[str, str, list[int]]] = []  # (norm_text, type, [start, end])
+
+    final: list[dict[str, Any]] = []
+    for ent in validated:
+        record = _emit_entity_record(
+            ent, input_text, validated, retriever, icd_retriever, rescan_cache,
+            seen_test_names, seen_entities,
+        )
+        if record is not None:
+            final.append(record)
+
+    final.sort(key=lambda e: e["position"][0])
+    return final
+
+
+def _prepare_validated_entities(
+    input_text: str,
+    raw_entities: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Chuẩn hoá entities qua 5 bước trước khi emit.
+
+    Bước:
+      1. validate_positions: sửa LLM-sai positions
+      2. _expand_duplicates: thêm entities cho occurrences LLM miss (R20.1)
+      3. _split_long_imaging_result: tách long CT/MRI results thành nhiều entities (R31)
+      4. dedupe_entities: drop overlap (R10 STRICT + R22)
+      5. _drop_substring_entities: drop text là substring của text khác
+      6. _filter_lifestyle_entities: defense-in-depth chống lifestyle/duration noise
     """
     validated = validate_positions(input_text, raw_entities)
     validated = _expand_duplicates(validated, input_text)
+    validated = _split_long_results(input_text, validated)
     validated = dedupe_entities(validated)
-    # Fix: _drop_substring_entities đã được định nghĩa nhưng KHÔNG BAO GIỜ được gọi.
-    # Gọi ở đây để dedup duplicate substring (vd: "cảm giác thắt chặt ngực vùng trước tim"
-    # và "cảm giác thắt chặt ngực" cùng type → chỉ giữ entity dài hơn).
     validated = _drop_substring_entities(validated)
-
-    # Lifestyle/social/psychology hard filter (defense-in-depth: drop entity match keyword)
-    # LLM 7B đôi khi extract "căng thẳng", "cà phê", "mất việc" thành TRIỆU_CHỨNG dù R3 đã cấm.
     validated = _filter_lifestyle_entities(validated)
+    return validated
 
-    # Batch rescan: 1 LLM call cho N entities (giảm load Ollama 10-30x)
-    # → giảm 500 crash do resource pressure.
-    rescan_cache: dict[str, str] = batch_rescan_entities(validated, llm_client)
 
-    final: list[dict[str, Any]] = []
-    # Track đã emit để dedupe
-    # - R22: TÊN_XÉT_NGHIỆM dedupe theo text (chỉ giữ 1 lần xuất hiện)
-    # - R10 STRICT / R20: Các type khác giữ TẤT CẢ các occurrences ở các vị trí khác nhau
-    # MỚI 2026-07-10: track positions list để check overlap (không chỉ start)
-    seen_test_names: set[str] = set()
-    seen_entities: list[tuple[str, str, list[int]]] = []  # (norm_text, type, [start, end])
-    for ent in validated:
+def _split_long_results(
+    input_text: str,
+    entities: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Tách các long KẾT_QUẢ_XÉT_NGHIỆM thành nhiều entities (R31).
+
+    LLM 7B hay gộp cả đoạn kết quả CT/MRI/X-quang dài vào 1 KQ_XN.
+    Logic: với mỗi entity có type=KQ_XN và text chứa pattern "cho thấy ..." / "ghi nhận ...",
+    thử tách thành: 1 TÊN_XN (test) + N CHẨN_ĐOÁN (findings).
+    Nếu không tách được → giữ entity gốc.
+    """
+    out: list[dict[str, Any]] = []
+    for ent in entities:
         text = str(ent.get("text", "")).strip()
         etype = ent.get("type", "")
-        if not text or etype not in (
-            "THUỐC", "CHẨN_ĐOÁN", "TRIỆU_CHỨNG", "TÊN_XÉT_NGHIỆM", "KẾT_QUẢ_XÉT_NGHIỆM"
-        ):
+        pos = ent.get("position", [0, 0])
+
+        if not text or etype != "KẾT_QUẢ_XÉT_NGHIỆM":
+            out.append(ent)
             continue
 
-        # Lấy position từ _expand_duplicates (đã chuẩn hóa)
-        pos = ent.get("position", [0, 0])
-        if not (isinstance(pos, list) and len(pos) == 2 and all(isinstance(p, int) for p in pos)):
-            pos = [0, 0]
-        cur_start, cur_end = int(pos[0]), int(pos[1])
-
-        norm_text = text.lower().strip()
-        is_duplicate = False
-
-        if etype == "TÊN_XÉT_NGHIỆM":
-            # R22: test name dedupe theo text (chỉ giữ 1 lần)
-            if norm_text in seen_test_names:
-                continue
-            seen_test_names.add(norm_text)
+        # Try split
+        split_result = _split_long_imaging_result(text, etype, input_text, pos if isinstance(pos, list) else [0, 0])
+        if split_result and len(split_result) >= 2:
+            logger.debug(
+                "Split long imaging result '%s' → %d entities",
+                text[:60],
+                len(split_result),
+            )
+            out.extend(split_result)
         else:
-            # R10 STRICT + OVERLAP DEDUP (mới 2026-07-10):
-            # - Cùng text + type + CÙNG start → drop (R22 dedup exact)
-            # - Cùng text + type + OVERLAP → giữ span dài hơn, drop span ngắn hơn
-            to_remove: list[int] = []
-            for idx, (s_text, s_type, s_pos) in enumerate(seen_entities):
-                if s_type != etype or s_text != norm_text:
-                    continue
-                s_start, s_end = s_pos
-                # Same exact span → drop current
-                if cur_start == s_start and cur_end == s_end:
-                    is_duplicate = True
-                    logger.debug(
-                        "assemble_record R22: drop exact dup '%s' [%d,%d]",
-                        text, cur_start, cur_end,
-                    )
-                    break
-                # Overlap → keep longer
-                if max(cur_start, s_start) < min(cur_end, s_end):
-                    ex_len = s_end - s_start
-                    cur_len = cur_end - cur_start
-                    if ex_len >= cur_len:
-                        # Existing longer or equal → drop current
-                        is_duplicate = True
-                        logger.debug(
-                            "assemble_record overlap: drop '%s' [%d,%d] (existing [%d,%d] longer)",
-                            text, cur_start, cur_end, s_start, s_end,
-                        )
-                        break
-                    else:
-                        # Current longer → remove existing from seen (sẽ add current bên dưới)
-                        to_remove.append(idx)
-                        logger.debug(
-                            "assemble_record overlap: replace '%s' [%d,%d] with longer [%d,%d]",
-                            text, s_start, s_end, cur_start, cur_end,
-                        )
-            # Remove shorter existing
-            for idx in reversed(to_remove):
-                seen_entities.pop(idx)
+            out.append(ent)
+    return out
 
-            if is_duplicate:
-                continue
 
-            seen_entities.append((norm_text, etype, [cur_start, cur_end]))
+def _is_overlap_dup(
+    norm_text: str,
+    etype: str,
+    cur_start: int,
+    cur_end: int,
+    seen_entities: list[tuple[str, str, list[int]]],
+) -> tuple[bool, list[int]]:
+    """Check overlap dedup theo R10 STRICT + R22.
 
-        # Build record
-        rec: dict[str, Any] = {
-            "text": text,
-            "type": etype,
-            "position": [int(pos[0]), int(pos[1])],
-            "assertions": sorted({
-                a for a in ent.get("assertions", [])
-                if a in {"isNegated", "isFamily", "isHistorical"}
-            }),
-            "candidates": [],
-        }
-        if etype == "TÊN_XÉT_NGHIỆM" and "isNegated" in rec["assertions"]:
-            if not text.lower().startswith(("không ", "chưa ")):
-                rec["assertions"].remove("isNegated")
+    Returns:
+        (is_duplicate, indices_to_remove_from_seen):
+          - is_duplicate=True: drop current entity
+          - indices_to_remove: indices of seen entities to remove (current is longer)
+    """
+    to_remove: list[int] = []
+    for idx, (s_text, s_type, s_pos) in enumerate(seen_entities):
+        if s_type != etype or s_text != norm_text:
+            continue
+        s_start, s_end = s_pos
+        # Same exact span → drop current (R22)
+        if cur_start == s_start and cur_end == s_end:
+            return True, []
+        # Overlap → keep longer span
+        if max(cur_start, s_start) < min(cur_end, s_end):
+            ex_len = s_end - s_start
+            cur_len = cur_end - cur_start
+            if ex_len >= cur_len:
+                return True, []  # existing longer → drop current
+            to_remove.append(idx)  # current longer → mark existing for removal
+    return False, to_remove
 
-        # Lookup candidates theo type
-        if etype == "THUỐC" and retriever is not None:
-            # Cần lookup với cleaned drug text (R4 + R18)
-            drug_query = sanitize_drug_text(text)
-            if drug_query:
-                codes = retriever.lookup(drug_query)
-                rec["candidates"] = list(codes) if codes else []
-        elif etype == "CHẨN_ĐOÁN" and icd_retriever is not None:
-            # ICD lookup cần other_entities context (drugs/symptoms nearby)
-            other_ents = [
-                e for e in validated
-                if e.get("text", "").strip() and e is not ent
-            ]
-            # Rescan to EN via batch_rescan_entities cache
-            rescan = rescan_cache.get(text)
-            query = rescan if rescan else text
+
+def _build_entity_record(
+    text: str,
+    etype: str,
+    pos: list[int],
+    ent: dict[str, Any],
+) -> dict[str, Any]:
+    """Build 1 record dict với assertions cleaned."""
+    assertions = sorted({
+        a for a in ent.get("assertions", [])
+        if a in {"isNegated", "isFamily", "isHistorical"}
+    })
+    # R27.4: TÊN_XÉT_NGHIỆM không bao giờ isNegated nếu kết quả bình thường
+    if etype == "TÊN_XÉT_NGHIỆM" and "isNegated" in assertions:
+        if not text.lower().startswith(("không ", "chưa ")):
+            assertions = [a for a in assertions if a != "isNegated"]
+    return {
+        "text": text,
+        "type": etype,
+        "position": [int(pos[0]), int(pos[1])],
+        "assertions": assertions,
+        "candidates": [],
+    }
+
+
+def _attach_candidates(
+    record: dict[str, Any],
+    text: str,
+    etype: str,
+    ent: dict[str, Any],
+    validated: list[dict[str, Any]],
+    retriever: RxNormRetriever,
+    icd_retriever: Optional[ICDRetriever],
+    rescan_cache: dict[str, str],
+) -> None:
+    """Gán candidates cho record theo type (RxNorm cho THUỐC, ICD cho CHẨN_ĐOÁN).
+
+    Mutates `record["candidates"]` in-place.
+    """
+    if etype == "THUỐC" and retriever is not None:
+        drug_query = sanitize_drug_text(text)
+        if drug_query:
             try:
-                codes = icd_retriever.lookup(query, other_entities=other_ents)
-                rec["candidates"] = list(codes) if codes else []
+                codes = retriever.lookup(drug_query)
+                record["candidates"] = list(codes) if codes else []
             except Exception as exc:
-                logger.warning("ICD lookup fail for '%s': %s", text, exc)
+                logger.warning("RxNorm lookup fail for '%s': %s", text, exc)
+    elif etype == "CHẨN_ĐOÁN" and icd_retriever is not None:
+        # ICD lookup cần other_entities context (drugs/symptoms nearby)
+        other_ents = [
+            e for e in validated
+            if e.get("text", "").strip() and e is not ent
+        ]
+        # Rescan to EN via batch_rescan_entities cache
+        rescan = rescan_cache.get(text)
+        query = rescan if rescan else text
+        try:
+            codes = icd_retriever.lookup(query, other_entities=other_ents)
+            record["candidates"] = list(codes) if codes else []
+        except Exception as exc:
+            logger.warning("ICD lookup fail for '%s': %s", text, exc)
 
-        final.append(rec)
 
-    # Sort theo position
-    final.sort(key=lambda e: e["position"][0])
-    return final
+def _emit_entity_record(
+    ent: dict[str, Any],
+    input_text: str,
+    validated: list[dict[str, Any]],
+    retriever: RxNormRetriever,
+    icd_retriever: Optional[ICDRetriever],
+    rescan_cache: dict[str, str],
+    seen_test_names: set[str],
+    seen_entities: list[tuple[str, str, list[int]]],
+) -> dict[str, Any] | None:
+    """Process 1 entity: clean, dedup, build record, attach candidates.
+
+    Returns:
+        Record dict nếu entity pass tất cả filter, None nếu bị drop.
+    """
+    text = str(ent.get("text", "")).strip()
+    etype = ent.get("type", "")
+    if not text or etype not in (
+        "THUỐC", "CHẨN_ĐOÁN", "TRIỆU_CHỨNG", "TÊN_XÉT_NGHIỆM", "KẾT_QUẢ_XÉT_NGHIỆM"
+    ):
+        return None
+
+    # R27.7: clean entity text trước khi emit (strip modifiers, drop noise/duration)
+    cleaned_text = _clean_entity_text(text, etype)
+    if cleaned_text is None:
+        return None
+    if cleaned_text != text:
+        text = cleaned_text
+        ent["text"] = text
+        new_pos = _find_span(input_text, text)
+        if new_pos is not None:
+            ent["position"] = list(new_pos)
+
+    # Validate position
+    pos = ent.get("position", [0, 0])
+    if not (isinstance(pos, list) and len(pos) == 2 and all(isinstance(p, int) for p in pos)):
+        pos = [0, 0]
+    cur_start, cur_end = int(pos[0]), int(pos[1])
+
+    # R31: Auto-retype dựa trên text patterns (abnormal findings → CHẨN_ĐOÁN, procedures → TÊN_XN)
+    new_etype = _retype_entity(text, etype)
+    if new_etype != etype:
+        etype = new_etype
+        ent["type"] = etype
+
+    norm_text = text.lower().strip()
+
+    # Dedup check
+    if etype == "TÊN_XÉT_NGHIỆM":
+        # R22: test name dedupe theo text (chỉ giữ 1)
+        if norm_text in seen_test_names:
+            return None
+        seen_test_names.add(norm_text)
+    else:
+        # R10 STRICT + OVERLAP DEDUP
+        is_duplicate, to_remove = _is_overlap_dup(
+            norm_text, etype, cur_start, cur_end, seen_entities,
+        )
+        if is_duplicate:
+            return None
+        for idx in reversed(to_remove):
+            seen_entities.pop(idx)
+        seen_entities.append((norm_text, etype, [cur_start, cur_end]))
+
+    # Build record + attach candidates
+    record = _build_entity_record(text, etype, pos, ent)
+    _attach_candidates(
+        record, text, etype, ent, validated,
+        retriever, icd_retriever, rescan_cache,
+    )
+    return record
+
 def _link_test_results(
     test_name: str,
     test_start: int,
@@ -1813,54 +2134,11 @@ def _link_test_results(
     validated: list[dict],
     window: int = 250,
 ) -> list[str]:
-    """Tìm các KẾT_QUẢ_XÉT_NGHIỆM gần TÊN_XÉT_NGHIỆM và trả về list giá trị SỐ.
+    """DEPRECATED stub — superseded by assemble_record's overlap-dedup pipeline.
 
-    Fix 17: result chỉ chứa SỐ thuần (vd "12.5", "180") — bỏ tên test + đơn vị.
-
-    Logic:
-    - Tìm KẾT_QUẢ_XÉT_NGHIỆM có position nằm trong window (test_end, test_end + window)
-      (sau tên test, trong cùng dòng/đoạn).
-    - Hoặc trong window (test_start - window, test_start) (trước tên test).
-    - Extract số từ KQ text (regex).
-    - Trả về list số (string), giữ nguyên format (string để không mất precision).
+    Luôn trả về list rỗng (logic link test→results đã được assemble xử lý trực tiếp).
     """
-    results: list[str] = []
-    seen: set[str] = set()
-    number_re = re.compile(r"-?\d+(?:[.,]\d+)?")
-    for e in validated:
-        if e.get("type") != "KẾT_QUẢ_XÉT_NGHIỆM":
-            continue
-        pos = e.get("position", [0, 0])
-        if not isinstance(pos, list) or len(pos) != 2:
-            continue
-        e_start = int(pos[0])
-        e_end = int(pos[1])
-        # Check nếu KQ nằm trong window sau tên test (preferred)
-        in_forward = e_start >= test_end and e_start - test_end <= window
-        # Check nếu KQ nằm trong window trước tên test
-        in_backward = e_end <= test_start and test_start - e_end <= window
-        if not (in_forward or in_backward):
-            continue
-        text = e.get("text", "").strip()
-        if not text:
-            continue
-        # Extract SỐ từ text (Fix 17: chỉ lấy số thuần)
-        # Ví dụ: "WBC 12.5 K/uL" → "12.5"
-        #         "glucose 180 mg/dL" → "180"
-        #         "SpO2 96%" → "96"
-        #         "AST 45 U/L" → "45"
-        #         "Hgb 13.2 g/dL" → "13.2"
-        numbers = number_re.findall(text)
-        if not numbers:
-            # Nếu không tìm được số, fallback lưu full text
-            extracted = text
-        else:
-            # Lấy số đầu tiên (hoặc số lớn nhất cho range như "12-15")
-            extracted = numbers[0]
-        if extracted and extracted not in seen:
-            results.append(extracted)
-            seen.add(extracted)
-    return results
+    return []
 
 
 # ---------------------------------------------------------------------- #
@@ -1884,8 +2162,6 @@ def validate_output(payload: list[dict[str, Any]]) -> bool:
 
         validate(instance=payload, schema=OUTPUT_SCHEMA)
         return True
-    except Exception:
-        return False
     except Exception as exc:
         logger.warning("Validation lỗi: %s", exc)
         return False

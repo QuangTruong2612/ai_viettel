@@ -588,6 +588,16 @@ class ICDRetriever:
         if prefix_codes:
             return sorted(set(prefix_codes))[:2]
 
+        # L1.7 (NEW 2026-07-10): VN substring match (text chứa trong desc_vi)
+        # Đưa LÊN TRƯỚC vector search vì substring chính xác hơn cho medical terms.
+        # "khối u trực tràng" → "u trực tràng" → substring match "U ác tính ở trực tràng" (C20)
+        # Min length 5 chars để tránh false positive.
+        if len(text) >= 5:
+            substring_codes = self._exact_match_vn_substring(text)
+            if substring_codes:
+                logger.debug("L1.7 substring match '%s' → %s", text, substring_codes[:2])
+                return sorted(set(substring_codes))[:2]
+
         # L2: Build query có context cho BM25 (dùng nearby drugs/symptoms)
         bm25_query = build_context_query(text, "CHẨN_ĐOÁN", other_entities)
         # Vector vẫn dùng text gốc (không contaminate embedding - bug history #4)
@@ -595,28 +605,49 @@ class ICDRetriever:
         # L3: Hybrid search với adaptive confidence-based cap (2026-07 fix):
         # Ý tưởng: KHÔNG list ra hết mã đúng — chỉ return codes có cosine CAO
         # và CÓ score gap tốt so với top-1. Nguyên tắc:
-        # 1. Threshold CAO (0.75) lọc ra codes chắc chắn liên quan
+        # 1. Threshold CAO (0.55) lọc ra codes chắc chắn liên quan — GIẢM từ 0.75 → 0.55 (R27.7)
+        #    vì 0.75 quá strict cho medical text + BGE-M3 multilingual
         # 2. Adaptive cap: nếu top-1 cosine rất cao → return 1 code; nếu các top
         #    scores gần nhau (gap < 0.10) → cap về 2-3 codes
         # 3. "KHÔNG list ra hết mã đúng" → giảm precision penalty Set-based F1.
         if self.local_search is not None:
-            # Lấy TẤT CẢ candidates match threshold cao (để xếp hạng bằng gap, không cap)
-            all_matched = self.local_search.search(
-                text, threshold=0.75, top_k=50  # lấy rộng, sort sau
-            ) or []
+            # Multi-query vector search (R27.7 mới 2026-07-10):
+            # Search với MULTIPLE variants của text để tăng recall
+            queries_to_try = [text]
+            # Thêm normalized variants nếu khác
+            normalized = _normalize_vn_term(text)
+            if normalized != text:
+                queries_to_try.append(normalized)
+            # Thêm VN→EN translation nếu có translator
+            if self.translator is not None:
+                try:
+                    en_text = self.translator.translate(text)
+                    if en_text and en_text != text:
+                        queries_to_try.append(en_text)
+                except Exception:
+                    pass
+
+            all_matched_set: set[str] = set()
+            all_scores: dict[str, float] = {}
+            for q in queries_to_try:
+                matched = self.local_search.search(
+                    q, threshold=0.55, top_k=20
+                ) or []
+                for code in matched:
+                    all_matched_set.add(code)
+                    # Lấy score cao nhất giữa các queries
+                    if self.local_search.vector_search is not None:
+                        scores = self.local_search.vector_search.score_codes(q, [code])
+                        if code in scores:
+                            all_scores[code] = max(all_scores.get(code, 0.0), scores[code])
+
+            all_matched = list(all_matched_set)
             if all_matched:
-                # Lấy scores để áp gap filter
-                all_scores = self.local_search.vector_search.score_codes(
-                    text, all_matched
-                ) if hasattr(self.local_search, 'vector_search') else {}
                 # Sort by cosine desc
-                if all_scores:
-                    sorted_codes = sorted(
-                        all_matched,
-                        key=lambda c: -all_scores.get(c, 0.0),
-                    )
-                else:
-                    sorted_codes = all_matched
+                sorted_codes = sorted(
+                    all_matched,
+                    key=lambda c: -all_scores.get(c, 0.0),
+                )
                 # Adaptive cap: keep codes within score gap < 0.10 of top-1
                 if sorted_codes and all_scores:
                     top1_score = all_scores.get(sorted_codes[0], 0.0)
@@ -651,8 +682,8 @@ class ICDRetriever:
                             return sorted(set(chapter_codes))[:2]
                     return kept[:2]
 
-        # L4: Local fuzzy match trên names VN (threshold 85, cap 2)
-        fuzzy_vn = self._fuzzy_local(text, threshold=85)
+        # L4: Local fuzzy match trên names VN (threshold 75, cap 2) — R27.7 giảm từ 85 → 75
+        fuzzy_vn = self._fuzzy_local(text, threshold=75)
         if fuzzy_vn:
             fuzzy_vn = _filter_irrelevant_codes(fuzzy_vn, text, self.idx)
             if fuzzy_vn:
@@ -687,6 +718,34 @@ class ICDRetriever:
                         if chapter_codes:
                             return sorted(set(chapter_codes))[:2]
                     return bm25_codes[:2]
+
+        # L6 (NEW R27.7 2026-07-10): Aggressive final fallback - thử MULTIPLE strategies
+        # khi L1-L5 đều fail. Đây là "last resort" để tránh empty candidates.
+        # 1. Re-search substring với normalized text (nếu khác original)
+        if len(text) >= 5:
+            substring_codes = self._exact_match_vn_substring(text)
+            if substring_codes:
+                logger.debug("L6 substring fallback '%s' → %s", text, substring_codes[:2])
+                return sorted(set(substring_codes))[:2]
+
+        # 2. Chapter-based lookup (nếu text có organ keyword)
+        if _text_matches_chapter_keyword(text):
+            prefix_codes = self._exact_match_vn_prefix(text)
+            if prefix_codes:
+                return sorted(set(prefix_codes))[:2]
+            chapter_codes = self._chapter_codes_lookup(text)
+            if chapter_codes:
+                logger.debug("L6 chapter lookup '%s' → %s", text, chapter_codes[:2])
+                return sorted(set(chapter_codes))[:2]
+
+        # 3. Lower threshold vector search (last resort)
+        if self.local_search is not None:
+            low_threshold_codes = self.local_search.search(
+                text, threshold=0.40, top_k=5
+            ) or []
+            if low_threshold_codes:
+                logger.debug("L6 low-threshold vector '%s' → %s", text, low_threshold_codes[:2])
+                return sorted(set(low_threshold_codes))[:2]
 
         return []  # noqa: RET504
 

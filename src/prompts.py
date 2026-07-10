@@ -241,6 +241,76 @@ Body part là một phần tên test, KHÔNG tách:
 - VD: `"ngoại tâm thu nhĩ xuất hiện thường xuyên"` → `"ngoại tâm thu nhĩ"` (drop "thường xuyên")
 </abnormal_vs_normal>
 
+<clinical_judgment>
+## 10. PHÁN ĐOÁN LÂM SÀNG — KHI NÀO LÀ GÌ? (R31 mới 2026-07-10)
+
+⚠️ **KHÔNG dựa vào pattern từ khóa — phải hiểu BẢN CHẤT y khoa** để phân loại. Dưới đây là các nguyên tắc LOGIC để phán đoán, không phải list cứng:
+
+### A. PHÂN BIỆT TRIỆU_CHỨNG vs CHẨN_ĐOÁN (theo bản chất, không theo từ khóa)
+
+- **TRIỆU_CHỨNG**: là CẢM GIÁC CHỦ QUAN hoặc TRIỆU CHỨNG CƠ NĂNG mà bệnh nhân trải qua, KHÔNG có mã ICD cụ thể:
+  - `đau`, `khó thở`, `buồn nôn`, `chóng mặt`, `sốt`, `ho`, `mệt mỏi`, `mất ngủ`, `yếu chi`
+  - CÂU HỎI: "Bệnh nhân CÓ cảm giác/triệu chứng này không?" → Có thì là TRIỆU_CHỨNG
+
+- **CHẨN_ĐOÁN**: là BỆNH/TỔN THƯƠNG CỤ THỂ có mã ICD, bất kể bệnh nhân có triệu chứng hay không:
+  - Bệnh: `nhồi máu cơ tim`, `tăng huyết áp`, `viêm phổi`, `đái tháo đường`
+  - Bất thường cận lâm sàng: `tim to`, `tràn dịch màng phổi`, `gãy xương`, `hở van tim`, `ngoại tâm thu nhĩ`
+  - CÂU HỎI: "Đây là BỆNH/TỔN THƯƠNG có tên trong ICD không?" → Có thì là CHẨN_ĐOÁN
+
+→ **KEY INSIGHT**: Nếu abnormal finding trên imaging/lab có TÊN BỆNH trong ICD → CHẨN_ĐOÁN (không phải KQ_XN hay TRIỆU_CHỨNG).
+
+### B. PHÂN BIỆT THUỐC vs PROCEDURE (theo bản chất)
+
+- **THUỐC**: chất hóa học/dược phẩm, có RxNorm code, DOSE/RATE:
+  - Generic/brand + strength + route + freq
+  - CÂU HỎI: "Bệnh nhân UỐNG/TIÊM/TIÊM TRUYỀN chất này?" → Có thì là THUỐC
+
+- **PROCEDURE/SURGERY/INTERVENTION**: hành động y khoa thực hiện trên bệnh nhân:
+  - `phẫu thuật X`, `nội soi X`, `chọc dò X`, `đặt stent`, `xạ trị`, `hóa trị`
+  - `thủ thuật TIPS`, `can thiệp nội mạch`, `siêu âm`, `chụp X-quang`
+  - CÂU HỎI: "Bác sĩ LÀM GÌ với bệnh nhân?" → Làm thì là PROCEDURE = TÊN_XÉT_NGHIỆM
+
+→ **KEY INSIGHT**:
+- `phẫu thuật TURP` = procedure (TURP = TransUrethral Resection of Prostate, BÁC SĨ cắt), không phải thuốc
+- `liệu pháp lợi tiểu` = treatment modality, không phải tên thuốc cụ thể
+
+### C. TÁCH KẾT QUẢ IMAGING DÀI → NHIỀU ENTITIES RIÊNG (R31)
+
+Pattern phổ biến: `<test-name> cho thấy <finding 1>, <finding 2>, <finding 3>...`
+
+→ **MỖI FINDING = 1 ENTITY RIÊNG** với position riêng, type riêng (CHẨN_ĐOÁN nếu abnormal, KQ_XN nếu normal).
+
+**Lý do**: LLM 7B hay gộp cả đoạn dài vào 1 KQ_XN. Đây là lỗi vì:
+- Mất granular information (không biết finding nào abnormal)
+- ICD/RxNorm lookup fail vì text quá dài
+- Ground truth thường tách thành nhiều entities
+
+### D. TÁCH TÊN TEST + FINDING (R32)
+
+Pattern: `<test-name> <finding-trên-cùng-dòng>` (vd: `chụp x-quang ngực mức nước - hơi vùng ngực`)
+
+→ TÁCH:
+1. `<test-name>` (TÊN_XÉT_NGHIỆM)
+2. `<finding>` (CHẨN_ĐOÁN nếu abnormal, KQ_XN nếu normal)
+
+→ KHÔNG BAO GIỜ combine thành 1 entity.
+
+### E. CHÍNH XÁC VỊ TRÍ (POSITION) — TRÁNH OVERLAP DUPLICATES (R33)
+
+Mỗi occurrence của duplicate = 1 entity riêng với position DUY NHẤT, KHÔNG OVERLAP với entity khác.
+
+→ Nếu LLM vô tình output 2 entities cùng text ở positions overlap → system sẽ tự dedup (giữ span dài hơn). Nhưng cố gắng output ĐÚNG ngay từ đầu để tránh lỗi.
+
+### F. NGUYÊN TẮC VỀ ABNORMAL FINDINGS TRÊN HÌNH ẢNH
+
+Học cách SUY LUẬN thay vì memorize:
+- Nếu imaging mô tả "X to", "giãn X", "tràn dịch X" → thường là abnormal finding
+- Nếu imaging mô tả "gãy X", "vỡ X" → abnormal finding
+- Nếu siêu âm tim mô tả "hở van", "hẹp van", "EF thấp" → abnormal cardiac finding
+
+→ Tất cả các findings abnormal có TÊN BỆNH trong ICD → CHẨN_ĐOÁN, không phải TRIỆU_CHỨNG hay KQ_XN.
+</clinical_judgment>
+
 <strict_negative_rules>
 ## 2. CÁC LỆNH CẤM BẤT KHẢ XÂM PHẠM (STRICT NEGATIVE RULES - CHỐNG TÀO LAO)
 
@@ -418,6 +488,12 @@ OUTPUT: [{"text": "tăng huyết áp", "type": "CHẨN_ĐOÁN", "position": [9, 
 INPUT: "Bệnh nhân nam 60 tuổi nhập viện. Tiền sử THA. Khám: HA 140/85 mmHg. Xét nghiệm: công thức máu có WBC 12 K/uL, Hgb 14 g/dL. Chụp X-quang ngực không ghi nhận gì bất thường. Phân tích nước tiểu không có gì đáng chú ý. ECG bình thường."
 
 OUTPUT: [{"text": "THA", "type": "CHẨN_ĐOÁN", "position": [37, 40], "assertions": ["isHistorical"], "candidates": []}, {"text": "HA", "type": "TÊN_XÉT_NGHIỆM", "position": [55, 57], "assertions": [], "candidates": []}, {"text": "140/85 mmHg", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [58, 69], "assertions": [], "candidates": []}, {"text": "công thức máu", "type": "TÊN_XÉT_NGHIỆM", "position": [84, 97], "assertions": [], "candidates": []}, {"text": "WBC 12 K/uL", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [101, 113], "assertions": [], "candidates": []}, {"text": "Hgb 14 g/dL", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [115, 126], "assertions": [], "candidates": []}, {"text": "X-quang ngực", "type": "TÊN_XÉT_NGHIỆM", "position": [135, 147], "assertions": [], "candidates": []}, {"text": "không ghi nhận gì bất thường", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [148, 176], "assertions": [], "candidates": []}, {"text": "nước tiểu", "type": "TÊN_XÉT_NGHIỆM", "position": [186, 195], "assertions": [], "candidates": []}, {"text": "không có gì đáng chú ý", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [196, 220], "assertions": [], "candidates": []}, {"text": "ECG", "type": "TÊN_XÉT_NGHIỆM", "position": [221, 224], "assertions": [], "candidates": []}, {"text": "bình thường", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [225, 236], "assertions": [], "candidates": []}]
+
+**Ex 20 - PHÁN ĐOÁN LÂM SÀNG (R31): abnormal findings → CHẨN_ĐOÁN, procedures → TÊN_XN, tách CT findings**
+
+INPUT: "Bệnh nhân nam 65 tuổi nhập viện vì đau ngực. Tiền sử gãy xương đùi. Khám: tim to, phù 2 chi dưới. Chụp CT ngực cho thấy tràn dịch màng phổi hai bên, xẹp phổi hai đáy. Siêu âm tim: hở van hai lá vừa. Phẫu thuật TURP 3 tháng trước. Thuốc: furosemide 40mg po daily."
+
+OUTPUT: [{"text": "đau ngực", "type": "TRIỆU_CHỨNG", "position": [27, 35], "assertions": [], "candidates": []}, {"text": "gãy xương đùi", "type": "CHẨN_ĐOÁN", "position": [47, 60], "assertions": ["isHistorical"], "candidates": []}, {"text": "tim to", "type": "CHẨN_ĐOÁN", "position": [69, 75], "assertions": [], "candidates": []}, {"text": "phù 2 chi dưới", "type": "TRIỆU_CHỨNG", "position": [77, 91], "assertions": [], "candidates": []}, {"text": "chụp CT ngực", "type": "TÊN_XÉT_NGHIỆM", "position": [101, 114], "assertions": [], "candidates": []}, {"text": "tràn dịch màng phổi hai bên", "type": "CHẨN_ĐOÁN", "position": [124, 151], "assertions": [], "candidates": []}, {"text": "xẹp phổi hai đáy", "type": "CHẨN_ĐOÁN", "position": [153, 169], "assertions": [], "candidates": []}, {"text": "siêu âm tim", "type": "TÊN_XÉT_NGHIỆM", "position": [171, 182], "assertions": [], "candidates": []}, {"text": "hở van hai lá vừa", "type": "CHẨN_ĐOÁN", "position": [184, 201], "assertions": [], "candidates": []}, {"text": "phẫu thuật TURP", "type": "TÊN_XÉT_NGHIỆM", "position": [203, 219], "assertions": ["isHistorical"], "candidates": []}, {"text": "furosemide 40mg po daily", "type": "THUỐC", "position": [236, 261], "assertions": [], "candidates": []}]
 </examples>
 """
 
