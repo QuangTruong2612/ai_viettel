@@ -130,12 +130,17 @@ HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "p
 - "Không X, Y, Z" → 3 entities riêng + isNegated (R19)
 - "atenololtrong" → "atenolol" (R23 typo)
 
-**Bước 3 — DEDUP R10 LOOSE:** Cùng text+type → 1 entity (giữ lần đầu).
+**Bước 3 — DEDUP R22 ONLY (CHỈ TÊN_XÉT_NGHIỆM):**
+- **TÊN_XÉT_NGHIỆM** cùng text → chỉ giữ 1 entity (R22, vd "ECG", "X-quang ngực" trong list chỉ định chỉ giữ 1).
+- **TRIỆU_CHỨNG, CHẨN_ĐOÁN, THUỐC, KẾT_QUẢ_XÉT_NGHIỆM: KHÔNG DEDUP theo text** — mỗi occurrence trong input = 1 entity riêng với position riêng (R10 STRICT).
+- **Rule đơn giản**: nếu type = "TÊN_XÉT_NGHIỆM" và đã có entity cùng text → skip; ngược lại → LUÔN GIỮ (kể cả text trùng, kể cả position trùng → sửa lại position từ input).
+- ⚠️ Nếu gặp marker `[xN]` trong input (vd "đánh trống ngực[x3]") → text trước `[xN]` xuất hiện N lần → extract N entities riêng với N position khác nhau trong ORIGINAL text (KHÔNG có `[xN]`).
 
 **Bước 4 — ⚠️ VERIFY (BẮT BUỘC):** QUAY LẠI input, ĐỌC LẦN 2. Tự hỏi:
 - "Có section nào tôi CHƯA scan không?" (đặc biệt: Kết quả khám, Kết quả xét nghiệm, Kết quả chẩn đoán, Đánh giá, Tình trạng)
 - "Có triệu chứng nào trong mô tả bệnh nhân mà tôi miss không?"
 - "Có test/procedure nào ở cuối note mà tôi miss không?"
+- **"ĐẾM số lần xuất hiện** của mỗi TRIỆU_CHỨNG/CHẨN_ĐOÁN trong input. Nếu "đánh trống ngực" xuất hiện 5 lần → output PHẢI có 5 entities "đánh trống ngực" với 5 position khác nhau (R10 STRICT).
 - Nếu phát hiện miss → THÊM vào output.
 
 **Bước 5 — PRE-CATEGORIZE:** Nhóm entities theo type trước khi output:
@@ -565,11 +570,11 @@ OUTPUT: [{"text": "methotrexate 7.5 mg mỗi tuần", "type": "THUỐC", "positi
 INPUT: "Chỉ định: ECG, X-quang ngực, siêu âm tim. Kết quả: WBC 12 K/uL, Hgb 14 g/dL."
 
 OUTPUT: [{"text": "ECG", "type": "TÊN_XÉT_NGHIỆM", "position": [10, 13], "assertions": [], "candidates": []}, {"text": "X-quang ngực", "type": "TÊN_XÉT_NGHIỆM", "position": [15, 27], "assertions": [], "candidates": []}, {"text": "siêu âm tim", "type": "TÊN_XÉT_NGHIỆM", "position": [29, 40], "assertions": [], "candidates": []}, {"text": "WBC 12 K/uL", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [51, 62], "assertions": [], "candidates": []}, {"text": "Hgb 14 g/dL", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [64, 75], "assertions": [], "candidates": []}]
-**Ex 10 - DUPLICATE HANDLING (đánh trống ngực x 5)**
+**Ex 10 - DUPLICATE HANDLING (đánh trống ngực x 3, mỗi occurrence = 1 entity riêng)**
 
-INPUT: "Bệnh nhân nam 60 tuổi. Tiền sử: tăng huyết áp. Đang dùng atenolol 50 mg. Tiền sử gia đình: bố bị tăng huyết áp."
+INPUT: "Bệnh nhân nam 60 tuổi nhập viện vì đánh trống ngực. Tiền sử đánh trống ngực 5 năm. Hiện tại đánh trống ngực nhiều hơn, kèm khó thở."
 
-OUTPUT: [{"text": "tăng huyết áp", "type": "CHẨN_ĐOÁN", "position": [32, 45], "assertions": ["isHistorical"], "candidates": []}, {"text": "atenolol 50 mg", "type": "THUỐC", "position": [57, 71], "assertions": [], "candidates": []}, {"text": "tăng huyết áp", "type": "CHẨN_ĐOÁN", "position": [32, 45], "assertions": ["isFamily", "isHistorical"], "candidates": []}]
+OUTPUT: [{"text": "đánh trống ngực", "type": "TRIỆU_CHỨNG", "position": [35, 50], "assertions": [], "candidates": []}, {"text": "đánh trống ngực", "type": "TRIỆU_CHỨNG", "position": [60, 75], "assertions": ["isHistorical"], "candidates": []}, {"text": "đánh trống ngực", "type": "TRIỆU_CHỨNG", "position": [92, 107], "assertions": [], "candidates": []}, {"text": "khó thở", "type": "TRIỆU_CHỨNG", "position": [123, 130], "assertions": [], "candidates": []}]
 **Ex 11 - TEST NAME DUPLICATE (chụp X-quang x 3)**
 
 INPUT: "Bệnh nhân nữ 65 tuổi nhập viện vì đau ngực, khó thở. Tiền sử tăng huyết áp 10 năm, đang dùng amlodipine 5mg. ECG: nhịp xoang đều 80 lần/phút, ST chênh lên V1-V4. Chẩn đoán: nhồi máu cơ tim cấp ST chênh lên."
@@ -579,7 +584,7 @@ OUTPUT: [{"text": "đau ngực", "type": "TRIỆU_CHỨNG", "position": [34, 42]
 
 INPUT: "Bệnh nhân nam 58 tuổi vào viện vì đánh trống ngực, khó thở. Tiền sử đang dùng metoprolol 25mg. ECG: rung nhĩ, tần số thất 120 lần/phút. Chẩn đoán: rung nhĩ."
 
-OUTPUT: [{"text": "đánh trống ngực", "type": "TRIỆU_CHỨNG", "position": [34, 49], "assertions": [], "candidates": []}, {"text": "khó thở", "type": "TRIỆU_CHỨNG", "position": [51, 58], "assertions": [], "candidates": []}, {"text": "metoprolol 25mg", "type": "THUỐC", "position": [78, 93], "assertions": ["isHistorical"], "candidates": []}, {"text": "rung nhĩ", "type": "CHẨN_ĐOÁN", "position": [100, 108], "assertions": [], "candidates": []}, {"text": "tần số thất 120 lần/phút", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [110, 134], "assertions": [], "candidates": []}, {"text": "rung nhĩ", "type": "CHẨN_ĐOÁN", "position": [100, 108], "assertions": [], "candidates": []}]
+OUTPUT: [{"text": "đánh trống ngực", "type": "TRIỆU_CHỨNG", "position": [34, 49], "assertions": [], "candidates": []}, {"text": "khó thở", "type": "TRIỆU_CHỨNG", "position": [51, 58], "assertions": [], "candidates": []}, {"text": "metoprolol 25mg", "type": "THUỐC", "position": [78, 93], "assertions": ["isHistorical"], "candidates": []}, {"text": "rung nhĩ", "type": "CHẨN_ĐOÁN", "position": [100, 108], "assertions": [], "candidates": []}, {"text": "tần số thất 120 lần/phút", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [110, 134], "assertions": [], "candidates": []}, {"text": "rung nhĩ", "type": "CHẨN_ĐOÁN", "position": [147, 155], "assertions": [], "candidates": []}]
 **Ex 13 - DUPLICATE x5 (đánh trống ngực - MỖI occurrence = 1 entity riêng)**
 
 INPUT: "Bệnh nhân nữ 70 tuổi nhập viện vì đánh trống ngực. ECG cho thấy nhịp xoang chiếm ưu thế, ngoại tâm thu nhĩ và ngoại tâm thu thất xuất hiện thường xuyên. Tiền sử đang dùng aspirin 81mg, metoprolol 25mg po bid cho bệnh tim. Khó thở nhẹ khi gắng sức."
