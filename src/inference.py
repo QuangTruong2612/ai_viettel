@@ -264,25 +264,36 @@ def process_record(
     _CURRENT_REC_ID[0] = rec_id
     t0 = time.time()
     logger.info("[%d] Bắt đầu (len=%d)", rec_id, len(input_text))
-    # Adaptive few-shot: tự giảm số examples khi user_prompt dài để tránh overflow.
-    # Quy tắc (mới 2026-07-09, tối ưu cho model < 9B + không giới hạn thời gian):
-    #   user_prompt > 5000 chars → chỉ giữ 2 few-shot (input rất dài)
-    #   user_prompt > 3000 chars → chỉ giữ 6 few-shot (input vừa) ← TĂNG từ 4
-    #   user_prompt <= 3000 chars → giữ nguyên CLI cap (ưu tiên quality)
-    # Lý do: Vì không giới hạn thời gian, ưu tiên QUALITY → giữ nhiều few-shot hơn.
-    # Test thực tế với input/1.txt (~2942 chars): few_shot=4 → chỉ 17 entities.
-    # Tăng lên 6 few-shot → dự kiến 20-22 entities.
+    # Adaptive few-shot: cap ở 12-20 examples dựa trên test thực nghiệm.
+    # Test data (user Kaggle 10/07/2026):
+    #   12 few-shot → 37 entities (TỐT NHẤT - sweet spot)
+    #   24 few-shot → 30-35 entities
+    #   35 few-shot → <30 entities (overwhelm)
+    # Quy tắc mới (KHÔNG cap dưới 12 vì sẽ giảm recall nghiêm trọng):
+    #   user_prompt > 8000 chars → cap 12 (input rất dài)
+    #   user_prompt > 5000 chars → cap 15 (input vừa)
+    #   user_prompt <= 5000 chars → cap 20 (input ngắn, sweet spot)
     user_prompt_len = len(input_text)
-    if user_prompt_len > 5000:
-        adaptive_few_shot = few_shot[:2]    # input rất dài → 2 examples
-        logger.debug("[%d] Adaptive: keep 2 few-shot (input len=%d > 5000)",
+    if user_prompt_len > 8000:
+        adaptive_few_shot = few_shot[:12]
+        logger.debug("[%d] Adaptive: keep 12 few-shot (input len=%d > 8000)",
                       rec_id, user_prompt_len)
-    elif user_prompt_len > 3000:
-        adaptive_few_shot = few_shot[:6]    # input vừa → 6 examples (tăng từ 4)
-        logger.debug("[%d] Adaptive: keep 6 few-shot (input len=%d > 3000)",
+    elif user_prompt_len > 5000:
+        adaptive_few_shot = few_shot[:15]
+        logger.debug("[%d] Adaptive: keep 15 few-shot (input len=%d > 5000)",
                       rec_id, user_prompt_len)
     else:
-        adaptive_few_shot = few_shot       # input ngắn → giữ nguyên CLI cap
+        adaptive_few_shot = few_shot[:20]
+        logger.debug("[%d] Adaptive: keep 20 few-shot (input len=%d <= 5000, sweet spot)",
+                      rec_id, user_prompt_len)
+
+    # Fix #4: Log few-shot examples used (debug "which examples drove this output")
+    if adaptive_few_shot:
+        logger.debug(
+            "[%d] Few-shot used: %d examples, first input: %s...",
+            rec_id, len(adaptive_few_shot),
+            adaptive_few_shot[0].get("content", "")[:80] if adaptive_few_shot else "none"
+        )
 
     # Clean input TRƯỚC khi build_user_prompt: strip markdown, drop N/A,
     # truncate nếu quá dài. Áp dụng cho cả clean + adaptive để fit num_ctx.
@@ -391,9 +402,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-few-shot",
         type=int,
-        default=33,
-        help="Số few-shot examples TỐI ĐA (default 33 = tổng số examples hiện có, tăng từ 12). "
-             "Nhiều examples giúp model < 9B hiểu pattern tốt hơn.",
+        default=35,
+        help="Số few-shot examples TỐI ĐA (default 35 = tổng số examples hiện có). "
+             "Cap runtime 12-20 examples (sweet spot 12). "
+             "Test thực nghiệm: 12→37, 24→30-35, 35→<30 entities.",
     )
     
     parser.add_argument(
