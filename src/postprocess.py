@@ -924,27 +924,68 @@ def _drop_substring_entities(entities: list[dict]) -> list[dict]:
     return [ent for idx, ent in enumerate(entities) if idx not in drop_indices]
 
 
+_VITAL_SIGNS_DUMP_RE = re.compile(
+    r"^(VS\d+|VS\s+\d+|[A-Z0-9.\s/]{10,}\b(RA|mmHg|bpm|°C|F|%|K/uL)?)$",
+    re.IGNORECASE,
+)
+
+_PURE_DURATION_RE = re.compile(
+    r"^(kéo dài|khởi phát|trong|cách|sau|lúc|diễn ra)\s+.*(giây|phút|giờ|ngày|tuần|tháng|năm|hôm|sáng|tối|trưa|nay|trước)$|^\d+\s*(giây|phút|giờ|ngày|tuần|tháng|năm)$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
 def _filter_lifestyle_entities(entities: list[dict]) -> list[dict]:
-    """Drop entities khớp lifestyle / social / psychology keywords.
+    """Drop entities khớp lifestyle/social/psychology, sinh hiệu gộp, và thời gian độc lập.
 
-    Defense-in-depth: dù SYSTEM_PROMPT R3 đã cấm, LLM 7B đôi khi vẫn extract
-    (vd "căng thẳng", "cà phê có caffeine", "mất việc làm 8 ngày trước") thành
-    TRIỆU_CHỨNG. Filter này DROP chúng để khỏi tính F1.
+    Defense-in-depth: dù SYSTEM_PROMPT R3/R28 đã cấm, LLM 7B đôi khi vẫn extract:
+    - Lifestyle/social: "căng thẳng", "cà phê có caffeine", "mất việc làm 8 ngày trước"
+    - Vital signs dump: "VS98.3 12987 56 18 99RA"
+    - Pure duration/time: "kéo dài 20 giây", "khởi phát lúc 17 giờ"
+    - False isNegated trên TÊN_XÉT_NGHIỆM: "chụp x-quang ngực" bị gán isNegated vì câu "không ghi nhận bất thường"
 
-    Return: list entities đã lọc.
+    Return: list entities đã lọc và chuẩn hóa assertions.
     """
     out: list[dict] = []
     for ent in entities:
         text = str(ent.get("text", "")).strip()
+        etype = ent.get("type", "")
         if not text:
             out.append(ent)
             continue
+
+        # 1. Lọc lifestyle / social / psych keywords
         if _LIFESTYLE_RE.search(text):
             logger.debug(
                 "[%d] Drop lifestyle/social/psych entity '%s' (kw match)",
                 _seen_count, text,
             )
             continue
+
+        # 2. Lọc chuỗi sinh hiệu gộp / rác lâm sàng dạng VS98.3... (chỉ áp dụng cho CHẨN_ĐOÁN / TRIỆU_CHỨNG)
+        if etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG") and _VITAL_SIGNS_DUMP_RE.match(text):
+            logger.debug(
+                "[%d] Drop vital signs dump entity '%s' (%s)",
+                _seen_count, text, etype,
+            )
+            continue
+
+        # 3. Lọc chuỗi thời lượng / mốc thời gian độc lập (chỉ áp dụng cho CHẨN_ĐOÁN / TRIỆU_CHỨNG)
+        if etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG") and _PURE_DURATION_RE.match(text):
+            logger.debug(
+                "[%d] Drop pure duration entity '%s' (%s)",
+                _seen_count, text, etype,
+            )
+            continue
+
+        # 4. Chuẩn hóa assertions: TÊN_XÉT_NGHIỆM không bao giờ bị isNegated nếu kết quả bình thường
+        assertions = list(ent.get("assertions", []))
+        if etype == "TÊN_XÉT_NGHIỆM" and "isNegated" in assertions:
+            if not text.lower().startswith(("không ", "chưa ")):
+                assertions = [a for a in assertions if a != "isNegated"]
+                ent["assertions"] = assertions
+                logger.debug("Drop false isNegated from TÊN_XÉT_NGHIỆM: '%s'", text)
+
         out.append(ent)
     return out
 
@@ -1628,6 +1669,9 @@ def assemble_record(
             }),
             "candidates": [],
         }
+        if etype == "TÊN_XÉT_NGHIỆM" and "isNegated" in rec["assertions"]:
+            if not text.lower().startswith(("không ", "chưa ")):
+                rec["assertions"].remove("isNegated")
 
         # Lookup candidates theo type
         if etype == "THUỐC" and retriever is not None:

@@ -172,16 +172,61 @@ HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "p
 
 **Sau 5 bước reasoning → emit JSON array với position. KHÔNG output reasoning text, chỉ output JSON thuần.**
 
-**R28. CHUẨN Y TẾ (Medical NER Quality Standards, mới 2026-07-10, từ user feedback 1.txt):**
+**R28. CHUẨN Y TẾ VÀ CÁC LỖI NGHIÊM CẤM (Medical NER Quality & Strict Negative Rules, mới 2026-07-10):**
 - **🔴 NGUYÊN TẮC BẮT BUỘC - Y TẾ CHUẨN**:
   1. **Mỗi occurrence = 1 entity riêng** (R10 STRICT theo position) - QUAN TRỌNG NHẤT.
   2. **Extract TẤT CẢ 5 categories** theo chuẩn i2b2/2018 n2c2: THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM.
-  3. **Cấu trúc câu y khoa VN**: Subject + Verb + Object. Trích nouns/clinical terms thường xuyên xuất hiện (vd "bệnh nhân nhập viện vì X" → trích X).
+  3. **Cấu trúc câu y khoa VN**: Subject + Verb + Object. Trích nouns/clinical terms thường xuyên xuất hiện.
   4. **Section headers trong bệnh án** (Tiền sử, Lý do nhập viện, Khám, CLS, Đánh giá, Điều trị) → mỗi section có entities riêng. KHÔNG skip section nào.
-  5. **Modifier quan trọng** (severity, location, frequency, duration) PHẢI kèm entity chính: "đau ngực trái", "khó thở nặng", "sốt 38.5°C", "HA 150/90".
-  6. **NEGATION quan trọng**: "Không X", "chưa X", "âm tính" → X là TRIỆU_CHỨNG/CHẨN_ĐOÁN với assertion isNegated.
+  5. **Modifier quan trọng** (severity, location) PHẢI kèm entity chính: "đau ngực trái", "khó thở nhẹ", "HA 160/90 mmHg".
+
+- **⛔ 4 LỆNH CẤM TRÍCH XUẤT PHI Y KHOA (STRICT NEGATIVE RULES - PHẢI TUÂN THỦ TUYỆT ĐỐI)**:
+  1. **CẤM trích xuất sinh hiệu gộp / số đo rác (Vital Signs dump)**: Tuyệt đối KHÔNG trích xuất các chuỗi sinh hiệu viết tắt/gộp dạng `VS98.3 12987 56 18 99RA`, `VS 98.3...`, `M 80 HA 130/80 T 37 NT 16`, hay các chuỗi toàn con số/mã hiệu khám lâm sàng không có tên triệu chứng rõ ràng làm `TRIỆU_CHỨNG` hay `CHẨN_ĐOÁN`. (Chỉ trích xuất khi có tên rõ ràng: `HA 160/90 mmHg` → TÊN="HA", KQ="160/90 mmHg"; `Mạch 80 lần/phút` → TÊN="Mạch", KQ="80 lần/phút").
+  2. **CẤM trích xuất thời lượng / mốc thời gian độc lập**: Tuyệt đối KHÔNG trích xuất các cụm chỉ có thời gian hoặc diễn biến thời gian như `kéo dài 20 giây`, `kéo dài 30 phút`, `khởi phát lúc 17 giờ`, `trong tuần qua`, `cách 10 ngày trước`, `10 năm`, `5 ngày`, `8 ngày trước` làm `TRIỆU_CHỨNG` hay `CHẨN_ĐOÁN`. Thời gian không phải là bệnh hay triệu chứng!
+     - **Anti-examples (TUYỆT ĐỐI KHÔNG trích các cụm sau)**:
+       - ❌ `"kéo dài 20 giây"` → DROP (duration modifier, không phải entity)
+       - ❌ `"kéo dài 30 phút"` → DROP
+       - ❌ `"trong tuần qua"` → DROP (time scope)
+       - ❌ `"cách 10 ngày trước"` → DROP (relative time)
+       - ❌ `"khởi phát lúc 17 giờ"` → DROP (onset time)
+       - ❌ `"10 năm"` → DROP (duration standalone)
+     - **Khi nào KHÔNG drop**: nếu duration kèm entity thì giữ entity, drop duration.
+       - ✅ `"đau ngực 30 phút"` → chỉ `"đau ngực"` (drop "30 phút")
+       - ✅ `"sốt 3 ngày"` → chỉ `"sốt"` (drop "3 ngày")
+  3. **CẮT BỎ động từ chủ quan & từ dẫn trong câu dài (Core Clinical Extraction)**: Khi gặp câu/đoạn có từ dẫn ở đầu, PHẢI cắt bỏ hoàn toàn các từ dẫn này, CHỈ trích entity lõi:
+     - **Từ dẫn CẦN STRIP (KHÔNG bao giờ giữ trong entity text)**:
+       - `tăng` (modifier): `"tăng đánh trống ngực"` → `"đánh trống ngực"`; `"tăng huyết áp"` GIỮ (là CHẨN_ĐOÁN đầy đủ)
+       - `giảm`: `"giảm đau"` → `"đau"`; `"giảm dung nạp gắng sức"` GIỮ (là TRIỆU_CHỨNG đầy đủ)
+       - `cảm giác` (subjective qualifier): `"cảm giác đánh trống ngực"` → `"đánh trống ngực"`; `"cảm giác thắt chặt ngực vùng trước tim"` → `"thắt chặt ngực vùng trước tim"`
+       - `cảm thấy` / `thấy` (verb cảm nhận): `"cảm thấy mệt mỏi nhiều khi gắng sức trong tuần qua"` → `"mệt mỏi khi gắng sức"` (drop "cảm thấy", "nhiều", "trong tuần qua")
+       - `có` (existence verb): `"có đau ngực"` → `"đau ngực"`; `"có buồn nôn"` → `"buồn nôn"`; `"Có Căng thẳng"` → DROP (lifestyle R3)
+       - `bị` (passive verb): `"bị đau đầu"` → `"đau đầu"`; `"bị khó thở"` → `"khó thở"`
+       - `xuất hiện` (onset verb): `"xuất hiện đánh trống ngực"` → `"đánh trống ngực"`
+       - `biểu hiện` (symptom verb): `"biểu hiện sốt cao"` → `"sốt cao"`
+     - **Anti-examples TUYỆT ĐỐI (KHÔNG được output các text này)**:
+       - ❌ `"cảm giác đánh trống ngực"` → ĐÚNG: `"đánh trống ngực"` (drop "cảm giác")
+       - ❌ `"cảm giác thắt chặt ngực vùng trước tim"` → ĐÚNG: `"thắt chặt ngực vùng trước tim"`
+       - ❌ `"tăng đánh trống ngực"` → ĐÚNG: `"đánh trống ngực"` (drop "tăng")
+       - ❌ `"cảm thấy mệt mỏi nhiều khi gắng sức trong tuần qua"` → ĐÚNG: `"mệt mỏi khi gắng sức"` (drop "cảm thấy", "nhiều", "trong tuần qua")
+       - ❌ `"có triệu chứng đánh trống ngực"` → ĐÚNG: `"đánh trống ngực"`
+       - ❌ `"bị tăng huyết áp"` → ĐÚNG: `"tăng huyết áp"` (drop "bị", giữ THA đầy đủ vì là CHẨN_ĐOÁN)
+  4. **CẤM gán `isNegated` cho TÊN_XÉT_NGHIỆM khi kết quả bình thường + CHUẨN HÓA TÊN TEST**:
+     - **Sub-rule 4a — Verb trong tên test**: DROP verb ở đầu tên test, giữ tên test gốc:
+       - ❌ `"chụp x-quang ngực"` → ĐÚNG: `"X-quang ngực"` hoặc `"x-quang ngực"` (drop verb "chụp")
+       - ❌ `"phân tích nước tiểu"` → ĐÚNG: `"nước tiểu"` hoặc `"tổng phân tích nước tiểu"` (drop verb "phân tích" hoặc giữ full)
+       - ❌ `"đo điện tâm đồ"` → ĐÚNG: `"điện tâm đồ"` (drop verb "đo")
+       - ✅ `"siêu âm tim"` GIỮ nguyên (verb "siêu âm" LÀ một phần tên test chuẩn)
+       - ✅ `"monitor holter"` GIỮ nguyên (verb "monitor" LÀ một phần tên test)
+     - **Sub-rule 4b — isNegated KHÔNG áp dụng cho test có kết quả bình thường**:
+       - Khi văn bản ghi `chụp x-quang ngực không ghi nhận gì bất thường`, `phân tích nước tiểu không có gì đáng chú ý`, `ecg bình thường` → `TÊN_XÉT_NGHIỆM` (`x-quang ngực`, `nước tiểu`, `ecg`) TUYỆT ĐỐI KHÔNG BỊ `isNegated` (`assertions: []`). Test đã ĐƯỢC thực hiện, chỉ là kết quả bình thường.
+       - **Anti-examples TUYỆT ĐỐI**:
+         - ❌ `"chụp x-quang ngực"` + `isNegated: true` → SAI; ĐÚNG: `"x-quang ngực"` + `assertions: []`
+         - ❌ `"phân tích nước tiểu"` + `isNegated: true` → SAI; ĐÚNG: `"nước tiểu"` + `assertions: []`
+       - **`isNegated` CHỈ dùng khi xét nghiệm KHÔNG được thực hiện hoặc bị từ chối**: `"không làm x-quang"`, `"chưa chụp CT"`, `"bệnh nhân từ chối xét nghiệm"`.
+       - Kết quả `bình thường` / `không ghi nhận bất thường` / `không có gì đáng chú ý` → là `KẾT_QUẢ_XÉT_NGHIỆM` riêng (assertions=[]), không negate test.
+
 - **🔴 PATTERN CHUẨN Y TẾ VN** (các entities thường gặp):
-  - **TIM MẠCH**: HA (huyết áp), ECG, nhịp xoang, ngoại tâm thu (nhĩ/thất), rung nhĩ, NMCT (nhồi máu cơ tim), đau thắt ngực, Suy tim,THA
+  - **TIM MẠCH**: HA (huyết áp), ECG, nhịp xoang, ngoại tâm thu (nhĩ/thất), rung nhĩ, NMCT (nhồi máu cơ tim), đau thắt ngực, Suy tim, THA
   - **HÔ HẤP**: Viêm phổi, Hen PQ, COPD, khó thở, ho, đờm, ran nổ
   - **TIÊU HÓA**: GERD, viêm dạ dày, loét DD, xơ gan, viêm gan, đau bụng, buồn nôn
   - **NỘI TIẾT**: ĐTĐ, Basedow, suy giáp
@@ -204,6 +249,47 @@ HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "p
 
 <rules>
 ## 9 MANDATORY RULES (follow in order)
+
+**⚠️ R29. TOP 10 ANTI-PATTERNS - LỖI THƯỜNG GẶP (ĐỌC ĐẦU TIÊN - MỖI LỖI CÓ ANTI-EXAMPLE)**
+Trước khi áp dụng R1-R28, kiểm tra output của bạn chống lại 10 lỗi sau. NẾU VI PHẠM → SỬA NGAY:
+
+| # | ❌ SAI | ✅ ĐÚNG | Rule |
+|---|---|---|---|
+| 1 | `"cảm giác đánh trống ngực"` | `"đánh trống ngực"` (drop "cảm giác") | R28.3 |
+| 2 | `"tăng đánh trống ngực"` | `"đánh trống ngực"` (drop "tăng") | R28.3 |
+| 3 | `"cảm thấy mệt mỏi nhiều khi gắng sức trong tuần qua"` | `"mệt mỏi khi gắng sức"` (drop verb + duration) | R28.3 + R28.2 |
+| 4 | `"kéo dài 20 giây"` (extract as entity) | DROP hoàn toàn - duration không phải entity | R28.2 |
+| 5 | `"chụp x-quang ngực"` + `isNegated: true` | `"x-quang ngực"` + `assertions: []` | R28.4 |
+| 6 | `"phân tích nước tiểu"` + `isNegated: true` | `"nước tiểu"` + `assertions: []` | R28.4 |
+| 7 | `"atenolol (uống hôm nay)"` | `"atenolol"` (drop parens VN instruction) | R4 |
+| 8 | `"VS98.3 12987 56 18 99RA"` (extract as TRIỆU) | DROP hoàn toàn - vital signs dump | R28.1 |
+| 9 | `"tăng huyết áp"` extract as TRIỆU_CHỨNG | `CHẨN_ĐOÁN` (THA = disease, I10) | R-CHẨN-VS-TRIỆU |
+| 10 | `"ngoại tâm thu nhĩ"` extract as KQ_XN | `CHẨN_ĐOÁN` (abnormal ECG finding, I49) | R19/R13 |
+
+**Checklist trước khi emit JSON**:
+- [ ] Không có text bắt đầu bằng `cảm giác`, `cảm thấy`, `tăng `, `có `, `bị `, `xuất hiện` (trừ `tăng huyết áp`, `giảm dung nạp gắng sức`)
+- [ ] Không có text là pure duration (`kéo dài X`, `trong X qua`, `cách X trước`)
+- [ ] Không có TÊN_XÉT_NGHIỆM bắt đầu bằng `chụp`, `phân tích`, `đo` (trừ `siêu âm`, `monitor`)
+- [ ] Không có TÊN_XÉT_NGHIỆM có `isNegated` khi kết quả là `bình thường` / `không ghi nhận bất thường`
+- [ ] Không có vital signs dump dạng `VS...`, `M X HA Y T Z`
+
+**⚠️ R30. SCAN HẾT CÁC SECTION — ĐẶC BIỆT CÁC SECTION DỄ BỊ SKIP** (mới 2026-07-10, từ user feedback 1.txt):
+
+Các section sau chứa nhiều entities quan trọng mà LLM hay MISS. PHẢI scan kỹ:
+1. **"Thuốc trước khi nhập viện:" / "Thuốc:" / "Thuốc đang dùng:"** → list drugs (R1+R4)
+2. **"Điều trị:" / "Được chỉ điều trị X" / "Được chỉ định điều trị X"** → extract drug X (R1+R4)
+   - VD: `"Được chỉ định điều trị aspirin 325mg x 1"` → THUỐC = `"aspirin 325mg x 1"` (KEEP x N pattern)
+   - VD: `"Điều trị: ceftriaxone 1g iv daily"` → THUỐC = `"ceftriaxone 1g iv daily"`
+3. **"monitor holter cho thấy ..."** → TÊN_XN = `"monitor holter"` (R19/R22 chỉ giữ 1) + extract findings bên trong:
+   - `"Nhịp xoang chiếm ưu thế"` → KQ_XN (R13 normal finding)
+   - `"ngoại tâm thu nhĩ"` → CHẨN_ĐOÁN (R19 abnormal)
+   - `"ngoại tâm thu thất"` → CHẨN_ĐOÁN (R19 abnormal)
+4. **"siêu âm tim qua thành ngực"** → TÊN_XN (giữ full body part, R11)
+5. **"điện tâm đồ"** / `"ECG"` → TÊN_XN
+6. **Section "Các diễn biến trước khi nhập viện:"** → có thể chứa drugs mới (vd "Bắt đầu dùng metoprolol 25mg po bid")
+7. **Section "Đặc điểm triệu chứng khi khám:"** → có thể chứa nhiều TRIỆU_CHỨNG với sub-detail (vị trí, tính chất, thời gian)
+8. **Typo recovery (R23)**: tìm drug name bị dính particle:
+   - `"atenololtrong"` → `"atenolol"` (drug) - tìm trong `_COMMON_DRUG_NAMES` nếu text bắt đầu bằng drug name + VN particle
 
 **R1. NER theo MỨC ĐỘ ĐẦY ĐỦ (full) cho THUỐC + CHẨN_ĐOÁN**:
   - THUỐC: keep name + strength + route + freq (e.g., "metoprolol 25mg po bid" - keep "po bid")
