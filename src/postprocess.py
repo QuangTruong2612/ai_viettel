@@ -1121,10 +1121,17 @@ _DROP_NOISE_PATTERNS = [
 ]
 
 # Pure duration (R28.2) - standalone time expression should not be entity
+# Cấu trúc: (duration_expr | duration_expr | duration_expr)
 _PURE_DURATION_ENHANCED_RE = re.compile(
-    r"^(\d+\s+(giây|phút|giờ|ngày|tuần|tháng|năm)(\s+(qua|trước|sau))?$|"
-    r"^(10|11|12|13|14|15|16|17|18|19|20)\s+(giây|phút|giờ|ngày|tuần|tháng|năm)(\s+(qua|trước|sau))?$|"
-    r"^(kéo\s+dài|khởi\s+phát\s+lúc|bắt\s+đầu\s+lúc|cách\s+\d+|trong\s+vòng)\s+\d+\s*(giây|phút|giờ|ngày|tuần|tháng|năm)?(\s+(qua|trước|sau))?$",
+    r"^(?:"
+    r"\d+\s+(?:giây|phút|giờ|ngày|tuần|tháng|năm)(?:\s+(?:qua|trước|sau))?"
+    r"|"
+    r"\d{1,2}\s+(?:giây|phút|giờ|ngày|tuần|tháng|năm)(?:\s+(?:qua|trước|sau))?"
+    r"|"
+    r"(?:kéo\s+dài|khởi\s+phát\s+lúc|bắt\s+đầu\s+lúc|cách\s+\d+|trong\s+vòng)"
+    r"\s+\d+(?:\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm))?"
+    r"(?:\s+(?:qua|trước|sau))?"
+    r")$",
     re.IGNORECASE | re.UNICODE,
 )
 
