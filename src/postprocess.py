@@ -332,30 +332,46 @@ def _try_recover_typo(
 
 
 def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Bỏ trùng entities dựa trên (text, type, position) - R10 STRICT (2026-07-09, user preference).
+    """Bỏ trùng entities dựa trên (text, type, position overlap) - R10 STRICT + R22 OVERLAP (2026-07-10).
 
     R10 STRICT (đổi từ R10 LOOSE theo user feedback 2026-07-09):
     - Cùng text + type + cùng position → 1 entity (R22 dedup)
     - Cùng text + type + khác position → giữ cả N entities (R10 STRICT theo position)
-    - Áp dụng cho TẤT CẢ loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XN, KQ_XN)
+    - **MỚI 2026-07-10 — OVERLAP DEDUP**: cùng text + type + positions OVERLAP (intersect)
+      → giữ span DÀI HƠN, drop span ngắn hơn (vd [97,110] và [102,110] cùng "tăng huyết áp"
+      → giữ [97,110], drop [102,110] vì span thứ 2 nằm trong span thứ 1).
+    - Áp dụng cho TẤT CẢ loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XN, KQ_XN).
 
     Lý do R10 STRICT (đổi từ LOOSE):
     - LLM có position → extract đầy đủ duplicate ở các vị trí khác nhau
     - Postprocess giữ N entities để khớp với ground truth (48-51 entities/file)
     - Trade-off: tăng recall tuyệt đối, có thể tăng false positive nếu LLM extract duplicate giả
+
+    Lý do OVERLAP DEDUP (mới 2026-07-10):
+    - LLM 7B hay output duplicate VỚI POSITION LỆCH vài ký tự (vd "tăng huyết áp" [97,110] vs [102,110])
+    - Hai span overlap nhưng khác start → start-only dedup miss cả hai
+    - Ground truth KHÔNG có duplicate trùng text ở vị trí overlap
+    - Fix: detect overlap, giữ span dài hơn (chứa span kia)
     """
     out: list[dict[str, Any]] = []
-    # Track: (text_lower, type, position[0]) → đã thấy
-    seen_keys: set[tuple[str, str, int]] = set()
+    # Track: (text_lower, type, [start, end]) đã thấy
+    # Khi check mới: nếu cùng text+type VÀ (cùng start HOẶC overlap) → drop span ngắn hơn.
 
-    # Sort theo position để giữ entity sớm nhất
+    # Sort theo start ASC, length DESC (span dài xử lý trước)
+    def _sort_key(e: dict[str, Any]) -> tuple[int, int]:
+        pos = e.get("position", [0, 0])
+        if isinstance(pos, list) and len(pos) >= 2:
+            try:
+                start = int(pos[0])
+                end = int(pos[1])
+            except (TypeError, ValueError):
+                return (0, 0)
+            return (start, -(end - start))  # start asc, length desc
+        return (0, 0)
+
     sorted_ents = sorted(
         [e for e in entities if e.get("text")],
-        key=lambda e: (
-            int(e.get("position", [0, 0])[0])
-            if isinstance(e.get("position"), list) and len(e.get("position")) >= 1
-            else 0
-        ),
+        key=_sort_key,
     )
 
     for ent in sorted_ents:
@@ -363,20 +379,59 @@ def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         text = str(ent.get("text", "")).strip()
         pos = ent.get("position", [0, 0])
         if not (isinstance(pos, list) and len(pos) == 2 and all(isinstance(p, int) for p in pos)):
-            pos = [0, 0]
-        start = pos[0]
-
-        # R10 STRICT: cùng text + type + position → 1 entity (drop duplicate vị trí)
-        # Khác position → giữ cả N entities
-        key = (text.lower(), etype, start)
-        if key in seen_keys:
-            logger.debug(
-                "R22 dedup: drop duplicate (text=%r, type=%r, pos=%d)",
-                text, etype, start,
-            )
             continue
-        seen_keys.add(key)
-        out.append(ent)
+        start, end = int(pos[0]), int(pos[1])
+        if start < 0 or end <= start:
+            continue
+
+        # Check overlap với existing entities cùng text+type
+        is_duplicate = False
+        to_remove: list[int] = []
+        for idx, existing in enumerate(out):
+            if existing.get("type", "") != etype:
+                continue
+            if str(existing.get("text", "")).strip().lower() != text.lower():
+                continue
+            ex_pos = existing.get("position", [0, 0])
+            if not (isinstance(ex_pos, list) and len(ex_pos) == 2):
+                continue
+            e_start, e_end = int(ex_pos[0]), int(ex_pos[1])
+
+            # Same exact span → drop current (R22)
+            if start == e_start and end == e_end:
+                is_duplicate = True
+                logger.debug(
+                    "R22 dedup: drop duplicate exact (text=%r, type=%r, pos=[%d,%d])",
+                    text, etype, start, end,
+                )
+                break
+
+            # OVERLAP check: max(start, e_start) < min(end, e_end) → intersect
+            if max(start, e_start) < min(end, e_end):
+                ex_len = e_end - e_start
+                cur_len = end - start
+                if ex_len >= cur_len:
+                    # Existing span dài hơn hoặc bằng → drop current
+                    is_duplicate = True
+                    logger.debug(
+                        "R10 overlap dedup: drop '%s' [%d,%d] (existing [%d,%d] longer/equal)",
+                        text, start, end, e_start, e_end,
+                    )
+                    break
+                else:
+                    # Current span dài hơn → remove existing, add current
+                    to_remove.append(idx)
+                    logger.debug(
+                        "R10 overlap dedup: replace '%s' [%d,%d] with longer [%d,%d]",
+                        text, e_start, e_end, start, end,
+                    )
+
+        # Remove existing entities that current overlaps AND is longer
+        for idx in reversed(to_remove):
+            out.pop(idx)
+
+        if not is_duplicate:
+            out.append(ent)
 
     out.sort(key=lambda e: e["position"][0])
     return out
@@ -1557,16 +1612,23 @@ def _expand_duplicates(entities, input_text):
             continue
 
         # Nếu có N occurrences > 1 entity hiện tại → tạo thêm entities
-        existing_positions_in_expanded = [
-            e.get("position", [0, 0])[0]
+        # MỚI 2026-07-10: check overlap thay vì chỉ check start position
+        # LLM 7B hay output duplicate với position LỆCH (vd [97,110] vs [102,110])
+        # → tránh tạo thêm entity trùng overlap
+        existing_positions = [
+            (e.get("position", [0, 0])[0], e.get("position", [0, 0])[1])
             for e in expanded
             if e.get("text", "").lower() == text_lower
             or _MODIFIERS_PREFIX.sub("", e.get("text", "").lower()).strip() == text_stripped
         ]
-        # Tìm các positions chưa có entity
+        # Tìm các positions chưa có entity VÀ KHÔNG overlap với existing
         missing_positions = [
             p for p in all_positions
-            if p[0] not in existing_positions_in_expanded
+            if p[0] not in [ep[0] for ep in existing_positions]  # chưa có start y hệt
+            and not any(
+                max(p[0], ep[0]) < min(p[1], ep[1])  # overlap check
+                for ep in existing_positions
+            )
         ]
 
         # Tạo entities mới cho các positions còn thiếu
@@ -1632,8 +1694,9 @@ def assemble_record(
     # Track đã emit để dedupe
     # - R22: TÊN_XÉT_NGHIỆM dedupe theo text (chỉ giữ 1 lần xuất hiện)
     # - R10 STRICT / R20: Các type khác giữ TẤT CẢ các occurrences ở các vị trí khác nhau
-    seen_text_type_pos: set[tuple[str, str, int]] = set()
+    # MỚI 2026-07-10: track positions list để check overlap (không chỉ start)
     seen_test_names: set[str] = set()
+    seen_entities: list[tuple[str, str, list[int]]] = []  # (norm_text, type, [start, end])
     for ent in validated:
         text = str(ent.get("text", "")).strip()
         etype = ent.get("type", "")
@@ -1646,17 +1709,60 @@ def assemble_record(
         pos = ent.get("position", [0, 0])
         if not (isinstance(pos, list) and len(pos) == 2 and all(isinstance(p, int) for p in pos)):
             pos = [0, 0]
+        cur_start, cur_end = int(pos[0]), int(pos[1])
 
         norm_text = text.lower().strip()
+        is_duplicate = False
+
         if etype == "TÊN_XÉT_NGHIỆM":
+            # R22: test name dedupe theo text (chỉ giữ 1 lần)
             if norm_text in seen_test_names:
                 continue
             seen_test_names.add(norm_text)
         else:
-            dedup_key = (norm_text, etype, int(pos[0]))
-            if dedup_key in seen_text_type_pos:
+            # R10 STRICT + OVERLAP DEDUP (mới 2026-07-10):
+            # - Cùng text + type + CÙNG start → drop (R22 dedup exact)
+            # - Cùng text + type + OVERLAP → giữ span dài hơn, drop span ngắn hơn
+            to_remove: list[int] = []
+            for idx, (s_text, s_type, s_pos) in enumerate(seen_entities):
+                if s_type != etype or s_text != norm_text:
+                    continue
+                s_start, s_end = s_pos
+                # Same exact span → drop current
+                if cur_start == s_start and cur_end == s_end:
+                    is_duplicate = True
+                    logger.debug(
+                        "assemble_record R22: drop exact dup '%s' [%d,%d]",
+                        text, cur_start, cur_end,
+                    )
+                    break
+                # Overlap → keep longer
+                if max(cur_start, s_start) < min(cur_end, s_end):
+                    ex_len = s_end - s_start
+                    cur_len = cur_end - cur_start
+                    if ex_len >= cur_len:
+                        # Existing longer or equal → drop current
+                        is_duplicate = True
+                        logger.debug(
+                            "assemble_record overlap: drop '%s' [%d,%d] (existing [%d,%d] longer)",
+                            text, cur_start, cur_end, s_start, s_end,
+                        )
+                        break
+                    else:
+                        # Current longer → remove existing from seen (sẽ add current bên dưới)
+                        to_remove.append(idx)
+                        logger.debug(
+                            "assemble_record overlap: replace '%s' [%d,%d] with longer [%d,%d]",
+                            text, s_start, s_end, cur_start, cur_end,
+                        )
+            # Remove shorter existing
+            for idx in reversed(to_remove):
+                seen_entities.pop(idx)
+
+            if is_duplicate:
                 continue
-            seen_text_type_pos.add(dedup_key)
+
+            seen_entities.append((norm_text, etype, [cur_start, cur_end]))
 
         # Build record
         rec: dict[str, Any] = {

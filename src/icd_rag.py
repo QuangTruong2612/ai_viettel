@@ -43,6 +43,129 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 
 # ---------------------------------------------------------------------- #
+# VN medical abbreviations / synonyms (R27.6 mới 2026-07-10)
+# ---------------------------------------------------------------------- #
+
+# Map abbreviation VN → full term trước khi vào lookup chain.
+# LLM hay output viết tắt (THA, NMCT, ĐTĐ, COPD, OSA, ...) mà ICD desc_vi
+# dùng full term (tăng huyết áp, nhồi máu cơ tim, đái tháo đường, ...).
+_VN_ABBREVIATIONS = {
+    # Tim mạch
+    "tha": "tăng huyết áp",
+    "nmct": "nhồi máu cơ tim",
+    "nmct cũ": "nhồi máu cơ tim cũ",
+    "nmct mới": "nhồi máu cơ tim cấp",
+    "suy tim": "suy tim",
+    "suy tim ứ huyết": "suy tim ứ huyết",
+    "bt": "block tim",
+    "ntts": "ngoại tâm thu",
+    "ntts nhĩ": "ngoại tâm thu nhĩ",
+    "ntts thất": "ngoại tâm thu thất",
+    "bptt": "block nhĩ thất",
+    "tđm": "tai biến mạch máu não",
+    "tbmmn": "tai biến mạch máu não",
+    "tbmmnn": "tai biến mạch máu não",
+    "đột quỵ": "tai biến mạch máu não",
+    # Nội tiết
+    "đtđ": "đái tháo đường",
+    "đtđ type 2": "đái tháo đường type 2",
+    "đtđ type 1": "đái tháo đường type 1",
+    "đtđ2": "đái tháo đường type 2",
+    "đtđ1": "đái tháo đường type 1",
+    # Hô hấp
+    "copd": "bệnh phổi tắc nghẽn mạn",
+    "hen pq": "hen phế quản",
+    "vp": "viêm phổi",
+    "vpq": "viêm phế quản",
+    "osa": "ngưng thở khi ngủ",
+    "suy hô hấp": "suy hô hấp",
+    # Thận - Tiết niệu
+    "st": "suy thận",
+    "stc": "suy thận cấp",
+    "stm": "suy thận mạn",
+    "vđtn": "viêm đường tiết niệu",
+    # Tiêu hóa - Gan
+    "vg": "viêm gan",
+    "vgb": "viêm gan b",
+    "vgc": "viêm gan c",
+    "gerd": "trào ngược dạ dày thực quản",
+    "ibs": "hội chứng ruột kích thích",
+    "gastritis": "viêm dạ dày",
+    # Khác
+    "hc": "hạch",
+    "k": "khối u",
+    "ca": "ung thư",
+    "ts": "tiền sử",
+    "tm": "tiền sử",
+    # Sản - Phụ khoa
+    "có thai": "mang thai",
+    "có thai tuần": "mang thai",
+}
+
+# Map synonyms VN → canonical term (full term) trước khi lookup.
+# LLM hay dùng "u ác" thay vì "u ác tính", "khối u" thay vì "u" → mismatch với ICD desc_vi.
+_VN_SYNONYM_TO_CANONICAL = {
+    "u ác tính": "u ác tính",  # canonical
+    "u ác": "u ác tính",
+    "k ác": "ung thư",
+    "k": "ung thư",
+    "ca": "ung thư",
+    "khối u": "u",  # ICD desc_vi dùng "U" thay vì "Khối u"
+    "khối u lành": "u lành tính",
+    "u lành": "u lành tính",
+    "viêm": "viêm",  # canonical
+    "nhiễm trùng": "nhiễm khuẩn",
+    "nhiễm khuẩn": "nhiễm khuẩn",  # canonical
+}
+
+
+def _normalize_vn_term(text: str) -> str:
+    """Normalize VN medical text trước ICD lookup.
+
+    Áp dụng các bước:
+    1. Lowercase + strip
+    2. Replace abbreviation VN → full term (vd "THA" → "tăng huyết áp")
+    3. Replace synonym → canonical (vd "u ác" → "u ác tính")
+
+    Args:
+        text: VN medical text từ LLM (có thể có abbreviation/synonym).
+
+    Returns:
+        Normalized text để feed vào lookup chain.
+    """
+    if not text:
+        return text
+    s = text.strip()
+    s_lower = s.lower()
+
+    # 1. Abbreviation match (exact or substring)
+    # Ưu tiên match exact trước, sau đó substring
+    if s_lower in _VN_ABBREVIATIONS:
+        return _VN_ABBREVIATIONS[s_lower]
+
+    # 2. Try matching each abbreviation as substring (length-sorted to match longest first)
+    sorted_abbrs = sorted(_VN_ABBREVIATIONS.items(), key=lambda x: -len(x[0]))
+    for abbr, full in sorted_abbrs:
+        # Match whole word only (vd "tha" không match "thalamic")
+        # Use regex with word boundaries
+        import re as _re
+        pattern = _re.compile(r"\b" + _re.escape(abbr) + r"\b")
+        if pattern.search(s_lower):
+            s_lower = pattern.sub(full, s_lower, count=1)
+            break  # Only apply first (longest) abbreviation match
+
+    # 3. Synonym replacement (whole word)
+    import re as _re
+    for syn, canonical in _VN_SYNONYM_TO_CANONICAL.items():
+        if syn == canonical:
+            continue  # skip if same
+        pattern = _re.compile(r"\b" + _re.escape(syn) + r"\b")
+        s_lower = pattern.sub(canonical, s_lower)
+
+    return s_lower
+
+
+# ---------------------------------------------------------------------- #
 # Data structures
 # ---------------------------------------------------------------------- #
 
@@ -449,6 +572,9 @@ class ICDRetriever:
             return []
 
         text = self._strip_clinical_prefix(vn_text)
+        # R27.6 mới 2026-07-10: normalize abbreviation + synonym VN TRƯỚC lookup chain
+        # (THA → tăng huyết áp, u ác → u ác tính, ...) để tăng hit rate.
+        text = _normalize_vn_term(text)
 
         # L1: Exact (cao độ tin cậy nhất — cap 2)
         key = text.lower()
@@ -740,6 +866,233 @@ class ICDRetriever:
             "đột quỵ": ["I63", "I64"],
             "tai biến mạch máu não": ["I63", "I64"],
             "thiếu máu": ["D50", "D50.0", "D50.1", "D50.2", "D50.3", "D50.4", "D50.5", "D50.6", "D50.7", "D50.8", "D50.9"],
+
+            # === MỚI 2026-07-10 — abbreviations VN (R27.6) ===
+            # VN doctors dùng viết tắt rất phổ biến. Map trước lookup chain.
+            "tha": ["I10"],  # Tăng huyết áp
+            "nmct": ["I21", "I21.0", "I21.1", "I21.2", "I21.3", "I21.4", "I21.9"],  # Nhồi máu cơ tim
+            "đtđ": ["E11", "E11.0", "E11.1", "E11.2", "E11.3", "E11.4", "E11.5", "E11.6", "E11.7", "E11.8", "E11.9"],  # Đái tháo đường
+            "đtđ type 2": ["E11"],  # ĐTĐ type 2
+            "đtđ type 1": ["E10"],  # ĐTĐ type 1
+            "tbmmn": ["I63", "I64"],  # Tai biến mạch máu não
+            "tbmmnn": ["I63", "I64"],  # Tai biến mạch máu não
+            "copd": ["J44", "J44.0", "J44.1", "J44.8", "J44.9"],  # Bệnh phổi tắc nghẽn mạn
+            "osa": ["G47.3"],  # Ngưng thở khi ngủ
+            "hc": ["R59"],  # Hạch (general lymphadenopathy)
+
+            # === MỚI 2026-07-10 — synonyms cho u (R27.6) ===
+            # ICD desc_vi dùng "U ác tính" nhưng LLM hay ghi "u ác" / "khối u"
+            "u ác tính": ["C", "C00", "C80"],  # placeholder - cần organ context
+            "u ác": ["C", "C00", "C80"],  # placeholder - cần organ context
+            "u lành": ["D", "D00", "D48"],  # placeholder - cần organ context
+            "u lành tính": ["D", "D00", "D48"],  # placeholder
+            "khối u": ["D48"],  # unspecified neoplasm (placeholder)
+            "neoplasm": ["D48"],
+
+            # === MỚI 2026-07-10 — Organ-based mappings (R27.6) ===
+            # Pattern: "u ác/khối u/u ác tính [organ]" → Cxx (malignant) hoặc Dxx (benign)
+            # Direct dict cho common organs để match exact LLM text
+            "u ác tính trực tràng": ["C20"],
+            "u ác trực tràng": ["C20"],
+            "ung thư trực tràng": ["C20"],
+            "khối u trực tràng": ["C20", "D12"],  # ambiguous - default malignant first
+            "u lành trực tràng": ["D12"],
+            "u lành tính trực tràng": ["D12"],
+
+            "u ác tính đại tràng": ["C18", "C18.0", "C18.1", "C18.2", "C18.3", "C18.4", "C18.5", "C18.6", "C18.7", "C18.8", "C18.9"],
+            "u ác đại tràng": ["C18"],
+            "ung thư đại tràng": ["C18"],
+            "khối u đại tràng": ["C18", "D12"],
+
+            "u ác tính dạ dày": ["C16", "C16.0", "C16.1", "C16.2", "C16.3", "C16.4", "C16.5", "C16.6", "C16.8", "C16.9"],
+            "u ác dạ dày": ["C16"],
+            "ung thư dạ dày": ["C16"],
+            "khối u dạ dày": ["C16", "D13.1"],
+
+            "u ác tính gan": ["C22", "C22.0", "C22.1", "C22.2", "C22.3", "C22.4", "C22.7", "C22.8", "C22.9"],
+            "u ác gan": ["C22"],
+            "ung thư gan": ["C22"],
+            "khối u gan": ["C22", "D13.4"],
+
+            "u ác tính phổi": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
+            "u ác phổi": ["C34"],
+            "khối u phổi": ["C34", "D14.3"],
+
+            "u ác tính vú": ["C50", "C50.0", "C50.1", "C50.2", "C50.3", "C50.4", "C50.5", "C50.6", "C50.8", "C50.9"],
+            "u ác vú": ["C50"],
+            "khối u vú": ["C50", "D24"],
+
+            "u ác tính não": ["C71", "C71.0", "C71.1", "C71.2", "C71.3", "C71.4", "C71.5", "C71.6", "C71.7", "C71.8", "C71.9"],
+            "u não ác tính": ["C71"],
+            "khối u não": ["C71", "D33"],
+
+            "u ác tính buồng trứng": ["C56"],
+            "u ác buồng trứng": ["C56"],
+            "khối u buồng trứng": ["C56", "D27"],
+
+            "u ác tính cổ tử cung": ["C53", "C53.0", "C53.1", "C53.8", "C53.9"],
+            "u ác cổ tử cung": ["C53"],
+            "khối u cổ tử cung": ["C53", "D26.0"],
+
+            "u ác tính tuyến giáp": ["C73"],
+            "khối u tuyến giáp": ["C73", "D34"],
+
+            "u ác tính tuyến tiền liệt": ["C61"],
+            "khối u tuyến tiền liệt": ["C61", "D29.1"],
+
+            "u ác tính bàng quang": ["C67", "C67.0", "C67.1", "C67.2", "C67.3", "C67.4", "C67.5", "C67.6", "C67.7", "C67.8", "C67.9"],
+            "khối u bàng quang": ["C67", "D30.3"],
+
+            "u ác tính thận": ["C64"],
+            "khối u thận": ["C64", "D30.0"],
+
+            "u ác tính tụy": ["C25", "C25.0", "C25.1", "C25.2", "C25.3", "C25.4", "C25.7", "C25.8", "C25.9"],
+            "khối u tụy": ["C25", "D13.6"],
+
+            "u ác tính thực quản": ["C15", "C15.0", "C15.1", "C15.2", "C15.3", "C15.4", "C15.5", "C15.8", "C15.9"],
+            "khối u thực quản": ["C15", "D13.0"],
+
+            # === MỚI 2026-07-10 — TIM MẠCH (cardiology) ===
+            "tách thành động mạch chủ": ["I71.0"],
+            "phình động mạch chủ": ["I71"],
+            "phình động mạch chủ bụng": ["I71.4"],
+            "phình động mạch chủ ngực": ["I71.2"],
+            "rò động tĩnh mạch": ["I77.0"],
+            "rò động - tĩnh mạch": ["I77.0"],
+            "rò động-tĩnh mạch": ["I77.0"],
+            "rò động tĩnh mạch đùi": ["I77.0"],
+            "rò động tĩnh mạch chủ": ["I77.0"],
+            "hẹp động mạch": ["I77.1"],
+            "tắc động mạch": ["I74"],
+            "viêm tắc động mạch": ["I74"],
+            "viêm nội tâm mạc": ["I33", "I33.0", "I33.9"],
+            "viêm nội tâm mạc nhiễm khuẩn": ["I33.0"],
+            "viêm cơ tim": ["I40", "I40.0", "I40.1", "I40.8", "I40.9"],
+            "bệnh cơ tim": ["I42"],
+            "bệnh cơ tim phì đại": ["I42.1"],
+            "block nhĩ thất": ["I44", "I44.0", "I44.1", "I44.2", "I44.3", "I44.4", "I44.5", "I44.6", "I44.7"],
+            "block tim": ["I44"],
+            "st chênh lên": ["I22"],  # subsequent STEMI
+            "st chênh xuống": ["I24.8"],
+
+            # === MỚI 2026-07-10 — TIÊU HÓA, GAN, MẬT ===
+            "viêm gan virus": ["B15", "B16", "B17", "B18", "B19"],
+            "viêm gan b": ["B16", "B18.1"],
+            "viêm gan c": ["B17.1", "B18.2"],
+            "viêm gan mạn": ["K73"],
+            "viêm gan cấp": ["K72.0"],
+            "gan nhiễm mỡ": ["K76.0"],
+            "sỏi mật": ["K80"],
+            "sỏi túi mật": ["K80.2"],
+            "viêm túi mật": ["K81"],
+            "viêm tụy": ["K85"],
+            "viêm tụy cấp": ["K85"],
+            "viêm tụy mạn": ["K86.1"],
+            "loét dạ dày": ["K25"],
+            "loét tá tràng": ["K26"],
+            "trào ngược dạ dày thực quản": ["K21"],
+            "gerd": ["K21", "K21.9"],
+            "hội chứng ruột kích thích": ["K58"],
+            "ibs": ["K58"],
+            "viêm đại tràng": ["K51", "K52"],
+            "viêm ruột thừa": ["K35"],
+            "thoát vị bẹn": ["K40"],
+            "thoát vị": ["K40", "K41", "K42", "K43", "K44", "K45", "K46"],
+
+            # === MỚI 2026-07-10 — HÔ HẤP ===
+            "viêm phế quản": ["J20", "J21"],
+            "viêm phế quản cấp": ["J20"],
+            "viêm phế quản mạn": ["J42"],
+            "viêm tiểu phế quản": ["J21"],
+            "hen phế quản": ["J45", "J45.0", "J45.1", "J45.8", "J45.9"],
+            "hen suyễn": ["J45"],
+            "tràn khí màng phổi": ["J93"],
+            "tràn dịch màng phổi": ["J90"],
+            "xẹp phổi": ["J98.1"],
+            "lao phổi": ["A15", "A15.0"],
+
+            # === MỚI 2026-07-10 — THẦN KINH, TÂM THẦN ===
+            "động kinh": ["G40", "G40.0", "G40.1", "G40.2", "G40.3", "G40.4", "G40.5", "G40.6", "G40.7", "G40.8", "G40.9"],
+            "parkinson": ["G20", "G21"],
+            "bệnh parkinson": ["G20"],
+            "alzheimer": ["G30", "G30.0", "G30.1", "G30.8", "G30.9"],
+            "sa sút trí tuệ": ["F03"],
+            "trầm cảm": ["F32", "F32.0", "F32.1", "F32.2", "F32.3", "F32.8", "F32.9"],
+            "rối loạn lo âu": ["F41", "F41.0", "F41.1", "F41.2", "F41.3", "F41.8", "F41.9"],
+            "tâm thần phân liệt": ["F20"],
+            "đau nửa đầu": ["G43", "G43.0", "G43.1", "G43.2", "G43.3", "G43.8", "G43.9"],
+            "migraine": ["G43"],
+
+            # === MỚI 2026-07-10 — THẬN, TIẾT NIỆU ===
+            "sỏi thận": ["N20"],
+            "sỏi niệu quản": ["N20.1"],
+            "sỏi bàng quang": ["N21.0"],
+            "viêm đường tiết niệu": ["N39.0"],
+            "viêm bàng quang": ["N30"],
+            "viêm thận - bể thận": ["N10", "N11", "N12"],
+            "viêm bể thận": ["N12"],
+            "viêm cầu thận": ["N00", "N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08"],
+            "hội chứng thận hư": ["N04"],
+            "suy thận cấp": ["N17"],
+            "suy thận mạn": ["N18"],
+            "suy thận giai đoạn cuối": ["N18.6"],
+
+            # === MỚI 2026-07-10 — CƠ XƯƠNG KHỚP ===
+            "thoái hóa khớp": ["M15", "M16", "M17", "M18", "M19"],
+            "thoái hóa khớp gối": ["M17"],
+            "thoái hóa khớp háng": ["M16"],
+            "viêm khớp dạng thấp": ["M05", "M06"],
+            "gout": ["M10", "M10.0", "M10.1", "M10.2", "M10.3", "M10.4", "M10.9"],
+            "gút": ["M10"],
+            "loãng xương": ["M80", "M81", "M82"],
+            "viêm cơ": ["M60"],
+            "đau cơ xơ hóa": ["M79.7"],
+
+            # === MỚI 2026-07-10 — DA, MÔ LIÊN KẾT ===
+            "vẩy nến": ["L40", "L40.0", "L40.1", "L40.2", "L40.3", "L40.4", "L40.5", "L40.8", "L40.9"],
+            "eczema": ["L20", "L30"],
+            "viêm da cơ địa": ["L20"],
+            "viêm da tiếp xúc": ["L23", "L24", "L25"],
+            "mày đay": ["L50"],
+            "zona": ["B02"],
+            "herpes": ["B00"],
+
+            # === MỚI 2026-07-10 — NỘI TIẾT ===
+            "basedow": ["E05.0"],
+            "cường giáp": ["E05"],
+            "suy giáp": ["E03", "E03.0", "E03.1", "E03.2", "E03.3", "E03.4", "E03.5", "E03.8", "E03.9"],
+            "suy tuyến yên": ["E23.0"],
+            "rối loạn lipid máu": ["E78"],
+            "tăng cholesterol máu": ["E78.0"],
+            "tăng triglyceride máu": ["E78.1"],
+            "béo phì": ["E66"],
+            "suy dinh dưỡng": ["E40", "E41", "E42", "E43", "E44", "E45", "E46"],
+            "loãng xương": ["M80", "M81"],
+
+            # === MỚI 2026-07-10 — MÁU ===
+            "thiếu máu thiếu sắt": ["D50"],
+            "thiếu máu mạn": ["D50", "D63"],
+            "thiếu máu cấp": ["D62"],
+            "leukemia": ["C91", "C92", "C93", "C94", "C95"],
+            "lymphoma": ["C81", "C82", "C83", "C84", "C85", "C86", "C88", "C96"],
+            "xuất huyết giảm tiểu cầu": ["D69.3"],
+            "đông máu nội quản lý tán": ["D65"],
+            "dic": ["D65"],
+
+            # === MỚI 2026-07-10 — TAI MŨI HỌNG, MẮT ===
+            "viêm xoang": ["J32"],
+            "viêm tai giữa": ["H66"],
+            "viêm amidan": ["J03"],
+            "đục thủy tinh thể": ["H25", "H26"],
+            "glocom": ["H40", "H40.0", "H40.1", "H40.2", "H40.3", "H40.4", "H40.5", "H40.6", "H40.8", "H40.9"],
+            "tăng nhãn áp": ["H40"],
+
+            # === MỚI 2026-07-10 — MẠCH MÁU ===
+            "viêm mạch": ["I77.6", "I80"],
+            "viêm tĩnh mạch": ["I80"],
+            "viêm tĩnh mạch chi": ["I80.0"],
+            "suy giãn tĩnh mạch": ["I83"],
+            "giãn tĩnh mạch": ["I83"],
         }
 
     def _chapter_codes_lookup(self, text: str) -> list[str]:
