@@ -1306,6 +1306,35 @@ def _validate_rescan_output(
 
 
 
+def _find_all_occurrences(text_lower: str, phrase: str) -> list:
+    """Tìm tất cả vị trí xuất hiện NON-OVERLAPPING của phrase trong text_lower.
+
+    Args:
+        text_lower: text đã lowercase.
+        phrase: phrase cần tìm (lowercase).
+
+    Returns:
+        list of (start, end) tuples (end exclusive).
+    """
+    positions = []
+    phrase_lower = phrase.lower()
+    plen = len(phrase_lower)
+    text_len = len(text_lower)
+
+    if plen == 0 or text_len < plen:
+        return positions
+
+    start = 0
+    while start <= text_len - plen:
+        idx = text_lower.find(phrase_lower, start)
+        if idx < 0:
+            break
+        positions.append((idx, idx + plen))
+        start = idx + plen  # Non-overlapping: skip past this match
+
+    return positions
+
+
 def _preprocess_highlight_duplicates(input_text: str, top_n: int = 30) -> str:
     """Đánh dấu duplicate trong input_text để LLM không miss (R20.2 mới 2026-07-10).
 
@@ -1314,9 +1343,11 @@ def _preprocess_highlight_duplicates(input_text: str, top_n: int = 30) -> str:
     sẽ giúp LLM extract ĐỦ ngay từ đầu.
 
     Cách hoạt động:
-    1. Tìm các phrase VN phổ biến (1-3 từ) xuất hiện >= 2 lần trong input
-    2. Thêm marker `[xN]` sau mỗi occurrence (N = tổng số lần xuất hiện)
-    3. LLM thấy marker → tự extract N entities riêng
+    1. Tìm các phrase VN phổ biến (2-3 từ) xuất hiện >= 2 lần trong input
+    2. Tìm TẤT CẢ occurrences (non-overlapping) trên ORIGINAL text
+    3. Loại bỏ spans overlap nhau
+    4. Thêm marker `[xN]` sau mỗi occurrence (N = tổng số lần xuất hiện)
+    5. LLM thấy marker → tự extract N entities riêng
 
     Args:
         input_text: raw input text.
@@ -1330,18 +1361,17 @@ def _preprocess_highlight_duplicates(input_text: str, top_n: int = 30) -> str:
 
     import re as _re
 
-    # Tìm phrases 1-3 từ bằng substring search
+    # Tìm phrases 2-3 từ bằng substring search
     # Tránh common stop words
     stop_words = {"bệnh", "nhân", "viện", "tình", "trạng", "trước", "trong",
                   "ngoài", "bằng", "theo", "sang", "qua", "cách", "thuốc", "thể",
                   "cũng", "đang", "khác", "nếu", "khi", "hay", "mới", "sau",
                   "trên", "dưới", "tại", "từ"}
 
-    # Tìm common medical phrases 2-3 từ bằng cách quét tất cả combinations
-    freq = {}
     # Tokenize bằng regex (giữ cả từ)
     words = _re.findall(r"[\wÀ-ỹ]+", input_text)
 
+    freq = {}
     # 2 từ phrases
     for i in range(len(words) - 1):
         w1, w2 = words[i].lower(), words[i+1].lower()
@@ -1357,42 +1387,45 @@ def _preprocess_highlight_duplicates(input_text: str, top_n: int = 30) -> str:
             freq[phrase] = freq.get(phrase, 0) + 1
 
     # Lấy top N phrase có freq >= 2
+    # Sort deterministic: count desc, phrase asc (tie-breaker để ổn định)
     top_texts = sorted(
         [(t, c) for t, c in freq.items() if c >= 2],
-        key=lambda x: -x[1]
+        key=lambda x: (-x[1], x[0])
     )[:top_n]
 
     if not top_texts:
         return input_text
 
-    # Mark: thay thế occurrence thứ N bằng "phrase[xN]"
-    result = input_text
+    # Bước 2: Tìm TẤT CẢ occurrences trong ORIGINAL text (non-overlapping)
+    # Build danh sách spans (start, end, count). KHÔNG modify input_text ở đây.
+    text_lower = input_text.lower()
+    all_spans = []  # (start, end, count)
     for phrase, count in top_texts:
-        # Tìm tất cả occurrences (case-insensitive)
-        positions = []
-        start = 0
-        phrase_lower = phrase.lower()
-        while True:
-            idx = result.lower().find(phrase_lower, start)
-            if idx < 0:
-                break
-            positions.append((idx, idx + len(phrase)))
-            start = idx + 1
-
+        positions = _find_all_occurrences(text_lower, phrase)
         if len(positions) >= 2:
-            # Mark từng occurrence (giữ occurrence đầu nguyên vẹn)
-            new_result = []
-            last_end = 0
-            for i, (s, e) in enumerate(positions):
-                new_result.append(result[last_end:e])
-                # Mark từ occurrence thứ 2 trở đi
-                if i > 0:
-                    new_result.append(f"[x{len(positions)}]")
-                last_end = e
-            new_result.append(result[last_end:])
-            result = "".join(new_result)
+            for s, e in positions:
+                all_spans.append((s, e, len(positions)))
 
-    return result
+    if not all_spans:
+        return input_text
+
+    # Sort spans by start ASC, length DESC (ưu tiên match dài hơn khi overlap)
+    all_spans.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+
+    # Bước 3: Build kết quả, skip overlapping spans (giữ span đầu tiên)
+    result_parts = []
+    cursor = 0
+    for s, e, count in all_spans:
+        if s < cursor:
+            # Overlapping với span trước → skip (đã được mark bởi span dài hơn/đầu hơn)
+            continue
+        result_parts.append(input_text[cursor:s])
+        result_parts.append(input_text[s:e])
+        result_parts.append(f"[x{count}]")
+        cursor = e
+    result_parts.append(input_text[cursor:])
+
+    return "".join(result_parts)
 
 
 
