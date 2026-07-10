@@ -682,17 +682,26 @@ def format_few_shot_messages(examples: list[dict]) -> list[dict[str, str]]:
 def build_user_prompt(input_text: str) -> str:
     """Build user prompt với input text.
 
-    Format đơn giản: header yêu cầu NER + input text.
+    Format đơn giản: header yêu cầu NER + alert (nếu có) + input text.
 
     Args:
-        input_text: input đã được preprocess + highlight duplicates.
+        input_text: input clinical note nguyên bản (chưa chèn marker).
 
     Returns:
         prompt string sẵn sàng gửi làm user message.
     """
+    try:
+        from src.postprocess import _get_duplicate_alert
+        alert = _get_duplicate_alert(input_text)
+    except Exception:
+        alert = ""
+
+    alert_part = f"{alert}\n\n" if alert else ""
+
     # Header ngắn gọn, chi tiết rule đã có trong SYSTEM_PROMPT
     return (
         "Hãy trích xuất entities từ hồ sơ bệnh án tiếng Việt sau đây. "
         "Output CHÍNH XÁC JSON array (không kèm giải thích, không kèm ```).\n\n"
+        f"{alert_part}"
         f"INPUT:\n{input_text}"
     )
