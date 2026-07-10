@@ -1021,8 +1021,10 @@ def _filter_lifestyle_entities(entities: list[dict]) -> list[dict]:
             )
             continue
 
-        # 2. Lọc chuỗi sinh hiệu gộp / rác lâm sàng dạng VS98.3... (R27.7 mở rộng cho cả KQ_XN)
-        if etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG", "KẾT_QUẢ_XÉT_NGHIỆM") and _VITAL_SIGNS_DUMP_RE.match(text):
+        # 2. Lọc chuỗi sinh hiệu gộp / rác lâm sàng dạng VS98.3... (R27.7 mở rộng)
+        # NOTE Fix #8: KHÔNG filter cho KẾT_QUẢ_XÉT_NGHIỆM vì "VS98.3 12987 56 18 99RA"
+        # là vital signs THỰC TẾ (compact format), không phải noise.
+        if etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG") and _VITAL_SIGNS_DUMP_RE.match(text):
             logger.debug(
                 "[%d] Drop vital signs dump entity '%s' (%s)",
                 _seen_count, text, etype,
@@ -1110,8 +1112,9 @@ _TEST_VERB_PREFIX_RE = re.compile(
 )
 
 # Patterns to DROP ENTIRELY (R27.7 - non-entity noise)
+# Note: "VS98.3 12987 56 18 99RA" là vital signs THỰC TẾ → KHÔNG drop (Fix #8 R27.7)
+# Chỉ drop khi text thuần túy narrative/lifestyle, không phải clinical data
 _DROP_NOISE_PATTERNS = [
-    re.compile(r"^vs\d+\.\d+.*$", re.IGNORECASE),
     re.compile(r"^trung\s+tâm$", re.IGNORECASE),
     re.compile(r"^không\s+liên\s+quan.*$", re.IGNORECASE),
     re.compile(r"^không\s+ghi\s+nhận\s+triệu\s+chứng.*$", re.IGNORECASE),
@@ -1119,6 +1122,12 @@ _DROP_NOISE_PATTERNS = [
     re.compile(r"^khi\s+đến\s+tầng$", re.IGNORECASE),
     re.compile(r"^khi\s+đến\s+khoa.*$", re.IGNORECASE),
     re.compile(r"^vào\s+lúc.*$", re.IGNORECASE),
+    # Fix #7: noise narrative về quá trình
+    re.compile(r"^khi\s+(?:được\s+)?chuyển\s+(?:vào|tới)\s+\w+", re.IGNORECASE),
+    re.compile(r"^khi\s+(?:đến|nhập|vào)\s+(?:khoa|viện)", re.IGNORECASE),
+    re.compile(r"^trong\s+quá\s+trình\s+\w+", re.IGNORECASE),
+    re.compile(r"^sau\s+khi\s+(?:được\s+)?\w+", re.IGNORECASE),
+    re.compile(r"^trước\s+khi\s+(?:được\s+)?\w+", re.IGNORECASE),
 ]
 
 # Pure duration (R28.2) - standalone time expression should not be entity
@@ -1437,7 +1446,7 @@ def _split_long_imaging_result(
         finding_pos = _find_span(input_text, finding, start=search_start)
         if finding_pos is None:
             finding_pos = (search_start, search_start + len(finding))
-        finding_type = _retype_entity(finding, "TRIỆU_CHỨNG")
+        finding_type = _retype_entity(finding, "KẾT_QUẢ_XÉT_NGHIỆM")
         result.append({
             "text": finding,
             "type": finding_type,

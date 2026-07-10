@@ -117,19 +117,19 @@ def test_3_split_phan_tich_nuoc_tieu():
 
 
 def test_4_vital_signs_dump_drop_kq_xn():
-    """Vital signs dump regex filter cũng áp dụng cho KQ_XN (R27.7 mở rộng)."""
+    """VS dump filter KHÔNG áp dụng cho KQ_XN sau Fix #8 (VS98.3 là vital signs thực tế)."""
     from src.postprocess import _filter_lifestyle_entities
 
-    # Tạo entity giả với type=KQ_XN
+    # Tạo entity giả với type=KQ_XN (sẽ KHÔNG bị drop sau Fix #8)
     entities = [
         {"text": "VS98.3 12987 56 18 99RA", "type": "KẾT_QUẢ_XÉT_NGHIỆM",
          "position": [100, 123], "assertions": [], "candidates": []}
     ]
     result = _filter_lifestyle_entities(entities)
-    if len(result) == 0:
-        print("✅ PASS test_4_vital_signs_dump_drop_kq_xn: dropped")
+    if len(result) == 1:
+        print("✅ PASS test_4: VS98.3 KHÔNG bị drop (giữ làm KQ_XN)")
         return True
-    print(f"❌ FAIL: should drop, got {len(result)} entities: {result}")
+    print(f"❌ FAIL: len(result)={len(result)}, expected 1")
     return False
 
 
@@ -160,6 +160,27 @@ def test_5_clean_entity_trailing_duration():
     if passed:
         print("✅ PASS test_5_clean_entity_trailing_duration")
     return passed
+
+
+def test_5b_kq_xn_type_after_split():
+    """Fix #5: Finding SAU test name phải có type KẾT_QUẢ_XÉT_NGHIỆM."""
+    from src.postprocess import _split_long_imaging_result
+
+    text = "điện tâm đồ là không ghi nhận gì bất thường"
+    input_text = f"Bệnh nhân nhập viện. {text}"
+    pos = [19, 19 + len(text)]
+
+    result = _split_long_imaging_result(
+        text, "KẾT_QUẢ_XÉT_NGHIỆM", input_text, pos
+    )
+    if result is None or len(result) != 2:
+        print(f"❌ FAIL: result={result}")
+        return False
+    if result[1]["type"] != "KẾT_QUẢ_XÉT_NGHIỆM":
+        print(f"❌ FAIL: entity[1].type={result[1]['type']}, expected KẾT_QUẢ_XÉT_NGHIỆM")
+        return False
+    print(f"✅ Finding type = KẾT_QUẢ_XÉT_NGHIỆM (Fix #5 work)")
+    return True
 
 
 def test_6_icd_short_circuit():
@@ -201,10 +222,52 @@ if __name__ == "__main__":
     results.append(test_3_split_phan_tich_nuoc_tieu())
     results.append(test_4_vital_signs_dump_drop_kq_xn())
     results.append(test_5_clean_entity_trailing_duration())
+    results.append(test_5b_kq_xn_type_after_split())
     results.append(test_6_icd_short_circuit())
+    results.append(test_7_drop_noise_khi_chuyen())
+    results.append(test_8_vs98_keep_as_kq_xn())
 
     print("=" * 60)
     passed = sum(results)
     total = len(results)
     print(f"RESULTS: {passed}/{total} tests passed")
     print("=" * 60)
+
+
+def test_7_drop_noise_khi_chuyen():
+    """Fix #7: Noise 'khi được chuyển vào khoa...' phải bị drop."""
+    from src.postprocess import _filter_lifestyle_entities
+
+    noise_texts = [
+        "khi được chuyển vào khoa điều trị",
+        "khi nhập viện cấp cứu",
+        "trong quá trình điều trị",
+        "sau khi dùng thuốc",
+        "trước khi phẫu thuật",
+    ]
+    for text in noise_texts:
+        entities = [{"text": text, "type": "TRIỆU_CHỨNG",
+                     "position": [0, len(text)], "assertions": [], "candidates": []}]
+        result = _filter_lifestyle_entities(entities)
+        if len(result) == 0:
+            print(f"✅ Drop noise: '{text}'")
+        else:
+            print(f"❌ FAIL: '{text}' vẫn còn")
+            return False
+    print("✅ PASS test_7_drop_noise_khi_chuyen")
+    return True
+
+
+def test_8_vs98_keep_as_kq_xn():
+    """Fix #8: 'VS98.3 12987 56 18 99RA' PHẢI được GIỮ làm KQ_XN (vital signs thực tế)."""
+    from src.postprocess import _filter_lifestyle_entities
+
+    vs_text = "VS98.3 12987 56 18 99RA"
+    entities = [{"text": vs_text, "type": "KẾT_QUẢ_XÉT_NGHIỆM",
+                 "position": [0, len(vs_text)], "assertions": [], "candidates": []}]
+    result = _filter_lifestyle_entities(entities)
+    if len(result) == 1:
+        print(f"✅ PASS test_8_vs98_keep_as_kq_xn: 'VS98.3...' được giữ làm KQ_XN")
+        return True
+    print(f"❌ FAIL: 'VS98.3 12987...' bị drop, len(result)={len(result)}")
+    return False

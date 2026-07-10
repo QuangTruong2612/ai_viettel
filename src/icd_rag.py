@@ -507,6 +507,11 @@ class ICDRetriever:
         else:
             self.local_search = local_search  # type: ignore[assignment] -- caller opted out
 
+        # Fix #6 (R27.7): Init `_icd_vn_to_codes` dict NGAY trong __init__ để L0 short-circuit
+        # trong `lookup()` work ngay từ lần đầu (trước đó dict chỉ được init khi method
+        # `_exact_match_vn_substring()` được gọi, gây miss known ICD codes).
+        self._exact_match_vn_substring("")  # Dummy call để populate dict
+
     # ------------------------------------------------------------------ #
 
     def _load_index(self, path: Optional[Path]) -> ICDIndex:
