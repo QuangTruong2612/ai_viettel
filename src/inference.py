@@ -41,6 +41,7 @@ from src.icd_rag import ICDRetriever, ICD10VectorSearch, Translator
 from src.postprocess import (
     assemble_record, validate_output, write_output,
     preprocess_input_for_llm,
+    _preprocess_highlight_duplicates,
 )
 from src.prompts import (
     SYSTEM_PROMPT,
@@ -295,7 +296,17 @@ def process_record(
             100 * (1 - len(cleaned_input) / max(1, user_prompt_len)),
         )
 
-    user_prompt = build_user_prompt(cleaned_input)
+    # R20.2: Highlight duplicate (đếm + mark) trước khi gửi LLM
+    # LLM 7B không tự đếm được, cần pre-process để không miss duplicate
+    highlighted_input = _preprocess_highlight_duplicates(cleaned_input)
+    if len(highlighted_input) != len(cleaned_input):
+        logger.info(
+            "[%d] Input highlighted duplicate: %d → %d chars (+%d)",
+            rec_id, len(cleaned_input), len(highlighted_input),
+            len(highlighted_input) - len(cleaned_input),
+        )
+
+    user_prompt = build_user_prompt(highlighted_input)
     # Log token budget TRƯỚC khi gọi LLM để debug nếu overflow
     _log_token_budget(rec_id, llm, user_prompt, adaptive_few_shot)
     try:

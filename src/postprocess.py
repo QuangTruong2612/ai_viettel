@@ -1304,6 +1304,98 @@ def _validate_rescan_output(
 
 
 
+
+
+def _preprocess_highlight_duplicates(input_text: str, top_n: int = 30) -> str:
+    """Đánh dấu duplicate trong input_text để LLM không miss (R20.2 mới 2026-07-10).
+
+    Vấn đề: LLM 7B không tự đếm được số lần xuất hiện của mỗi text trong input.
+    Post-process `_expand_duplicates` giúp được phần nào, nhưng pre-process + mark
+    sẽ giúp LLM extract ĐỦ ngay từ đầu.
+
+    Cách hoạt động:
+    1. Tìm các phrase VN phổ biến (1-3 từ) xuất hiện >= 2 lần trong input
+    2. Thêm marker `[xN]` sau mỗi occurrence (N = tổng số lần xuất hiện)
+    3. LLM thấy marker → tự extract N entities riêng
+
+    Args:
+        input_text: raw input text.
+        top_n: số lượng phrase tối đa để mark (mặc định 30).
+
+    Returns:
+        input_text đã được mark (phrase có `[xN]` ở cuối mỗi occurrence).
+    """
+    if not input_text or len(input_text) < 100:
+        return input_text
+
+    import re as _re
+
+    # Tìm phrases 1-3 từ bằng substring search
+    # Tránh common stop words
+    stop_words = {"bệnh", "nhân", "viện", "tình", "trạng", "trước", "trong",
+                  "ngoài", "bằng", "theo", "sang", "qua", "cách", "thuốc", "thể",
+                  "cũng", "đang", "khác", "nếu", "khi", "hay", "mới", "sau",
+                  "trên", "dưới", "tại", "từ"}
+
+    # Tìm common medical phrases 2-3 từ bằng cách quét tất cả combinations
+    freq = {}
+    # Tokenize bằng regex (giữ cả từ)
+    words = _re.findall(r"[\wÀ-ỹ]+", input_text)
+
+    # 2 từ phrases
+    for i in range(len(words) - 1):
+        w1, w2 = words[i].lower(), words[i+1].lower()
+        if len(w1) >= 4 and len(w2) >= 4 and w1 not in stop_words and w2 not in stop_words:
+            phrase = f"{w1} {w2}"
+            freq[phrase] = freq.get(phrase, 0) + 1
+
+    # 3 từ phrases
+    for i in range(len(words) - 2):
+        w1, w2, w3 = words[i].lower(), words[i+1].lower(), words[i+2].lower()
+        if len(w1) >= 4 and w2 not in stop_words and w3 not in stop_words:
+            phrase = f"{w1} {w2} {w3}"
+            freq[phrase] = freq.get(phrase, 0) + 1
+
+    # Lấy top N phrase có freq >= 2
+    top_texts = sorted(
+        [(t, c) for t, c in freq.items() if c >= 2],
+        key=lambda x: -x[1]
+    )[:top_n]
+
+    if not top_texts:
+        return input_text
+
+    # Mark: thay thế occurrence thứ N bằng "phrase[xN]"
+    result = input_text
+    for phrase, count in top_texts:
+        # Tìm tất cả occurrences (case-insensitive)
+        positions = []
+        start = 0
+        phrase_lower = phrase.lower()
+        while True:
+            idx = result.lower().find(phrase_lower, start)
+            if idx < 0:
+                break
+            positions.append((idx, idx + len(phrase)))
+            start = idx + 1
+
+        if len(positions) >= 2:
+            # Mark từng occurrence (giữ occurrence đầu nguyên vẹn)
+            new_result = []
+            last_end = 0
+            for i, (s, e) in enumerate(positions):
+                new_result.append(result[last_end:e])
+                # Mark từ occurrence thứ 2 trở đi
+                if i > 0:
+                    new_result.append(f"[x{len(positions)}]")
+                last_end = e
+            new_result.append(result[last_end:])
+            result = "".join(new_result)
+
+    return result
+
+
+
 def _expand_duplicates(entities, input_text):
     """Mở rộng duplicate entities dựa trên scan input thực tế (R20.1 mới 2026-07-09).
 

@@ -29,7 +29,7 @@ class LLMConfig:
     base_url: str = "http://127.0.0.1:11434/v1"
     api_key: str = "lm-studio"  # LM Studio chấp nhận bất kỳ; Ollama ignore
     model: str = "qwen2.5-7b-instruct"  # Ollama naming với colon (LM Studio: "qwen2.5-7b-instruct")
-    temperature: float = 0.0
+    temperature: float = 0.1  # 0.1 thay vì 0.0 để LLM diverse hơn (extract duplicate tốt hơn)
     top_p: float = 1.0
 
     # max_tokens=6144 đủ chứa JSON ~40 entities + chain-of-thought reasoning dài.

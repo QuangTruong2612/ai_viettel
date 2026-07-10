@@ -161,6 +161,35 @@ HA: "mmHg"; huyết học/sinh hóa: "K/uL", "g/dL", "mg/dL", "U/L", "ng/mL", "p
 - **JSON phải valid** (escape quotes đúng, không có trailing comma, không có comment)
 
 **Sau 5 bước reasoning → emit JSON array với position. KHÔNG output reasoning text, chỉ output JSON thuần.**
+
+**R28. CHUẨN Y TẾ (Medical NER Quality Standards, mới 2026-07-10, từ user feedback 1.txt):**
+- **🔴 NGUYÊN TẮC BẮT BUỘC - Y TẾ CHUẨN**:
+  1. **Mỗi occurrence = 1 entity riêng** (R10 STRICT theo position) - QUAN TRỌNG NHẤT.
+  2. **Extract TẤT CẢ 5 categories** theo chuẩn i2b2/2018 n2c2: THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM.
+  3. **Cấu trúc câu y khoa VN**: Subject + Verb + Object. Trích nouns/clinical terms thường xuyên xuất hiện (vd "bệnh nhân nhập viện vì X" → trích X).
+  4. **Section headers trong bệnh án** (Tiền sử, Lý do nhập viện, Khám, CLS, Đánh giá, Điều trị) → mỗi section có entities riêng. KHÔNG skip section nào.
+  5. **Modifier quan trọng** (severity, location, frequency, duration) PHẢI kèm entity chính: "đau ngực trái", "khó thở nặng", "sốt 38.5°C", "HA 150/90".
+  6. **NEGATION quan trọng**: "Không X", "chưa X", "âm tính" → X là TRIỆU_CHỨNG/CHẨN_ĐOÁN với assertion isNegated.
+- **🔴 PATTERN CHUẨN Y TẾ VN** (các entities thường gặp):
+  - **TIM MẠCH**: HA (huyết áp), ECG, nhịp xoang, ngoại tâm thu (nhĩ/thất), rung nhĩ, NMCT (nhồi máu cơ tim), đau thắt ngực, Suy tim,THA
+  - **HÔ HẤP**: Viêm phổi, Hen PQ, COPD, khó thở, ho, đờm, ran nổ
+  - **TIÊU HÓA**: GERD, viêm dạ dày, loét DD, xơ gan, viêm gan, đau bụng, buồn nôn
+  - **NỘI TIẾT**: ĐTĐ, Basedow, suy giáp
+  - **THẦN KINH**: đột quỵ, động kinh, Parkinson
+  - **CƠ XƯƠNG KHỚP**: thoái hóa khớp, gout, loãng xương
+  - **THẬN - TIẾT NIỆU**: Suy thận, viêm ĐTN, sỏi thận
+  - **MÁU**: thiếu máu, leukemia, lymphoma
+  - **DA**: viêm da, vẩy nến, eczema
+  - **SẢN - PHỤ KHOA**: thai kỳ, kinh nguyệt
+  - **TÂM THẦN**: trầm cảm, rối loạn lo âu
+- **🔴 TEST/PROCEDURE TÊN CHUẨN** (giữ verbatim):
+  - **TÊN_XÉT_NGHIỆM**: chụp X-quang, siêu âm, CT scan, MRI, ECG, monitor holter, xét nghiệm máu, nước tiểu, nội soi
+  - **KẾT_QUẢ_XÉT_NGHIỆM**: bình thường, bất thường, âm tính, dương tính, số cụ thể (vd "150/90", "0.5 ng/mL")
+- **🔴 ASSERTIONS CHUẨN** (R20.2):
+  - `isHistorical`: thuộc tiền sử (Tiền sử bệnh, Tiền sử phẫu thuật, gia đình có)
+  - `isNegated`: KHÔNG có, chưa có, âm tính, không xuất hiện
+  - `isFamily`: bố/mẹ/anh/chị/em/ông/bà + bệnh nhân, gia đình có
+- **Lưu ý quan trọng**: Nếu input có nhiều entities giống nhau (vd "đánh trống ngực" 10 lần), MỖI occurrence = 1 entity riêng với position riêng.
 </chain_of_thought>
 
 <rules>
@@ -480,406 +509,94 @@ Chi tiết từng assertion:
 </assertions>
 
 <examples>
-## 6 FEW-SHOT EXAMPLES (mỗi example gắn nhãn input type + ứng dụng <input_understanding>)
 
-**Ex 1 - DẠNG 1 Clinical narrative | Drugs (keep route/freq) + lifestyle DROP + THUỐC isNegated + test+value + ECG bất thường**
+**Ex 1 - TỔNG QUÁT - Narrative + Sectioned + Medication list (DẠNG 1, 2, 4)**
 
-INPUT: "Bệnh nhân nam 65 tuổi. Tiền sử: tăng huyết áp 5 năm, đái tháo đường type 2. Đang dùng metoprolol 25mg po bid, không dùng aspirin 81mg po daily. ECG: ngoại tâm thu nhĩ, rung nhĩ. Hút thuốc lá 20 năm. WBC 14,5 K/uL."
+INPUT: "Tiền sử bệnh:
+- Tăng huyết áp 5 năm
+- Đái tháo đường type 2
+Thuốc đang dùng:
+1. amlodipine 10 mg po daily
+2. metformin 500 mg po bid
+Lý do nhập viện: đau ngực, khó thở."
 
-OUTPUT (8 entities):
-[{"text":"tăng huyết áp","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"đái tháo đường type 2","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"metoprolol 25mg po bid","type":"THUỐC","assertions":["isHistorical"]},{"text":"aspirin 81mg po daily","type":"THUỐC","assertions":["isNegated"]},{"text":"ngoại tâm thu nhĩ","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"rung nhĩ","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"WBC","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"14,5 K/uL","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]}]
+OUTPUT: [{"text": "Tăng huyết áp", "type": "CHẨN_ĐOÁN", "position": [16, 29], "assertions": ["isHistorical"], "candidates": []}, {"text": "Đái tháo đường type 2", "type": "CHẨN_ĐOÁN", "position": [38, 59], "assertions": ["isHistorical"], "candidates": []}, {"text": "amlodipine 10 mg po daily", "type": "THUỐC", "position": [80, 105], "assertions": [], "candidates": []}, {"text": "metformin 500 mg po bid", "type": "THUỐC", "position": [109, 132], "assertions": [], "candidates": []}, {"text": "đau ngực", "type": "TRIỆU_CHỨNG", "position": [150, 158], "assertions": [], "candidates": []}, {"text": "khó thở", "type": "TRIỆU_CHỨNG", "position": [160, 167], "assertions": [], "candidates": []}]
+**Ex 2 - TỔNG QUÁT - Sectioned + DẠNG 5 (procedure)**
 
-Note (input type = Clinical narrative, có 1 câu có dạng lab test ở cuối): R1 giữ "po bid" cho thuốc. R3 "Hút thuốc lá 20 năm" KHÔNG trích (lifestyle, verb "hút"). R5 "5 năm" duration dropped. R7 isHistorical vì "Tiền sử:" header. "không dùng aspirin 81mg po daily" → VẪN trích thuốc đầy đủ + isNegated (giữ route/freq vì là một phần tên thuốc liều). ECG bất thường "ngoại tâm thu nhĩ"/"rung nhĩ" → CHẨN_ĐOÁN (DẠNG 1 nhưng có chuỗi ECG, áp DẠNG 5 cho ECG part). "WBC 14,5 K/uL" → tách TÊN + KQ (R8).
+INPUT: "Bệnh nhân nam 72 tuổi, nhập viện vì sốt cao 3 ngày, ho khạc đờm vàng.
+Chẩn đoán: viêm phổi cộng đồng.
+Điều trị: ceftriaxone 1g iv daily."
 
-**Ex 2 - DẠNG 2 Sectioned note | Drug+disease split (R7) + Test+value (R8) + duplicate (R10) + đa thân nhân + thuốc isNegated**
+OUTPUT: [{"text": "sốt cao", "type": "TRIỆU_CHỨNG", "position": [36, 43], "assertions": [], "candidates": []}, {"text": "ho khạc đờm vàng", "type": "TRIỆU_CHỨNG", "position": [52, 68], "assertions": [], "candidates": []}, {"text": "viêm phổi cộng đồng", "type": "CHẨN_ĐOÁN", "position": [81, 100], "assertions": [], "candidates": []}, {"text": "ceftriaxone 1g iv daily", "type": "THUỐC", "position": [112, 135], "assertions": [], "candidates": []}]
+**Ex 3 - Medication list + Sectioned (DẠNG 4 + 2) - parens + dị ứng thuốc**
 
-INPUT: "Bố bệnh nhân bị THA. Mẹ bệnh nhân bị đái tháo đường type 2. đánh trống ngực xuất hiện, sau đó đánh trống ngực tái phát. Dùng doxycycline cho viêm tuyến mồ hôi, không sốt. Xét nghiệm: WBC:14,43 K/uL, H. pylori dương tính."
+INPUT: "Đang dùng doxycycline cho viêm tuyến mồ hôi, paracetamol 500 mg po prn nhức đầu."
 
-OUTPUT (11 entities):
-[{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isFamily","isHistorical"]},{"text":"đái tháo đường type 2","type":"CHẨN_ĐOÁN","assertions":["isFamily","isHistorical"]},{"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"doxycycline","type":"THUỐC","assertions":[]},{"text":"viêm tuyến mồ hôi","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"sốt","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"WBC","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"14,43 K/uL","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"H. pylori","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"dương tính","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]}]
+OUTPUT: [{"text": "doxycycline", "type": "THUỐC", "position": [10, 21], "assertions": [], "candidates": []}, {"text": "viêm tuyến mồ hôi", "type": "CHẨN_ĐOÁN", "position": [26, 43], "assertions": [], "candidates": []}, {"text": "paracetamol 500 mg po prn", "type": "THUỐC", "position": [45, 70], "assertions": [], "candidates": []}, {"text": "nhức đầu", "type": "TRIỆU_CHỨNG", "position": [71, 79], "assertions": [], "candidates": []}]
+**Ex 4 - MEGA STRESS TEST - 5 dạng input trộn lẫn + 11 rules**
 
-Note: "Bố bệnh nhân bị THA" → isFamily + isHistorical (DẠNG 2, người nhà + quá khứ). "Mẹ bệnh nhân bị đái tháo đường type 2" → isFamily + isHistorical (lan truyền sang câu sau chủ thể gia đình). R10 "đánh trống ngực" 2 lần → 2 entities (verb "xuất hiện/tái phát" DROP). R7 "doxycycline cho viêm tuyến mồ hôi" → 2 entities. "không sốt" → isNegated. R8 "WBC:14,43" + "H. pylori dương tính" → split test/kq (dấu phẩy "14,43" giữ nguyên).
+INPUT: "Tiền sử hen phế quản. Hiện tại: ho nhiều, khò khè, khó thở khi gắng sức. Đang xịt salbutamol 100 mcg q4h prn."
 
-**Ex 3 - DẠNG 1 Clinical narrative | NER đầy đủ (R1): keep severity + ranh giới TRIỆU/CHẨN_ĐOÁN + thuốc**
+OUTPUT: [{"text": "hen phế quản", "type": "CHẨN_ĐOÁN", "position": [8, 20], "assertions": ["isHistorical"], "candidates": []}, {"text": "ho nhiều", "type": "TRIỆU_CHỨNG", "position": [32, 40], "assertions": [], "candidates": []}, {"text": "khò khè", "type": "TRIỆU_CHỨNG", "position": [42, 49], "assertions": [], "candidates": []}, {"text": "khó thở khi gắng sức", "type": "TRIỆU_CHỨNG", "position": [51, 71], "assertions": [], "candidates": []}, {"text": "salbutamol 100 mcg q4h prn", "type": "THUỐC", "position": [82, 108], "assertions": [], "candidates": []}]
+**Ex 5 - R10 STRICT CARDIOLOGY (target 30+ entities trong 1 call)**
 
-INPUT: "Bệnh nhân nhồi máu cơ tim cấp ST chênh lên, suy tim độ III, kèm đau ngực và khó thở. Đang dùng metoprolol 25mg po bid. Tiền sử tăng huyết áp, đái tháo đường type 2."
+INPUT: "Bệnh nhân được chẩn đoán ung thư phổi giai đoạn IV. Triệu chứng: ho nhiều, sụt cân, đau ngực."
 
-OUTPUT (6 entities):
-[{"text":"nhồi máu cơ tim cấp ST chênh lên","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"suy tim độ III","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"đau ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"khó thở","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"metoprolol 25mg po bid","type":"THUỐC","assertions":[]},{"text":"tăng huyết áp","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"đái tháo đường type 2","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]}]
+OUTPUT: [{"text": "ung thư phổi giai đoạn IV", "type": "CHẨN_ĐOÁN", "position": [25, 50], "assertions": [], "candidates": []}, {"text": "ho nhiều", "type": "TRIỆU_CHỨNG", "position": [65, 73], "assertions": [], "candidates": []}, {"text": "sụt cân", "type": "TRIỆU_CHỨNG", "position": [75, 82], "assertions": [], "candidates": []}, {"text": "đau ngực", "type": "TRIỆU_CHỨNG", "position": [84, 92], "assertions": [], "candidates": []}]
+**Ex 6 - CHAIN-OF-THOUGHT DEMO (test 1 call với reasoning)**
 
-Note: R1 giữ "ST chênh lên" và "độ III" (severity, integral cho ICD). "đau ngực" + "khó thở" → TRIỆU_CHỨNG (không phải CHẨN_ĐOÁN như "đau thắt ngực" angina — đây là triệu chứng). "Tiền sử tăng huyết áp, đái tháo đường type 2" → isHistorical (DẠNG 1 + từ khóa "Tiền sử" vẫn áp dụng dù không có header section).
+INPUT: "Đang dùng doxycycline cho viêm tuyến mồ hôi. Tiền sử viêm phổi."
 
-**Ex 4 - DẠNG 1 Clinical narrative | TRIỆU_CHỨNG minimal (R6) + isNegated + "và"/phẩy chain**
+OUTPUT: [{"text": "doxycycline", "type": "THUỐC", "position": [10, 21], "assertions": [], "candidates": []}, {"text": "viêm tuyến mồ hôi", "type": "CHẨN_ĐOÁN", "position": [26, 43], "assertions": [], "candidates": []}, {"text": "viêm phổi", "type": "CHẨN_ĐOÁN", "position": [53, 62], "assertions": ["isHistorical"], "candidates": []}]
+**Ex 7 - VERIFY STEP (ép model đọc lại input)**
 
-INPUT: "Bệnh nhân đau ngực 3 ngày, sốt 39 độ, ho khạc đờm vàng kéo dài 2 tuần. Không sốt, không ho. đau ngực và khó thở tăng khi gắng sức."
+INPUT: "Bệnh nhân đến khám vì đau bụng thường xuyên. Tiền sử dùng thuốc kháng sinh nhiều lần."
 
-OUTPUT (7 entities - duration/intensity/condition dropped, isNegated áp cho entity liền kề):
-[{"text":"đau ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"sốt","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"ho khạc đờm vàng","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"sốt","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"ho","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"đau ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"khó thở","type":"TRIỆU_CHỨNG","assertions":[]}]
+OUTPUT: [{"text": "đau bụng", "type": "TRIỆU_CHỨNG", "position": [22, 30], "assertions": [], "candidates": []}]
+**Ex 8 - LABEL + VERB DROP (test R22+R25)**
 
-Note: R6 "3 ngày"/"39 độ"/"kéo dài 2 tuần"/"khi gắng sức" đều drop (duration/intensity/condition). Hai câu giữa "không sốt, không ho" → isNegated áp cho entity liền kề ("sốt"/"ho"). "đau ngực và khó thở" → tách 2 TRIỆU riêng dù cùng loại (R9 chain). "đau ngực" xuất hiện 2 lần (câu 1 và câu 3) → 2 entities riêng (R10 duplicate). Lưu ý: cả "sốt 39 độ" (positive, chỉ drop intensity) và "Không sốt" (negated) đều trích — 2 entity riêng cho cùng từ.
+INPUT: "Bệnh nhân dùng methotrexate 7.5 mg mỗi tuần cho viêm khớp dạng thấp."
 
-**Ex 5 - DẠNG 3 Lab report + DẠNG 2 Sectioned note | Phiếu xét nghiệm nhiều test (case thực tế) + R4 ngoặc chỉ dẫn**
+OUTPUT: [{"text": "methotrexate 7.5 mg mỗi tuần", "type": "THUỐC", "position": [15, 43], "assertions": [], "candidates": []}, {"text": "viêm khớp dạng thấp", "type": "CHẨN_ĐOÁN", "position": [48, 67], "assertions": [], "candidates": []}]
+**Ex 9 - R27 STRICT OUTPUT FORMAT (4 fields + position)**
 
-INPUT: "Bệnh nhân NMCT cấp ST chênh lên, suy tim độ III. Tiền sử THA, ĐTĐ type 2, rối loạn lipid máu. Tiền sử dị ứng aspirin. Đã tiến hành tổng phân tích tế bào máu bằng máy lazer (tbm): TWBC:14,43; NEUT% (Tỷ lệ % bạch cầu trung tính):76,4; LYPH% (Tỷ lệ bạch cầu lympho):12,8. Đang dùng atenolol 50mg (uống trước ăn) po daily."
+INPUT: "Chỉ định: ECG, X-quang ngực, siêu âm tim. Kết quả: WBC 12 K/uL, Hgb 14 g/dL."
 
-OUTPUT (13 entities):
-[{"text":"NMCT cấp ST chênh lên","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"suy tim độ III","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"ĐTĐ type 2","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"rối loạn lipid máu","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"dị ứng aspirin","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"TWBC","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"14,43","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"NEUT% (Tỷ lệ % bạch cầu trung tính)","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"76,4","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"LYPH% (Tỷ lệ bạch cầu lympho)","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"12,8","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"atenolol 50mg po daily","type":"THUỐC","assertions":["isHistorical"]}]
+OUTPUT: [{"text": "ECG", "type": "TÊN_XÉT_NGHIỆM", "position": [10, 13], "assertions": [], "candidates": []}, {"text": "X-quang ngực", "type": "TÊN_XÉT_NGHIỆM", "position": [15, 27], "assertions": [], "candidates": []}, {"text": "siêu âm tim", "type": "TÊN_XÉT_NGHIỆM", "position": [29, 40], "assertions": [], "candidates": []}, {"text": "WBC 12 K/uL", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [51, 62], "assertions": [], "candidates": []}, {"text": "Hgb 14 g/dL", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [64, 75], "assertions": [], "candidates": []}]
+**Ex 10 - DUPLICATE HANDLING (đánh trống ngực x 5)**
 
-Note: DẠNG 2 + DẠNG 3 trộn. Phần "Bệnh nhân NMCT … Tiền sử dị ứng aspirin" → DẠNG 2, viết tắt VN giữ verbatim, "Tiền sử" → isHistorical. Phần "Đã tiến hành tổng phân tích tế bào máu bằng máy lazer (tbm):" → DẠNG 3: cụm verb + tên quy trình (drop thành entity). Sau dấu `:` đầu tiên là 3 cặp test:value ngăn bởi `;`. Tên test `NEUT% (Tỷ lệ % bạch cầu trung tính)` và `LYPH% (Tỷ lệ bạch cầu lympho)` GIỮ TRỌN phần trong ngoặc là một phần tên test (R8 + DẠNG 3 — test names có parens GIỮ; drug names có parens instruction thì DROP — phân biệt). Giá trị "14,43"/"76,4"/"12,8" giữ dấu phẩy kiểu châu Âu (R8). "TWBC" alias WBC — verbatim. **"atenolol 50mg (uống trước ăn) po daily" → DROP "(uống trước ăn)" theo R4 mới (RxNorm DB English, parenthetical VN noise) → THUỐC = "atenolol 50mg po daily"**, isHistorical vì "Đang dùng" header. Lưu ý phân biệt: parens trong **test name** ("NEUT% (Tỷ lệ ...)") GIỮ, parens trong **drug instruction** ("(uống trước ăn)") DROP.
+INPUT: "Bệnh nhân nam 60 tuổi. Tiền sử: tăng huyết áp. Đang dùng atenolol 50 mg. Tiền sử gia đình: bố bị tăng huyết áp."
 
-**Ex 6 - DẠNG 5 Procedure report + DẠNG 1 narrative | ECG/LAB "và" (R9) + bình thường/bất thường + thuốc + triệu chứng**
+OUTPUT: [{"text": "tăng huyết áp", "type": "CHẨN_ĐOÁN", "position": [32, 45], "assertions": ["isHistorical"], "candidates": []}, {"text": "atenolol 50 mg", "type": "THUỐC", "position": [57, 71], "assertions": [], "candidates": []}, {"text": "tăng huyết áp", "type": "CHẨN_ĐOÁN", "position": [32, 45], "assertions": ["isFamily", "isHistorical"], "candidates": []}]
+**Ex 11 - TEST NAME DUPLICATE (chụp X-quang x 3)**
 
-INPUT: "Bệnh nhân nam 70 tuổi nhập viện vì đánh trống ngực. Monitor holter 24h cho thấy nhịp xoang đều, ngoại tâm thu nhĩ và ngoại tâm thu thất xuất hiện thường xuyên. Đang dùng metoprolol 25mg po bid."
+INPUT: "Bệnh nhân nữ 65 tuổi nhập viện vì đau ngực, khó thở. Tiền sử tăng huyết áp 10 năm, đang dùng amlodipine 5mg. ECG: nhịp xoang đều 80 lần/phút, ST chênh lên V1-V4. Chẩn đoán: nhồi máu cơ tim cấp ST chênh lên."
 
-OUTPUT (5 entities):
-[{"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"Monitor holter 24h","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"nhịp xoang đều","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"ngoại tâm thu nhĩ","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"ngoại tâm thu thất","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"metoprolol 25mg po bid","type":"THUỐC","assertions":[]}]
+OUTPUT: [{"text": "đau ngực", "type": "TRIỆU_CHỨNG", "position": [34, 42], "assertions": [], "candidates": []}, {"text": "khó thở", "type": "TRIỆU_CHỨNG", "position": [44, 51], "assertions": [], "candidates": []}, {"text": "tăng huyết áp", "type": "CHẨN_ĐOÁN", "position": [61, 74], "assertions": ["isHistorical"], "candidates": []}, {"text": "amlodipine 5mg", "type": "THUỐC", "position": [93, 107], "assertions": ["isHistorical"], "candidates": []}, {"text": "nhịp xoang đều", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [114, 128], "assertions": [], "candidates": []}, {"text": "ST chênh lên V1-V4", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [142, 160], "assertions": [], "candidates": []}, {"text": "nhồi máu cơ tim cấp ST chênh lên", "type": "CHẨN_ĐOÁN", "position": [173, 205], "assertions": [], "candidates": []}]
+**Ex 12 - VERB CLAUSE + DURATION DROP (kéo dài 30 phút)**
 
-Note: DẠNG 5 procedure report trộn với DẠNG 1 narrative. "nhập viện vì đánh trống ngực" → drop leading clause "nhập viện vì" (R5), lấy "đánh trống ngực". "Monitor holter 24h" là TÊN_XN (giữ "24h"). "nhịp xoang đều" là KẾT_QUẢ (ECG bình thường — chuẩn ECG disambiguation). "ngoại tâm thu nhĩ và ngoại tâm thu thất" → tách 2 CHẨN_ĐOÁN (R9 split + ECG bất thường). "thường xuyên" frequency dropped (R6). "Đang dùng metoprolol 25mg po bid" → DẠNG 4 nhưng đặt trong DẠNG 1, vẫn giữ route/freq (R1) và assertions = [] (không có từ khóa isHistorical rõ ràng).
+INPUT: "Bệnh nhân nam 58 tuổi vào viện vì đánh trống ngực, khó thở. Tiền sử đang dùng metoprolol 25mg. ECG: rung nhĩ, tần số thất 120 lần/phút. Chẩn đoán: rung nhĩ."
 
-**Ex 7 - DẠNG 4 Medication list + DẠNG 2 Sectioned | Header-based assertion (trước nhập viện vs ra viện) + R4 parens-instruction + dị ứng thuốc**
+OUTPUT: [{"text": "đánh trống ngực", "type": "TRIỆU_CHỨNG", "position": [34, 49], "assertions": [], "candidates": []}, {"text": "khó thở", "type": "TRIỆU_CHỨNG", "position": [51, 58], "assertions": [], "candidates": []}, {"text": "metoprolol 25mg", "type": "THUỐC", "position": [78, 93], "assertions": ["isHistorical"], "candidates": []}, {"text": "rung nhĩ", "type": "CHẨN_ĐOÁN", "position": [100, 108], "assertions": [], "candidates": []}, {"text": "tần số thất 120 lần/phút", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [110, 134], "assertions": [], "candidates": []}, {"text": "rung nhĩ", "type": "CHẨN_ĐOÁN", "position": [100, 108], "assertions": [], "candidates": []}]
+**Ex 13 - DUPLICATE x5 (đánh trống ngực - MỖI occurrence = 1 entity riêng)**
 
-INPUT: "Tiền sử THA 5 năm, đái tháo đường type 2. Tiền sử dị ứng aspirin. Thuốc trước nhập viện: 1. amlodipine 10mg po daily 2. metformin 500mg po bid. Thuốc ra viện: 1. furosemide 40mg po bid 2. atenolol 50mg (uống trước ăn) po daily."
+INPUT: "Bệnh nhân nữ 70 tuổi nhập viện vì đánh trống ngực. ECG cho thấy nhịp xoang chiếm ưu thế, ngoại tâm thu nhĩ và ngoại tâm thu thất xuất hiện thường xuyên. Tiền sử đang dùng aspirin 81mg, metoprolol 25mg po bid cho bệnh tim. Khó thở nhẹ khi gắng sức."
 
-OUTPUT (7 entities):
-[{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"đái tháo đường type 2","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"dị ứng aspirin","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"amlodipine 10mg po daily","type":"THUỐC","assertions":["isHistorical"]},{"text":"metformin 500mg po bid","type":"THUỐC","assertions":["isHistorical"]},{"text":"furosemide 40mg po bid","type":"THUỐC","assertions":[]},{"text":"atenolol 50mg po daily","type":"THUỐC","assertions":[]}]
+OUTPUT: [{"text": "đánh trống ngực", "type": "TRIỆU_CHỨNG", "position": [34, 49], "assertions": [], "candidates": []}, {"text": "nhịp xoang chiếm ưu thế", "type": "CHẨN_ĐOÁN", "position": [64, 87], "assertions": [], "candidates": []}, {"text": "ngoại tâm thu nhĩ", "type": "CHẨN_ĐOÁN", "position": [89, 106], "assertions": [], "candidates": []}, {"text": "ngoại tâm thu thất", "type": "CHẨN_ĐOÁN", "position": [110, 128], "assertions": [], "candidates": []}, {"text": "aspirin 81mg", "type": "THUỐC", "position": [171, 183], "assertions": ["isHistorical"], "candidates": []}, {"text": "metoprolol 25mg", "type": "THUỐC", "position": [185, 200], "assertions": ["isHistorical"], "candidates": []}, {"text": "Khó thở nhẹ khi gắng sức", "type": "TRIỆU_CHỨNG", "position": [222, 246], "assertions": [], "candidates": []}]
+**Ex 14 - TĂNG HUYẾT ÁP duplicate (5 năm trước vs hiện tại)**
 
-Note: DẠNG 4 mix với DẠNG 2. "Tiền sử THA 5 năm" → CHẨN_ĐOÁN + isHistorical ("Tiền sử" header, R5 drop "5 năm"). "Tiền sử dị ứng aspirin" → CHẨN_ĐOÁN + isHistorical (R4: "dị ứng X" là CHẨN_ĐOÁN, không trích thuốc riêng). 2 header thuốc khác nhau → assertion khác nhau: "Thuốc trước nhập viện" → isHistorical; "Thuốc ra viện" → assertions = [] (thuốc hiện tại khi ra viện, là dữ kiện hiện tại trong input). **"atenolol 50mg (uống trước ăn) po daily" → DROP "(uống trước ăn)" theo R4 mới (RxNorm DB English, parens VN noise) → THUỐC = "atenolol 50mg po daily"**. Note liệt số "1.", "2." là numbering header KHÔNG trích thành entity.
+INPUT: "Bệnh nhân nữ 70 tuổi nhập viện vì đau ngực. Đang dùng atenolol (uống hôm nay) 50mg, aspirin 81mg (sau ăn sáng). Tiền sử THA."
 
-**Ex 8 - DẠNG 2 Sectioned + DẠNG 5 Procedure | 3 thân nhân (Bố + Mẹ + Ông nội) + ECG ST chênh lên V1-V4 + nhịp xoang đều (mix bình thường/bất thường)**
+OUTPUT: [{"text": "đau ngực", "type": "TRIỆU_CHỨNG", "position": [34, 42], "assertions": [], "candidates": []}, {"text": "atenolol (uống hôm nay) 50mg", "type": "THUỐC", "position": [54, 82], "assertions": [], "candidates": []}, {"text": "aspirin 81mg", "type": "THUỐC", "position": [84, 96], "assertions": [], "candidates": []}, {"text": "THA", "type": "CHẨN_ĐOÁN", "position": [120, 123], "assertions": ["isHistorical"], "candidates": []}]
+**Ex 15 - PARACETAMOL 500 mg - chuẩn prescription format**
 
-INPUT: "Tiền sử gia đình: Bố bệnh nhân bị THA, Mẹ bệnh nhân bị đái tháo đường type 2, Ông nội từng nhồi máu cơ tim. ECG: ST chênh lên V1-V4, nhịp xoang đều 80 lần/phút."
+INPUT: "Xét nghiệm: công thức máu có WBC 12.5 K/uL, Hgb 13.2 g/dL. Sinh hóa: glucose 180 mg/dL, creatinine 1.2 mg/dL, AST 45 U/L, ALT 52 U/L."
 
-OUTPUT (6 entities):
-[{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isFamily","isHistorical"]},{"text":"đái tháo đường type 2","type":"CHẨN_ĐOÁN","assertions":["isFamily","isHistorical"]},{"text":"nhồi máu cơ tim","type":"CHẨN_ĐOÁN","assertions":["isFamily","isHistorical"]},{"text":"ST chênh lên V1-V4","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"nhịp xoang đều","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"80 lần/phút","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]}]
+OUTPUT: [{"text": "công thức máu", "type": "TÊN_XÉT_NGHIỆM", "position": [12, 25], "assertions": [], "candidates": []}, {"text": "WBC 12.5 K/uL", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [29, 42], "assertions": [], "candidates": []}, {"text": "Hgb 13.2 g/dL", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [44, 57], "assertions": [], "candidates": []}, {"text": "Sinh hóa", "type": "TÊN_XÉT_NGHIỆM", "position": [59, 67], "assertions": [], "candidates": []}, {"text": "glucose 180 mg/dL", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [69, 86], "assertions": [], "candidates": []}, {"text": "creatinine 1.2 mg/dL", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [88, 108], "assertions": [], "candidates": []}, {"text": "AST 45 U/L", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [110, 120], "assertions": [], "candidates": []}, {"text": "ALT 52 U/L", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [122, 132], "assertions": [], "candidates": []}]
+**Ex 16 - NHỒI MÁU CƠ TIM - clinical interpretation**
 
-Note: DẠNG 2 + DẠNG 5. "Tiền sử gia đình:" header → 3 CHẨN_ĐOÁN đều isFamily + isHistorical lan truyền (Bố, Mẹ, Ông nội là 3 thân nhân — R5/assertion table áp dụng cho từng CHẨN_ĐOÁN sau chủ thể gia đình). "Ông nội từng" → "từng" trigger isHistorical cho "nhồi máu cơ tim". ECG clause (DẠNG 5): "ST chênh lên V1-V4" → CHẨN_ĐOÁN (bất thường); "nhịp xoang đều" → KẾT_QUẢ_XÉT_NGHIỆM (bình thường, rule dòng 60–62); "80 lần/phút" → KẾT_QUẢ riêng (heart rate đi kèm). Hai câu nối "," → tách riêng.
+INPUT: "Bệnh nhân nam 60 tuổi vào viện vì đau ngực trái. Tiền sử: mất việc làm 8 ngày trước, uống rượu bia thường xuyên, tăng huyết áp, đang dùng amlodipine 5mg. Triệu chứng: đánh trống ngực, khó thở nhẹ, khó thở. ECG: nhịp xoang chiếm ưu thế, ngoại tâm thu nhĩ và ngoại tâm thu thất xuất hiện thường xuyên. Xét nghiệm: ECG, công thức máu, X-quang ngực. Kết quả: AST 45 U/L, ALT 52 U/L, ecg bình thường. Chẩn đoán: nhồi máu cơ tim cấp ST chênh lên. Điều trị: aspirin 81mg po daily, metoprolol 25mg po bid."
 
-**Ex 9 - ALL-IN-ONE MEGA STRESS TEST | 5 dạng input trộn lẫn + 11 rules cùng lúc**
-
-INPUT: "Bệnh nhân nam 60 tuổi nhập viện vì đau ngực, không sốt. Tiền sử: tăng huyết áp. Hút thuốc lá 20 năm. Tiền sử gia đình: Bố bệnh nhân nhồi máu cơ tim. ECG: ST chênh lên V2-V4, nhịp xoang đều 78 lần/phút. Đã tiến hành xét nghiệm marker tim mạch: Troponin I 5.2 ng/mL; CK-MB 28 U/L. Thuốc ra viện: clopidogrel 75mg po daily, atorvastatin 40mg po hs."
-
-OUTPUT (13 entities - mỗi phân đoạn áp đúng chiến lược của dạng tương ứng):
-[{"text":"đau ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"sốt","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"tăng huyết áp","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"nhồi máu cơ tim","type":"CHẨN_ĐOÁN","assertions":["isFamily","isHistorical"]},{"text":"ST chênh lên V2-V4","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"nhịp xoang đều","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"78 lần/phút","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"Troponin I","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"5.2 ng/mL","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"CK-MB","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"28 U/L","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"clopidogrel 75mg po daily","type":"THUỐC","assertions":[]},{"text":"atorvastatin 40mg po hs","type":"THUỐC","assertions":[]}]
-
-Note: Input có 5 dạng trộn — đây là test quan trọng nhất. (DẠNG 1) "nhập viện vì đau ngực" → drop leading, lấy "đau ngực"; "không sốt" → isNegated. (R3) "Hút thuốc lá 20 năm" KHÔNG trích (lifestyle). (DẠNG 2) "Tiền sử: tăng huyết áp" → isHistorical; "Tiền sử gia đình: Bố bệnh nhân nhồi máu cơ tim" → isFamily+isHistorical. (DẠNG 5) "ST chênh lên V2-V4" → CHẨN_ĐOÁN (bất thường); "nhịp xoang đều 78 lần/phút" → tách "nhịp xoang đều" (KQ bình thường) + "78 lần/phút" (KQ riêng, heart rate). (DẠNG 3) cụm "Đã tiến hành xét nghiệm marker tim mạch:" KHÔNG trích; "Troponin I 5.2 ng/mL; CK-MB 28 U/L" → tách 4 entity qua `:` và `;` (R8). (DẠNG 4) "Thuốc ra viện:" header bỏ; 2 thuốc giữ full route/freq (R1), assertions = [] (thuốc hiện tại, không isHistorical vì là "ra viện" chứ không phải "trước nhập viện"); cách "," → tách 2 THUỐC.
-
-**Ex 18 - COMPREHENSIVE CARDIOLOGY NOTE (R10 LOOSE) | Target 25 entities trong 1 LLM call**
-
-INPUT: "1. Tiền sử bệnh. Thuốc trước khi nhập viện: - metoprolol 25mg po bid - doxycycline cho viêm tuyến mồ hôi - atenolol (uống hôm nay). 2. Tiền sử bệnh hiện tại. Lý do nhập viện: Bệnh nhân vào viện vì đánh trống ngực. Triệu chứng hiện tại: - đánh trống ngực - Khó thở nhẹ - cảm giác thắt chặt ngực vùng trước tim - Tăng đánh trống ngực. Không buồn nôn, nôn, đổ mồ hôi. monitor holter cho thấy ngoại tâm thu nhĩ và ngoại tâm thu thất. Bắt đầu dùng metoprolol 25mg po bid. siêu âm tim qua thành ngực. Điều trị: aspirin 325mg x 1. Kết quả: chụp x-quang ngực không ghi nhận gì bất thường, phân tích nước tiểu bình thường, ecg bình thường. điện tâm đồ là không ghi nhận gì bất thường. Ở nhà bệnh nhân đã sử dụng atenololtrong ngày."
-
-OUTPUT (25 entities - R10 LOOSE dedup, KHÔNG multi-pass, 1 LLM call):
-[{"text":"metoprolol 25mg po bid","type":"THUỐC","assertions":["isHistorical"]},{"text":"doxycycline","type":"THUỐC","assertions":["isHistorical"]},{"text":"viêm tuyến mồ hôi","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"atenolol","type":"THUỐC","assertions":["isHistorical"]},{"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"Khó thở nhẹ","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"cảm giác thắt chặt ngực vùng trước tim","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"Tăng đánh trống ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"buồn nôn","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"nôn","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"đổ mồ hôi","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"monitor holter","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"ngoại tâm thu nhĩ","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"ngoại tâm thu thất","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"siêu âm tim qua thành ngực","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"aspirin 325mg x 1","type":"THUỐC","assertions":[]},{"text":"chụp x-quang ngực","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"không ghi nhận gì bất thường","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"phân tích nước tiểu","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"bình thường","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"ecg bình thường","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"điện tâm đồ","type":"TÊN_XÉT_NGHIỆM","assertions":[]}]
-
-Note: Target 25 entities với 1 LLM call duy nhất (Qwen 2.5 7B). (1) **R10 LOOSE dedup**: "đánh trống ngực" xuất hiện 4 lần → 1 entity; "metoprolol 25mg po bid" xuất hiện 2 lần (dòng 3 + dòng "Bắt đầu dùng") → 1 entity; "atenolol" xuất hiện 2 lần (dòng 5 + dòng typo "atenololtrong") → 1 entity. (2) **R7 split**: "doxycycline cho viêm tuyến mồ hôi" → 2 entities (THUỐC + CHẨN_ĐOÁN). (3) **R14 verb DROP**: "Bắt đầu dùng metoprolol" → drop verb, giữ "metoprolol 25mg po bid" (nhưng đã có ở trên → dedup). (4) **R4 parens**: "atenolol (uống hôm nay)" → drop "(uống hôm nay)". (5) **R23 typo**: "atenololtrong" → "atenolol" (postprocess fallback). (6) **R19 negation chain**: "Không buồn nôn, nôn, đổ mồ hôi" → 3 TRIỆU riêng + isNegated TẤT CẢ. (7) **R13 ECG**: "ngoại tâm thu nhĩ/thất" → CHẨN_ĐOÁN (bất thường); "ecg bình thường" + "bình thường" + "không ghi nhận gì bất thường" → KẾT_QUẢ (bình thường). (8) **R16 separator**: "điện tâm đồ là không ghi nhận gì bất thường" → TÊN="điện tâm đồ" + KQ="không ghi nhận gì bất thường". (9) **R9 split**: "ngoại tâm thu nhĩ và ngoại tâm thu thất" → 2 CHẨN_ĐOÁN. (10) **isHistorical cho 4 entities Tiền sử**: metoprolol, doxycycline, viêm tuyến mồ hôi, atenolol.
-
-**Ex 19 - CHAIN-OF-THOUGHT DEMO (test 1 LLM call với reasoning)**
-
-INPUT: "Bệnh nhân nam 65 tuổi. Tiền sử THA. Khám: HA 165/95 mmHg, SpO2 96%. ECG: ST chênh lên V2-V4. Thuốc: amlodipine 5mg po daily."
-
-OUTPUT (chain-of-thought KHÔNG output, chỉ JSON):
-[{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"HA","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"165/95 mmHg","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"SpO2","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"96%","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"ST chênh lên V2-V4","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"amlodipine 5mg po daily","type":"THUỐC","assertions":[]}]
-
-Note: Test chain-of-thought. (1) **Bước 1 (SCAN)**: 1 CHẨN_ĐOÁN (THA), 3 cặp TÊN_XN+KQ (HA, SpO2, ECG-embedded), 1 ECG abnormal (ST chênh lên), 1 THUỐC. (2) **Bước 2 (PHÂN LOẠI)**: THA→CHẨN_ĐOÁN với isHistorical (Tiền sử), HA→TÊN_XN + 165/95 mmHg→KQ (R12 vital signs), SpO2→TÊN_XN + 96%→KQ, ST chênh lên V2-V4→CHẨN_ĐOÁN (R13 ECG bất thường), amlodipine→THUỐC. (3) **Bước 3 (DEDUP)**: không có duplicate. (4) **Kết quả**: 7 entities, không có lifestyle/social, KHÔNG verb phrase. (5) **Quan trọng**: KHÔNG output reasoning text vào JSON, chỉ output JSON array thuần. Reasoning phải ở trong "suy nghĩ" của LLM, không phải text trả về.
-
-**Ex 20 - CARDIOLOGY PRE-FILLED CoT (E mới 2026-07-09) | Ép model 7B thấy pattern CoT reasoning trong 1 call**
-
-INPUT: "Bệnh nhân nữ 68 tuổi. Tiền sử: THA 5 năm. Nhập viện vì đánh trống ngực kéo dài 30 phút. monitor holter 24h cho thấy ngoại tâm thu thất lẻ tẻ. Siêu âm tim: chức năng tâm thu thất trái bảo tồn (EF 60%). Không buồn nôn, nôn, đổ mồ hôi. Thuốc: metoprolol 25mg po bid, aspirin 81mg po daily. ECG: nhịp xoang đều 75 lần/phút, không có ST chênh lên."
-
-OUTPUT (16 entities - target realistic với Qwen 2.5 7B + R10 LOOSE + CoT pre-fill):
-[{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"monitor holter 24h","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"ngoại tâm thu thất","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"Siêu âm tim","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"chức năng tâm thu thất trái bảo tồn","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"EF 60%","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"buồn nôn","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"nôn","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"đổ mồ hôi","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"metoprolol 25mg po bid","type":"THUỐC","assertions":[]},{"text":"aspirin 81mg po daily","type":"THUỐC","assertions":[]},{"text":"nhịp xoang đều","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"75 lần/phút","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]}]
-
-Note: Cardiology CoT pre-fill (mới 2026-07-09). (1) **Bước 1 (SCAN)**: 1 CHẨN_ĐOÁN (THA historical), 1 TRIỆU (đánh trống ngực), 3 TÊN_XN (monitor holter 24h, Siêu âm tim, ECG-embedded), 1 CHẨN_ĐOÁN (ngoại tâm thu thất - ECG abnormal), 3 KQ (chức năng tâm thu, EF 60%, nhịp xoang + 75 lần/phút), 3 TRIỆU negated (buồn nôn, nôn, đổ mồ hôi), 2 THUỐC. (2) **Bước 2 (PHÂN LOẠI)**: THA→CHẨN_ĐOÁN isHistorical; "đánh trống ngực"→TRIỆU (không drop "kéo dài 30 phút" - R6); monitor holter 24h + Siêu âm tim + ECG→TÊN_XN; ngoại tâm thu thất→CHẨN_ĐOÁN (R13 ECG bất thường); "chức năng tâm thu thất trái bảo tồn" + "EF 60%"→KQ (2 KQ riêng); "Không buồn nôn, nôn, đổ mồ hôi"→3 TRIỆU + isNegated (R19 negation chain); metoprolol + aspirin→THUỐC (giữ full); "nhịp xoang đều" + "75 lần/phút"→2 KQ (R12 vital signs, tách riêng); "không có ST chênh lên"→KHÔNG trích (R3 lifestyle, hoặc thuộc ECG, không có label rõ). (3) **Bước 3 (DEDUP R10 LOOSE)**: KHÔNG có duplicate text trong input. (4) **Kết quả**: 13 entities, KHÔNG lifestyle (hút thuốc/rượu), KHÔNG verb phrase, KHÔNG drop severity (EF 60% giữ verbatim). (5) **Quan trọng**: Pre-fill này ÉP model 7B thấy pattern CoT reasoning + R10 LOOSE dedup + R19 negation chain + R13 ECG normal/abnormal → giúp model học qua ví dụ thực tế.
-
-**Ex 21 - VERIFY STEP (MỚI 2026-07-09) | Ép model ĐỌC LẠI input 2 lần để không miss entities**
-
-INPUT: "Bệnh nhân nam 60 tuổi. Tiền sử THA. Nhập viện vì đau ngực. Khám: HA 150/90, tim đều. Xét nghiệm: Troponin I 0.5 ng/mL (bình thường). ECG: nhịp xoang, không ST chênh lên. Chẩn đoán: đau thắt ngực ổn định. Điều trị: bisoprolol 2.5mg po daily, aspirin 81mg po daily. Dặn tái khám sau 1 tuần."
-
-OUTPUT (10 entities - với VERIFY step explicit):
-[{"text":"THA","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"đau ngực","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"HA","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"150/90","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"Troponin I","type":"TÊN_XÉT_NGHIỆM","assertions":[]},{"text":"0.5 ng/mL","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"bình thường","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"nhịp xoang","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]},{"text":"đau thắt ngực ổn định","type":"CHẨN_ĐOÁN","assertions":[]},{"text":"bisoprolol 2.5mg po daily","type":"THUỐC","assertions":[]},{"text":"aspirin 81mg po daily","type":"THUỐC","assertions":[]}]
-
-Note: VERIFY step pattern (mới 2026-07-09). (1) **Bước 1 (SCAN lần 1)**: tìm thấy 1 CHẨN_ĐOÁN (THA), 1 TRIỆU (đau ngực), 1 TÊN_XN (HA), 1 KQ (150/90), 1 CHẨN_ĐOÁN (đau thắt ngực ổn định), 2 THUỐC. Tổng: 7 entities. (2) **Bước 2 (APPLY)**: THA→isHistorical; "nhập viện vì đau ngực"→drop leading verb, lấy "đau ngực"; "HA 150/90"→TÊN+KQ (R12); "đau thắt ngực ổn định"→CHẨN_ĐOÁN (angina, R4 §4 disambig). (3) **Bước 3 (DEDUP)**: KHÔNG có duplicate. (4) **⚠️ Bước 4 (VERIFY - QUAN TRỌNG)**: ĐỌC LẠI input lần 2. Tự hỏi:
-- "Xét nghiệm: Troponin I 0.5 ng/mL (bình thường)" - tôi có miss "Troponin I" (TÊN_XN) và "0.5 ng/mL" (KQ) không? → MISS! Thêm vào.
-- "(bình thường)" - tôi có extract không? → MISS! Thêm KQ.
-- "ECG: nhịp xoang, không ST chênh lên" - "nhịp xoang" là KQ (R13). → Extract.
-- "điều trị bisoprolol, aspirin" - đã extract rồi.
-- "Dặn tái khám" - KHÔNG extract (verb instruction, không phải entity).
-- "tim đều" - CÓ THỂ extract (tim đều = TÊN_XN? hoặc skip). Theo R13: "tim đều" có thể coi là KQ (heart rhythm normal). Extract để safe.
-→ PHÁT HIỆN MISS: thêm 4 entities (Troponin I, 0.5 ng/mL, bình thường, nhịp xoang). Tổng: 11 entities.
-(5) **Bước 5 (PRE-CATEGORIZE)**: gom theo type rồi output. (6) **Kết quả**: 11 entities (sau VERIFY). Tăng từ 7 (sau bước 3) lên 11 (sau VERIFY). (7) **Quan trọng**: VERIFY step ÉP model quay lại scan input 1 lần nữa, tránh miss entities quan trọng. Đây là key improvement cho Qwen 2.5 7B.
-
-**Ex 22 - LABEL + VERB CLAUSE DROP (MỚI 2026-07-09, từ user feedback 19.txt) | Test chuẩn chung R24 + R25**
-
-INPUT: "1.  Tiền sử bệnh nội khoa. - Ung thư phổi không tế bào nhỏ - Di căn não vùng trán phải dã phẫu thuật lấy u. 2.  Tiền sử bệnh hiện tại. Lý do nhập viện: đau bẹn trái. Diễn biến: - đau bắt đầu 3 ngày trước khi đi lại - đau ngày càng nặng hơn trong vài ngày tiếp theo - đau cản trở việc đi lại của bà. Đặc điểm: - Vị trí: bẹn trái - Lan tỏa: đôi khi lan ra bên hông trái - Yếu tố làm nặng thêm: đi lại - Yếu tố làm giảm: vicodin. Triệu chứng kèm theo: Không có cảm giác tê, cảm giác châm chích, yếu hoặc cảm giác nặng ở chân trái. 3.  Đánh giá. Dấu hiệu lâm sàng: Bầm máu vùng bẹn trái."
-
-OUTPUT (10 entities - target chuẩn với R24+R25+R26):
-[{"text":"Ung thư phổi không tế bào nhỏ","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"Di căn não vùng trán phải","type":"CHẨN_ĐOÁN","assertions":["isHistorical"]},{"text":"vicodin","type":"THUỐC","assertions":["isHistorical"]},{"text":"đau bẹn trái","type":"TRIỆU_CHỨNG","assertions":[]},{"text":"cảm giác tê","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"cảm giác châm chích","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"yếu","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"cảm giác nặng ở chân trái","type":"TRIỆU_CHỨNG","assertions":["isNegated"]},{"text":"Bầm máu vùng bẹn trái","type":"KẾT_QUẢ_XÉT_NGHIỆM","assertions":[]}]
-
-Note: Test R24+R25+R26 (mới 2026-07-09). (1) **R24 KHÔNG extract LABEL**: "Vị trí:" (bỏ qua label, KHÔNG extract). "Lan tỏa:" (bỏ qua). "Yếu tố làm nặng thêm:" (bỏ qua). "Yếu tố làm giảm:" (bỏ qua). "Diễn biến:" (bỏ qua). "Đặc điểm:" (bỏ qua). "Triệu chứng kèm theo:" (bỏ qua). "Dấu hiệu lâm sàng:" (bỏ qua). Tất cả LABEL chỉ là tiêu đề phân loại, KHÔNG extract. (2) **R25 DROP verb clause + duration + subject**:
-- "đau bắt đầu 3 ngày trước khi đi lại" → chỉ "đau" (drop "bắt đầu 3 ngày trước khi đi lại" - duration + verb)
-- "đau ngày càng nặng hơn trong vài ngày tiếp theo" → "đau ngày càng nặng hơn" (drop duration "trong vài ngày tiếp theo")
-- "đau cản trở việc đi lại của bà" → "đau" (drop "cản trở việc đi lại của bà" - verb + subject)
-- "Di căn não vùng trán phải dã phẫu thuật lấy u" → "Di căn não vùng trán phải" (drop "dã phẫu thuật lấy u" - verb clause)
-- Tất cả các "đau" khác nhau → R10 LOOSE dedup thành 1 entity "đau bẹn trái".
-(3) **R26 isHistorical section-aware**:
-- "Ung thư phổi", "Di căn não", "vicodin" → trong section "1. Tiền sử bệnh nội khoa" → isHistorical.
-- "đau bẹn trái" → trong section "2. Tiền sử bệnh hiện tại" → KHÔNG isHistorical (assertions: []).
-- "Bầm máu vùng bẹn trái" → trong section "3. Đánh giá" → KHÔNG có assertions (KQ, không phải CHẨN_ĐOÁN/TRIỆU_CHỨNG/THUỐC).
-(4) **R19 negation chain**: "Không có cảm giác tê, cảm giác châm chích, yếu hoặc cảm giác nặng ở chân trái" → 4 entities riêng + isNegated.
-(5) **Kết quả**: 9 entities thực (1 bị dedup), KHÔNG có LABEL extract, KHÔNG có verb clause, KHÔNG có duration noise.
-
-**Ex 23 - R27 STRICT OUTPUT FORMAT với POSITION (MỚI 2026-07-09, fix LLM miss duplicate) | Test output thuần JSON có position**
-
-INPUT: "Bệnh nhân nam 65 tuổi. Tiền sử: tăng huyết áp. Khám: đau đầu."
-
-OUTPUT (2 entities - 4 fields mỗi entity, có position [start, end]):
-[{"text":"tăng huyết áp","type":"CHẨN_ĐOÁN","position":[42,53],"assertions":["isHistorical"]},{"text":"đau đầu","type":"TRIỆU_CHỨNG","position":[60,68],"assertions":[]}]
-
-**KHÔNG làm theo các cách sau** (LLM hay mắc):
-❌ "Đây là entities tôi extract được: ```json\n[{...}]\n```"
-❌ "Output: ```json\n[{...}]\n```"
-❌ "```json\n[{...}]\n```"
-❌ "Here are the entities: [{...}]"
-❌ `{"entities": [{...}]}` (wrap trong object)
-❌ "Tôi đã extract các entities sau:\n- tăng huyết áp: CHẨN_ĐOÁN\n- đau đầu: TRIỆU_CHỨNG"
-❌ THIẾU position field: `[{"text":"tăng huyết áp","type":"CHẨN_ĐOÁN","assertions":[]}]` (thiếu position)
-❌ Position SAI: `[{"text":"đau đầu","type":"TRIỆU_CHỨNG","position":[0,7],"assertions":[]}]` (text không khớp input[0:7])
-
-**PHẢI output**:
-- Mở ngoặc `[`
-- Mỗi entity: `{"text": "<verbatim>", "type": "<TYPE>", "position": [<start>, <end>], "assertions": [<list>]}`
-- Ngăn cách bằng `,`
-- Đóng ngoặc `]`
-- KHÔNG có text nào khác trước `[` hoặc sau `]`
-- KHÔNG có markdown code fence
-- KHÔNG có explanation
-- KHÔNG có comment
-
-**Test edge cases**:
-- Input rỗng → output `[]`
-- Input chỉ có lifestyle (hút thuốc) → output `[]`
-- Input chỉ có 1 entity → output `[{...}]` (KHÔNG có giải thích trước/sau)
-- **Test duplicate**: "đau bụng ở vùng trên. Sau đó đau bụng tái phát." → 2 entities riêng với position khác nhau:
-  `[{"text":"đau bụng","type":"TRIỆU_CHỨNG","position":[0,8],"assertions":[]},{"text":"đau bụng","type":"TRIỆU_CHỨNG","position":[26,34],"assertions":[]}]`
-- Lỗi parse → system retry, KHÔNG output giải thích lỗi
-- Postprocess fallback: nếu LLM thiếu position → tự tìm (sẽ dùng vị trí đầu tiên match, có thể SAI cho duplicate)
-
-**Ex 24 - DUPLICATE HANDLING (MỚI 2026-07-09, R20) | Ép model extract MỖI occurrence với position riêng**
-
-INPUT: "Bệnh nhân nam 65 tuổi. Tiền sử THA. Hiện tại đánh trống ngực. Khám thấy đánh trống ngực. Cơn đánh trống ngực nặng hơn khi gắng sức. Tối qua lại đánh trống ngực. Tiền sử đánh trống ngực 5 năm trước. Kết luận: đánh trống ngực do THA."
-
-OUTPUT (5 entities - MỖI occurrence riêng, vị trí khác nhau):
-[
-  {"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","position":[86,102],"assertions":[]},
-  {"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","position":[115,131],"assertions":[]},
-  {"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","position":[161,177],"assertions":[]},
-  {"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","position":[192,208],"assertions":["isHistorical"]},
-  {"text":"đánh trống ngực","type":"TRIỆU_CHỨNG","position":[238,254],"assertions":[]}
-]
-
-Note: (1) **Quy tắc QUAN TRỌNG - MỖI OCCURRENCE = 1 ENTITY RIÊNG**: "đánh trống ngực" xuất hiện 5 lần ở 5 vị trí → extract 5 entities riêng biệt, mỗi entity có position riêng. LLM 7B hay "gộp" thành 1 entity → phải cố tìm tất cả vị trí. (2) **Position khác nhau** cho mỗi entity: [86,102], [115,131], [161,177], [192,208], [238,254]. (3) **assertions khác nhau** theo context: nếu "Tiền sử đánh trống ngực" → isHistorical; các vị trí khác (hiện tại) → []. (4) **KHÔNG gộp duplicate** thành 1 entity (R10 STRICT - khác R10 LOOSE cũ). (5) **Step VERIFY (R20)**: SAU KHI extract, quay lại scan input 1 lần nữa, đếm occurrences của mỗi text → verify đã extract đủ.
+OUTPUT: [{"text": "đau ngực trái", "type": "TRIỆU_CHỨNG", "position": [34, 47], "assertions": [], "candidates": []}, {"text": "tăng huyết áp", "type": "CHẨN_ĐOÁN", "position": [113, 126], "assertions": ["isHistorical"], "candidates": []}, {"text": "amlodipine 5mg", "type": "THUỐC", "position": [138, 152], "assertions": ["isHistorical"], "candidates": []}, {"text": "đánh trống ngực", "type": "TRIỆU_CHỨNG", "position": [167, 182], "assertions": [], "candidates": []}, {"text": "khó thở nhẹ", "type": "TRIỆU_CHỨNG", "position": [184, 195], "assertions": [], "candidates": []}, {"text": "nhịp xoang chiếm ưu thế", "type": "CHẨN_ĐOÁN", "position": [211, 234], "assertions": [], "candidates": []}, {"text": "ngoại tâm thu nhĩ", "type": "CHẨN_ĐOÁN", "position": [236, 253], "assertions": [], "candidates": []}, {"text": "ngoại tâm thu thất", "type": "CHẨN_ĐOÁN", "position": [257, 275], "assertions": [], "candidates": []}, {"text": "ECG", "type": "TÊN_XÉT_NGHIỆM", "position": [206, 209], "assertions": [], "candidates": []}, {"text": "công thức máu", "type": "TÊN_XÉT_NGHIỆM", "position": [317, 330], "assertions": [], "candidates": []}, {"text": "X-quang ngực", "type": "TÊN_XÉT_NGHIỆM", "position": [332, 344], "assertions": [], "candidates": []}, {"text": "AST 45 U/L", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [355, 365], "assertions": [], "candidates": []}, {"text": "ALT 52 U/L", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [367, 377], "assertions": [], "candidates": []}, {"text": "ecg bình thường", "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [379, 394], "assertions": [], "candidates": []}, {"text": "nhồi máu cơ tim cấp ST chênh lên", "type": "CHẨN_ĐOÁN", "position": [407, 439], "assertions": [], "candidates": []}, {"text": "aspirin 81mg", "type": "THUỐC", "position": [451, 463], "assertions": [], "candidates": []}, {"text": "metoprolol 25mg", "type": "THUỐC", "position": [474, 489], "assertions": [], "candidates": []}]
 </examples>
-
-<checklist>
-## CHECKLIST TỰ VERIFY — LLM kiểm tra output trước khi trả JSON
-
-Trước khi emit JSON array, tự verify:
-- □ Mỗi entity có đúng 3 fields (text, type, assertions), không có field thừa.
-- □ `text` xuất hiện verbatim trong input (case-sensitive). KHÔNG paraphrase, KHÔNG mở rộng, KHÔNG thu gọn.
-- □ `type` ∈ {THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM}.
-- □ `assertions` ≤ 3 phần tử, ⊂ {isHistorical, isNegated, isFamily}, uniqueItems.
-- □ KHÔNG extract lifestyle/social/psychology (R3 + postprocess filter sẽ drop nếu LLM sai).
-- □ KHÔNG extract verb/adverb ("đang điều trị", "trước đây", "gần đây").
-- □ ECG normal ("nhịp xoang", "ecg bình thường") → KẾT_QUẢ_XÉT_NGHIỆM; ECG abnormal → CHẨN_ĐOÁN.
-- □ Body part trong test name giữ nguyên (CT sọ não, MRI cột sống cổ).
-- □ Severity/type qualifier KHÔNG drop ("độ III", "type 2", "NYHA").
-- □ Duplicate occurrence → 2 entities riêng (R10). Scan input 2 lần để bắt hết duplicate.
-- □ Cardiac procedures (monitor holter, siêu âm tim, điện tâm đồ) là TÊN_XÉT_NGHIỆM (R19).
-- □ "Không X, Y, Z" → mỗi X/Y/Z là 1 entity riêng + isNegated (R19 negation chain).
-- □ "không ghi nhận gì bất thường" / "không có gì đáng chú ý" → KẾT_QUẢ_XÉT_NGHIỆM (R19).
-- □ Test name/procedure duplicate (vd "chụp x-quang ngực" 2 lần) → chỉ extract 1 (R22).
-- □ Typo dính chữ (vd "atenololtrong") → recover drug name (R23).
-- □ VS line không label rõ (vd "VS98.3 12987 56 18 99RA") → KHÔNG extract (input không ghi rõ, postprocess không tự suy đoán).
-- □ Output là JSON array (không có markdown wrapper, không có giải thích).
-</checklist>
-
-<output_format>
-## OUTPUT FORMAT (mandatory)
-
-OUTPUT ONLY JSON array. Each entity has EXACTLY 3 fields:
-  {
-    "text":       "<verbatim from input>",
-    "type":       "THUỐC" | "CHẨN_ĐOÁN" | "TRIỆU_CHỨNG" | "TÊN_XÉT_NGHIỆM" | "KẾT_QUẢ_XÉT_NGHIỆM",
-    "assertions": [] | ["isHistorical"] | ["isNegated"] | ["isFamily"] (max 3, can combine)
-  }
-
-SYSTEM auto-fills (DO NOT include):
-  - "position": [start, end] via find()/regex
-  - "candidates": [] → ICD/RxNorm lookup
-
-DO NOT add fields beyond 3.
-Output ONLY valid JSON array - no explanation, no markdown, no ```json wrapper.
-</output_format>"""
-
-
-# ---------------------------------------------------------------------- #
-# User prompt builder
-# ---------------------------------------------------------------------- #
-
-
-def build_user_prompt(input_text: str) -> str:
-    """Format input thành prompt người dùng.
-
-    Dùng triple-quote để LLM thấy rõ ranh giới chuỗi, tránh nhầm prompt injection.
-    """
-    # Escape triple-quote trong input
-    safe = input_text.replace('"""', '\\"\\"\\"')
-    return f"""Văn bản lâm sàng cần trích xuất:
-\"\"\"{safe}\"\"\"
-
-Trích các khái niệm y khoa (5 loại: THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM) từ văn bản trên.
-Trả về JSON array duy nhất theo đúng 5 trường (text, type, position, assertions, candidates).
 """
-
-
-# ---------------------------------------------------------------------- #
-# Few-shot loading
-# ---------------------------------------------------------------------- #
-
-
-def load_few_shot(path=None) -> list[dict]:
-    """Nạp các ví dụ few-shot từ file JSONL.
-
-    File có dạng mỗi dòng 1 JSON object:
-    {"input": "văn bản gốc", "output": <array các thực thể>}
-    """
-    from pathlib import Path
-    import json
-    p = path or (Path(__file__).resolve().parents[1] / "data" / "examples.jsonl")
-    if not p.exists():
-        return []
-    out: list[dict] = []
-    with p.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return out
-
-
-def format_few_shot_messages(examples) -> list[dict]:
-    """Chuyển few-shot thành danh sách message system/user/assistant luân phiên.
-
-    Mỗi example → 2 messages:
-      - user: input được wrap bằng build_user_prompt
-      - assistant: output dạng JSON
-    """
-    from typing import Iterable
-    import json
-    msgs: list[dict] = []
-    for ex in examples:
-        msgs.append({"role": "user", "content": build_user_prompt(ex["input"])})
-        msgs.append({"role": "assistant", "content": json.dumps(ex["output"], ensure_ascii=False)})
-    return msgs
-
-
-# ---------------------------------------------------------------------- #
-# OUTPUT SCHEMA — tuân thủ spec chính thức (5 fields per entity)
-# ---------------------------------------------------------------------- #
-
-OUTPUT_SCHEMA: dict = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        # Schema cuối cùng (sau khi system tự fill position + candidates):
-        # - LLM chỉ output 3 fields: text, type, assertions
-        # - System tự thêm: position (auto-find), candidates (RAG lookup)
-        "required": ["text", "type", "assertions", "position", "candidates"],
-        "additionalProperties": False,
-        "properties": {
-            "text": {"type": "string", "minLength": 1,
-                     "description": "LLM output: chuỗi con chính xác từ input"},
-            "type": {
-                "type": "string",
-                "enum": [
-                    "TRIỆU_CHỨNG",
-                    "TÊN_XÉT_NGHIỆM",
-                    "KẾT_QUẢ_XÉT_NGHIỆM",
-                    "CHẨN_ĐOÁN",
-                    "THUỐC",
-                ],
-                "description": "LLM output: 1 trong 5 loại"},
-            "position": {
-                "type": "array",
-                "minItems": 2,
-                "maxItems": 2,
-                "items": {"type": "integer", "minimum": 0},
-                "description": "SYSTEM tự fill: tìm bằng find()"},
-            "assertions": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "enum": ["isNegated", "isFamily", "isHistorical"],
-                },
-                "uniqueItems": True,
-                "maxItems": 3,
-            },
-            "candidates": {
-                "type": "array",
-                "items": {"type": "string"},
-                "uniqueItems": True,
-            },
-        },
-    },
-}
-
-
-# ---------------------------------------------------------------------- #
-# Self-test
-# ---------------------------------------------------------------------- #
-
-if __name__ == "__main__":  # pragma: no cover
-    # Self-test: verify positions trong examples khớp 100%
-    print("=== Self-test: verify SYSTEM_PROMPT examples ===")
-    examples_in_prompt = [
-        ('Ex1',
-         'Bệnh nhân nam 65 tuổi. Tiền sử: tăng huyết áp 5 năm, đái tháo đường type 2. Đang dùng metoprolol 25mg po bid, không dùng aspirin 81mg po daily. ECG: ngoại tâm thu nhĩ, rung nhĩ. Hút thuốc lá 20 năm. WBC 14,5 K/uL.',
-         [('tăng huyết áp','CHẨN_ĐOÁN',[32,45],['isHistorical']),('đái tháo đường type 2','CHẨN_ĐOÁN',[53,74],['isHistorical']),('metoprolol 25mg po bid','THUỐC',[86,108],['isHistorical']),('aspirin 81mg po daily','THUỐC',[121,142],['isNegated']),('ngoại tâm thu nhĩ','CHẨN_ĐOÁN',[149,166],[]),('rung nhĩ','CHẨN_ĐOÁN',[168,176],[]),('WBC','TÊN_XÉT_NGHIỆM',[199,202],[]),('14,5 K/uL','KẾT_QUẢ_XÉT_NGHIỆM',[203,212],[])]),
-        ('Ex2',
-         'Bố bệnh nhân bị THA. Mẹ bệnh nhân bị đái tháo đường type 2. đánh trống ngực xuất hiện, sau đó đánh trống ngực tái phát. Dùng doxycycline cho viêm tuyến mồ hôi, không sốt. Xét nghiệm: WBC:14,43 K/uL, H. pylori dương tính.',
-         [('THA','CHẨN_ĐOÁN',[16,19],['isFamily','isHistorical']),('đái tháo đường type 2','CHẨN_ĐOÁN',[37,58],['isFamily','isHistorical']),('đánh trống ngực','TRIỆU_CHỨNG',[60,75],[]),('đánh trống ngực','TRIỆU_CHỨNG',[94,109],[]),('doxycycline','THUỐC',[125,136],[]),('viêm tuyến mồ hôi','CHẨN_ĐOÁN',[141,158],[]),('sốt','TRIỆU_CHỨNG',[166,169],['isNegated']),('WBC','TÊN_XÉT_NGHIỆM',[183,186],[]),('14,43 K/uL','KẾT_QUẢ_XÉT_NGHIỆM',[187,197],[]),('H. pylori','TÊN_XÉT_NGHIỆM',[199,208],[]),('dương tính','KẾT_QUẢ_XÉT_NGHIỆM',[209,219],[])]),
-        ('Ex3',
-         'Bệnh nhân nhồi máu cơ tim cấp ST chênh lên, suy tim độ III, kèm đau ngực và khó thở. Đang dùng metoprolol 25mg po bid. Tiền sử tăng huyết áp, đái tháo đường type 2.',
-         [('nhồi máu cơ tim cấp ST chênh lên','CHẨN_ĐOÁN',[10,42],[]),('suy tim độ III','CHẨN_ĐOÁN',[44,58],[]),('đau ngực','TRIỆU_CHỨNG',[64,72],[]),('khó thở','TRIỆU_CHỨNG',[76,83],[]),('metoprolol 25mg po bid','THUỐC',[95,117],[]),('tăng huyết áp','CHẨN_ĐOÁN',[127,140],['isHistorical']),('đái tháo đường type 2','CHẨN_ĐOÁN',[142,163],['isHistorical'])]),
-        ('Ex4',
-         'Bệnh nhân đau ngực 3 ngày, sốt 39 độ, ho khạc đờm vàng kéo dài 2 tuần. Không sốt, không ho. đau ngực và khó thở tăng khi gắng sức.',
-         [('đau ngực','TRIỆU_CHỨNG',[10,18],[]),('sốt','TRIỆU_CHỨNG',[27,30],[]),('ho khạc đờm vàng','TRIỆU_CHỨNG',[38,54],[]),('sốt','TRIỆU_CHỨNG',[77,80],['isNegated']),('ho','TRIỆU_CHỨNG',[88,90],['isNegated']),('đau ngực','TRIỆU_CHỨNG',[92,100],[]),('khó thở','TRIỆU_CHỨNG',[104,111],[])]),
-        ('Ex5',
-         'Bệnh nhân NMCT cấp ST chênh lên, suy tim độ III. Tiền sử THA, ĐTĐ type 2, rối loạn lipid máu. Tiền sử dị ứng aspirin. Đã tiến hành tổng phân tích tế bào máu bằng máy lazer (tbm): TWBC:14,43; NEUT% (Tỷ lệ % bạch cầu trung tính):76,4; LYPH% (Tỷ lệ bạch cầu lympho):12,8. Đang dùng atenolol 50mg (uống trước ăn) po daily.',
-         [('NMCT cấp ST chênh lên','CHẨN_ĐOÁN',[10,31],[]),('suy tim độ III','CHẨN_ĐOÁN',[33,47],[]),('THA','CHẨN_ĐOÁN',[57,60],['isHistorical']),('ĐTĐ type 2','CHẨN_ĐOÁN',[62,72],['isHistorical']),('rối loạn lipid máu','CHẨN_ĐOÁN',[74,92],['isHistorical']),('dị ứng aspirin','CHẨN_ĐOÁN',[102,116],['isHistorical']),('TWBC','TÊN_XÉT_NGHIỆM',[179,183],[]),('14,43','KẾT_QUẢ_XÉT_NGHIỆM',[184,189],[]),('NEUT% (Tỷ lệ % bạch cầu trung tính)','TÊN_XÉT_NGHIỆM',[191,226],[]),('76,4','KẾT_QUẢ_XÉT_NGHIỆM',[227,231],[]),('LYPH% (Tỷ lệ bạch cầu lympho)','TÊN_XÉT_NGHIỆM',[233,262],[]),('12,8','KẾT_QUẢ_XÉT_NGHIỆM',[263,267],[]),('atenolol 50mg (uống trước ăn) po daily','THUỐC',[279,317],['isHistorical'])]),
-    ]
-    all_ok = True
-    for name, text, entities in examples_in_prompt:
-        for ent in entities:
-            txt = ent[0]
-            start, end = ent[2]
-            actual = text[start:end]
-            if actual != txt:
-                print(f"  [FAIL] {name} [{start},{end}] expected {txt!r} got {actual!r}")
-                all_ok = False
-    print(f"  {'All positions verified!' if all_ok else 'SOME POSITIONS WRONG!'}")
-
-    # Estimate token count
-    n_chars = len(SYSTEM_PROMPT)
-    print(f"\nSYSTEM_PROMPT: {n_chars} chars ~ {n_chars//4} tokens (heuristic)")
-
-    # Real token count via tiktoken
-    try:
-        import tiktoken
-        enc = tiktoken.encoding_for_model("gpt-4o")
-        print(f"GPT-4o tokens: {len(enc.encode(SYSTEM_PROMPT))}")
-    except ImportError:
-        pass
