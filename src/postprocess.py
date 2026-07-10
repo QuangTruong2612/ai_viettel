@@ -1643,7 +1643,7 @@ def _expand_duplicates(entities, input_text):
             expanded.append(new_ent)
             logger.debug(
                 "R20.1 expand duplicate: '%s' tại pos=%d (đã có tại %s)",
-                text, pos[0], existing_positions_in_expanded,
+                text, pos[0], existing_positions,
             )
 
     # Sort theo position
