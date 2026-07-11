@@ -1945,27 +1945,75 @@ def assemble_record(
     return final
 
 
+def _split_drug_disease_connector(
+    input_text: str,
+    raw_entities: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Tách cụm 'Thuốc [connector] Bệnh/Triệu chứng' mà LLM vô tình gộp (R1).
+
+    Ví dụ: 'doxycycline cho viêm tuyến mồ hôi' -> 'doxycycline' (THUỐC) + 'viêm tuyến mồ hôi' (CHẨN_ĐOÁN).
+    """
+    out: list[dict[str, Any]] = []
+    connector_pattern = re.compile(r"\s+(?:cho|trị|điều\s+trị|chữa)\s+", re.IGNORECASE)
+
+    for ent in raw_entities:
+        if not isinstance(ent, dict):
+            continue
+        text = str(ent.get("text", "")).strip()
+        etype = ent.get("type", "")
+        if etype == "THUỐC" and connector_pattern.search(text):
+            parts = connector_pattern.split(text, maxsplit=1)
+            if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                drug_part = parts[0].strip()
+                disease_part = parts[1].strip()
+                # Tạo 2 entities tách biệt, validate_positions sẽ tự tìm exact span
+                out.append({**ent, "text": drug_part, "type": "THUỐC", "position": [0, 0]})
+                out.append({**ent, "text": disease_part, "type": "CHẨN_ĐOÁN", "position": [0, 0]})
+                logger.debug("Tách Drug+Disease: %r -> %r + %r", text, drug_part, disease_part)
+                continue
+        out.append(ent)
+    return out
+
+
+def _filter_vital_signs_dump(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Chặn lệnh CẤM 1: bỏ sinh hiệu gộp hoặc số rác dạng VS98.3 12987 56 18 99RA."""
+    out: list[dict[str, Any]] = []
+    vs_dump_pattern = re.compile(r"^VS\s*\d+\.\d+|\b\d{5,}\b", re.IGNORECASE)
+    for ent in entities:
+        text = str(ent.get("text", "")).strip()
+        if vs_dump_pattern.match(text):
+            logger.debug("Bỏ sinh hiệu gộp rác (Cấm 1): %r", text)
+            continue
+        out.append(ent)
+    return out
+
+
 def _prepare_validated_entities(
     input_text: str,
     raw_entities: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Chuẩn hoá entities qua 5 bước trước khi emit.
+    """Chuẩn hoá entities qua 6 bước trước khi emit.
 
     Bước:
+      0. _split_drug_disease_connector: tách Thuốc cho Bệnh nếu LLM gộp
       1. validate_positions: sửa LLM-sai positions
       2. _expand_duplicates: thêm entities cho occurrences LLM miss (R20.1)
       3. _split_long_imaging_result: tách long CT/MRI results thành nhiều entities (R31)
-      4. dedupe_entities: drop overlap (R10 STRICT + R22)
-      5. _drop_substring_entities: drop text là substring của text khác
-      6. _filter_lifestyle_entities: defense-in-depth chống lifestyle/duration noise
+      4. _filter_vital_signs_dump: bỏ sinh hiệu gộp rác (Cấm 1)
+      5. dedupe_entities: drop overlap (R10 STRICT + R22)
+      6. _drop_substring_entities: drop text là substring của text khác
+      7. _filter_lifestyle_entities: defense-in-depth chống lifestyle/duration noise
     """
-    validated = validate_positions(input_text, raw_entities)
+    raw_list = _split_drug_disease_connector(input_text, raw_entities)
+    validated = validate_positions(input_text, raw_list)
     validated = _expand_duplicates(validated, input_text)
     validated = _split_long_results(input_text, validated)
+    validated = _filter_vital_signs_dump(validated)
     validated = dedupe_entities(validated)
     validated = _drop_substring_entities(validated)
     validated = _filter_lifestyle_entities(validated)
     return validated
+
 
 
 _NORMAL_RESULT_SPLIT_RE = re.compile(
