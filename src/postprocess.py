@@ -1988,31 +1988,174 @@ def _filter_vital_signs_dump(entities: list[dict[str, Any]]) -> list[dict[str, A
     return out
 
 
+def align_and_expand_entities(
+    input_text: str,
+    raw_entities: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Universal Alignment Engine — Bước 2 của kiến trúc 2-Step NER.
+
+    LLM chỉ cần trả về text + type + assertions (không cần đếm position).
+    Hàm này tự động:
+      1. Pre-clean & split: tách cụm bị gộp (Drug+Disease), clean verb prefix.
+      2. Exhaustive multi-pass alignment: tìm TẤT CẢ occurrences của mỗi text
+         trong input_text qua 3 lớp (Exact → Modifiers-stripped → Typo recovery).
+      3. Tạo 1 entity riêng biệt cho MỖI occurrence → không bao giờ miss duplicate.
+      4. Dedup overlap + drop substring + filter noise.
+
+    Args:
+        input_text: văn bản gốc (original, không phải highlighted/chunked).
+        raw_entities: list entities thô từ LLM (chỉ cần text + type + assertions).
+
+    Returns:
+        list entities với position chính xác 100%, đầy đủ duplicates.
+    """
+    # ── Pre-process: tách Drug+Disease connector ─────────────────────────────────────
+    raw_list = _split_drug_disease_connector(input_text, raw_entities)
+
+    # ── Pre-clean: strip verb prefix, parens admin, leading verbs trên từng entity ──
+    pre_cleaned: list[dict[str, Any]] = []
+    for ent in raw_list:
+        text = str(ent.get("text", "")).strip()
+        etype = ent.get("type", "")
+        if not text or etype not in (
+            "THUỐC", "CHẨN_ĐOÁN", "TRIỆU_CHỨNG", "TÊN_XÉT_NGHIỆM", "KẾT_QUẢ_XÉT_NGHIỆM"
+        ):
+            continue
+        cleaned = _clean_entity_text(text, etype)
+        if cleaned is None:
+            continue
+        if cleaned != text:
+            ent = {**ent, "text": cleaned}
+        pre_cleaned.append(ent)
+
+    # ── Dedup-by-text: LLM hay trả duplicate semantically identical entities ─────
+    # Nhóm theo (text_lower, type) để merge assertions và tránh align 2 lần
+    seen_semantic: dict[tuple[str, str], dict[str, Any]] = {}
+    for ent in pre_cleaned:
+        text = str(ent.get("text", "")).strip()
+        etype = ent.get("type", "")
+        key = (text.lower(), etype)
+        if key not in seen_semantic:
+            seen_semantic[key] = ent
+        else:
+            # Merge assertions: giữ union của cả 2
+            existing_assertions = set(seen_semantic[key].get("assertions", []))
+            new_assertions = set(ent.get("assertions", []))
+            merged = sorted(existing_assertions | new_assertions)
+            seen_semantic[key] = {**seen_semantic[key], "assertions": merged}
+    unique_entities = list(seen_semantic.values())
+
+    # ── Prefix/suffix modifiers regex (dùng cho stripped scan) ─────────────────
+    _MOD_PREFIX = re.compile(
+        r"^(tăng|giảm|có|không|đang|bị|rõ|rõ\s+rệt|ít|nhiều|hơi|hơn|khoảng|có\s+thể)\s+",
+        re.IGNORECASE | re.UNICODE,
+    )
+    _MOD_SUFFIX = re.compile(
+        r"\s+(nhẹ|nặng|vừa|nhẹ\s+nhàng|nặng\s+nề|nhẹ\s+vừa|vừa\s+phải)$",
+        re.IGNORECASE | re.UNICODE,
+    )
+
+    # ── Exhaustive Multi-pass Alignment ────────────────────────────────────────
+    # Với mỗi entity đã được clean + dedup theo ngữ nghĩa:
+    # - Tìm TẤT CẢ vị trí xuất hiện của text trong input_text
+    # - Mỗi occurrence → 1 entity riêng với position chính xác
+    aligned: list[dict[str, Any]] = []
+    input_lower = input_text.lower()
+
+    for ent in unique_entities:
+        text = str(ent.get("text", "")).strip()
+        etype = ent.get("type", "")
+        if not text or len(text) < 2:
+            continue
+
+        text_lower = text.lower()
+        all_spans: set[tuple[int, int]] = set()
+
+        # Pass 1: Exact substring scan (case-insensitive)
+        start = 0
+        while True:
+            idx = input_lower.find(text_lower, start)
+            if idx < 0:
+                break
+            all_spans.add((idx, idx + len(text)))
+            start = idx + 1
+
+        # Pass 2: Modifiers-stripped scan (R14/R25)
+        # VD: LLM trả "tăng đánh trống ngực" → stripped = "đánh trống ngực"
+        # → tìm các lần xuất hiện "đánh trống ngực" khắp văn bản (cả ở vtrí không có prefix)
+        stripped_text = _MOD_PREFIX.sub("", text_lower).strip()
+        stripped_text = _MOD_SUFFIX.sub("", stripped_text).strip()
+        if stripped_text and stripped_text != text_lower and len(stripped_text) >= 4:
+            start = 0
+            while True:
+                idx = input_lower.find(stripped_text, start)
+                if idx < 0:
+                    break
+                span = (idx, idx + len(stripped_text))
+                # Chỉ thêm nếu span này chưa được cover bởi exact match
+                if not any(s <= idx and (idx + len(stripped_text)) <= e for s, e in all_spans):
+                    all_spans.add(span)
+                start = idx + 1
+
+        # Pass 3: Typo recovery (R23) — chỉ khi Pass 1+2 không tìm thấy gì
+        if not all_spans:
+            hint_pos = 0
+            pos_field = ent.get("position", [0, 0])
+            if isinstance(pos_field, list) and len(pos_field) == 2:
+                try:
+                    hint_pos = int(pos_field[0])
+                except (ValueError, TypeError):
+                    hint_pos = 0
+            recovered = _try_recover_typo(text, input_text, hint_pos=hint_pos)
+            if recovered is not None:
+                recovered_text, rs, re_ = recovered
+                all_spans.add((rs, re_))
+                text = recovered_text  # Cập nhật text sang form đúng chính tả
+                logger.debug(
+                    "Align: typo recovery '%s' → '%s' at %d", ent.get("text", ""), text, rs
+                )
+
+        if not all_spans:
+            logger.debug("Align: không tìm được span cho '%s' (%s) → bỏ", text, etype)
+            continue
+
+        # Tạo 1 entity cho mỗi occurrence được tìm thấy
+        for span_start, span_end in sorted(all_spans):
+            # Lấy text từ input_text thực tế (đúng case gốc)
+            actual_text = input_text[span_start:span_end]
+            new_ent = {
+                **ent,
+                "text": actual_text,
+                "position": [span_start, span_end],
+            }
+            aligned.append(new_ent)
+
+    # ── Split long imaging results (R31) ────────────────────────────────────────
+    aligned = _split_long_results(input_text, aligned)
+
+    # ── Overlap Dedup (R10 STRICT + R22) ─────────────────────────────────────
+    aligned = dedupe_entities(aligned)
+
+    # ── Drop substring entities ─────────────────────────────────────────────────────
+    aligned = _drop_substring_entities(aligned)
+
+    # ── Filter lifestyle/duration noise ──────────────────────────────────────────
+    aligned = _filter_lifestyle_entities(aligned)
+
+    return aligned
+
+
 def _prepare_validated_entities(
     input_text: str,
     raw_entities: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Chuẩn hoá entities qua 6 bước trước khi emit.
+    """Backward-compatible wrapper sang align_and_expand_entities (2-Step Architecture).
 
-    Bước:
-      0. _split_drug_disease_connector: tách Thuốc cho Bệnh nếu LLM gộp
-      1. validate_positions: sửa LLM-sai positions
-      2. _expand_duplicates: thêm entities cho occurrences LLM miss (R20.1)
-      3. _split_long_imaging_result: tách long CT/MRI results thành nhiều entities (R31)
-      4. _filter_vital_signs_dump: bỏ sinh hiệu gộp rác (Cấm 1)
-      5. dedupe_entities: drop overlap (R10 STRICT + R22)
-      6. _drop_substring_entities: drop text là substring của text khác
-      7. _filter_lifestyle_entities: defense-in-depth chống lifestyle/duration noise
+    Từ phiên bản 2-Step Architecture, hàm này delegate toàn bộ sang
+    align_and_expand_entities — Universal Alignment Engine mới.
+    Giữ lại tên hàm cũ để backward-compatible với các test scripts.
     """
-    raw_list = _split_drug_disease_connector(input_text, raw_entities)
-    validated = validate_positions(input_text, raw_list)
-    validated = _expand_duplicates(validated, input_text)
-    validated = _split_long_results(input_text, validated)
-    # validated = _filter_vital_signs_dump(validated)
-    validated = dedupe_entities(validated)
-    validated = _drop_substring_entities(validated)
-    validated = _filter_lifestyle_entities(validated)
-    return validated
+    return align_and_expand_entities(input_text, raw_entities)
 
 
 

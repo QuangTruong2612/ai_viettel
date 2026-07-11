@@ -5,7 +5,7 @@ You are an expert Vietnamese Clinical NER Specialist with 20+ years of experienc
 
 🔥 KIM CHỈ NAM TRÍCH XUẤT KIỆT ĐỂ (EXHAUSTIVE EXTRACTION - MUST NOT MISS ANY ENTITY):
 1. **QUÉT KIỆT ĐỂ 100% THỰC THỂ TRONG 5 TYPE (Recall tối đa)**: Bạn PHẢI đọc kỹ từng câu, từng dòng từ đầu đến cuối hồ sơ. MỖI từ hoặc cụm từ thuộc 1 trong 5 loại thực thể (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM) ĐỀU PHẢI ĐƯỢC TRÍCH XUẤT. Tuyệt đối KHÔNG ĐƯỢC BỎ SÓT bất kỳ entity nào ở các phần: Tiền sử, Diễn biến, Khám lâm sàng, Cận lâm sàng, Chẩn đoán, Điều trị, Thuốc ra viện. 1 bệnh án chi tiết thường có 30-50+ entities.
-2. **CHUẨN XÁC VỊ TRÍ & PHÂN LOẠI (Precision cao)**: Phân loại đúng type theo bản chất y khoa, giữ verbatim text trong input (đã lược bỏ động từ dẫn/thời gian rác), position chính xác character offset.
+2. **TẬP TRUNG NGỮ NGHĨA Y KHOA (Semantic Only — Không cần đếm ký tự)**: Phân loại đúng type theo bản chất y khoa, giữ verbatim text trong input (đã lược bỏ động từ dẫn/thời gian rác). KHÔNG CẦN xuất `position` — Python sẽ tự tính character offset chính xác 100% cho bạn.
 
 ⚠️ **KIỂM TRA KIỆT ĐỂ 5 LOẠI THỰC THỂ (CHECKLIST TRƯỚC KHI XUẤT JSON)**:
 - 💊 **THUỐC**: Đã lấy hết thuốc trong "Tiền sử", "Thuốc đang dùng", "Điều trị", "Chỉ định ra viện" chưa? (Giữ nguyên liều lượng & pattern `x N` như `aspirin 325mg x 1`, `metoprolol 25mg po bid`).
@@ -348,13 +348,20 @@ Học cách SUY LUẬN thay vì memorize:
    - `WBC 14,5 K/uL` → TÁCH 2: TÊN_XÉT_NGHIỆM (`WBC`) + KẾT_QUẢ_XÉT_NGHIỆM (`14,5 K/uL`).
    - `HA 160/90 mmHg` → TÁCH 2: TÊN_XÉT_NGHIỆM (`HA`) + KẾT_QUẢ_XÉT_NGHIỆM (`160/90 mmHg`).
 
-3. **Chuỗi phủ định liên hoàn (Negated chain)**:
-   - `Không sốt, không ho, không khó thở` → 3 TRIỆU_CHỨNG riêng biệt, đều có assertion `isNegated`.
-   - `Không buồn nôn, hay nôn, đổ mồ hôi` → 3 TRIỆU_CHỨNG riêng biệt (`buồn nôn`, `nôn`, `đổ mồ hôi`), đều có assertion `isNegated`.
+3. **Chuỗi phủ định \u2014 CHỈ entity ngay sau từ phủ định mới bị `isNegated` (PARTIAL NEGATION)**:
+   - `Không sốt, không ho, có đau đầu` → `sốt`=`isNegated`, `ho`=`isNegated`, **`đau đầu`=`[]` (KHÔNG bị negate!)**
+   - `Không buồn nôn, không nôn, đổ mồ hôi` → `buồn nôn`=`isNegated`, `nôn`=`isNegated`, **`đổ mồ hôi`=`[]` (KHÔNG bị negate!)**
+   - `Không sốt, không ho, không khó thở` → 3 TRIỆU_CHỨNG, **đều** `isNegated`.
+   - ⚠️ **NGUYÊN TẮC VÀNG**: Phủ định trong tiếng Việt chỉ áp dụng cho từ/cụm ngay sau nó, KHÔNG tự động lan sang các entity tiếp theo. Cụm `có`, `bị`, `xuất hiện` sau dấu phẩy phá vỡ chuỗi phủ định. Chuỗi liên tiếp `không A, không B` hay `không A, hay B` → cả A và B bị negate.
+   - **Ví dụ PHÂN BIỆT:**
+     - `không sốt, không ho, đau đầu` → sốt=`isNegated`, ho=`isNegated`, đau đầu=`[]`
+     - `không sốt, không ho, không đau đầu` → sốt=`isNegated`, ho=`isNegated`, đau đầu=`isNegated`
+     - `không có khó thở, có thắt chặt ngực` → khó thở=`isNegated`, thắt chặt ngực=`[]`
+     - `Không buồn nôn, hay nôn, đổ mồ hôi` → buồn nôn=`isNegated`, nôn=`isNegated`, đổ mồ hôi=`[]`
 
 4. **3 Assertions chuẩn (max 3, có thể kết hợp)**:
    - `isHistorical`: Tiền sử bệnh xa (`Tiền sử: THA 5 năm`), hoặc thuốc đang dùng TRƯỚC nhập viện (`Thuốc đang dùng: amlodipine`, `Thuốc trước khi nhập viện:`). *(Lưu ý: "Lý do nhập viện", "Triệu chứng hiện tại", "Khám lâm sàng" là đợt bệnh hiện tại → `assertions: []`, KHÔNG phải isHistorical)*.
-   - `isNegated`: Bệnh/triệu chứng bị phủ định bởi từ `không`, `chưa`, `âm tính`, `không có`, `không xuất hiện` ngay phía trước (`không sốt`).
+   - `isNegated`: Bệnh/triệu chứng bị phủ định bởi từ `không`, `chưa`, `âm tính`, `không có`, `không xuất hiện` **ngay phía trước** entity đó. Chỉ entity đó bị negate, KHÔNG áp dụng hàng loạt cho các entity sau!
    - `isFamily`: Bệnh của người nhà (`Bố bệnh nhân bị THA` → `["isFamily", "isHistorical"]`).
 </splitting_and_context>
 
@@ -514,7 +521,7 @@ OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "array",
     "items": {
         "type": "object",
-        "required": ["text", "type", "position", "assertions"],
+        "required": ["text", "type", "assertions"],
         "properties": {
             "text": {"type": "string", "minLength": 1},
             "type": {
@@ -527,11 +534,14 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                     "CHẨN_ĐOÁN",
                 ],
             },
+            # position là optional — Python sẽ tự align chính xác 100%
+            # LLM không cần đếm character offset nữa (2-Step Architecture)
             "position": {
                 "type": "array",
                 "minItems": 2,
                 "maxItems": 2,
                 "items": {"type": "integer", "minimum": 0},
+                "default": [0, 0],
             },
             "assertions": {
                 "type": "array",
@@ -634,8 +644,9 @@ def build_user_prompt(input_text: str) -> str:
         "   - 🤒 TRIỆU_CHỨNG: Lấy đủ mọi than phiền (`đau ngực`, `khó thở`, `khó thở nhẹ`, `đánh trống ngực`, `mệt mỏi nhiều khi gắng sức`), lặp lại ở N câu thì lấy đủ N entities (R10 STRICT).\n"
         "   - 🔬 TÊN_XÉT_NGHIỆM: Lấy đủ chỉ định/thủ thuật (`X-quang ngực`, `ECG`, `nước tiểu`, `siêu âm tim`, `monitor holter`).\n"
         "   - 📊 KẾT_QUẢ_XÉT_NGHIỆM: Lấy đủ chỉ số định lượng (`160/90 mmHg`, `96%`, `38.5°C`) và kết quả định tính/bình thường (`nhịp xoang chiếm ưu thế`, `bình thường`, `không ghi nhận gì bất thường`).\n"
-        "3. Tách bạch rõ ràng: Cắt sạch động từ dẫn (`cảm thấy`, `chụp`) & thời lượng rác (`trong tuần qua`).\n\n"
+        "3. Tách bạch rõ ràng: Cắt sạch động từ dẫn (`cảm thấy`, `chụp`) & thời lượng rác (`trong tuần qua`).\n"
+        "4. ⚠️ KHÔNG CẦN ghi `position` — chỉ cần ghi đúng `text`, `type`, `assertions`. Python sẽ tự tính offset chính xác.\n\n"
         f"{alert_part}"
         f"INPUT:\n{input_text}\n\n"
-        "OUTPUT CHÍNH XÁC MẢNG JSON ARRAY (Tuyệt đối không kèm lời giải thích hay markdown fence ```):"
+        "OUTPUT JSON ARRAY (chỉ các trường text, type, assertions — không cần position, không kèm lời giải thích):"
     )

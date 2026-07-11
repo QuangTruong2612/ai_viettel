@@ -40,6 +40,7 @@ from src.postprocess import (
     assemble_record, validate_output, write_output,
     preprocess_input_for_llm,
     _preprocess_highlight_duplicates,
+    align_and_expand_entities,
 )
 from src.prompts import (
     SYSTEM_PROMPT,
@@ -434,8 +435,22 @@ def process_record(
             rec_id,
             _LAST_RAW_RESPONSE[:500],
         )
+
+    # 2-STEP ARCHITECTURE:
+    # Bước 2 — Python Universal Alignment & Duplicate Expansion
+    # LLM đã trả text+type+assertions (không cần position chính xác).
+    # align_and_expand_entities sẽ:
+    #   - Tìm TẤT CẢ occurrences của mỗi text trên input_text GỐC (không phải chunk)
+    #   - Tự động tính character offset [start, end] chính xác 100%
+    #   - Không bao giờ miss duplicates
+    # assemble_record nhận pre-aligned entities để chỉ cần RAG lookup + emit.
+    pre_aligned = align_and_expand_entities(input_text, raw)
+    logger.info(
+        "[%d] 2-Step Alignment: %d raw entities → %d aligned entities (sau dedup)",
+        rec_id, len(raw), len(pre_aligned),
+    )
     final = assemble_record(
-        input_text, raw, retriever, icd_retriever=icd_retriever, llm_client=llm
+        input_text, pre_aligned, retriever, icd_retriever=icd_retriever, llm_client=llm
     )
     if not validate_output(final):
         logger.warning("[%d] Output fail schema validate", rec_id)
