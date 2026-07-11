@@ -1513,23 +1513,12 @@ class ICD10VectorSearch:
         # 2. Tải ma trận nhúng .npy nếu có sẵn
         if self._embeddings_path.exists():
             try:
-                emb = np.load(self._embeddings_path)
-                if emb.shape[0] == len(self.codes):
-                    self._embeddings = emb
-                    logger.info(
-                        "ICD10VectorSearch: Đã tải ma trận embeddings %s (shape: %r)",
-                        self._embeddings_path.name,
-                        self._embeddings.shape,
-                    )
-                else:
-                    logger.warning(
-                        "ICD10VectorSearch: File embeddings %s có %d dòng KHÔNG KHỚP với %d dòng từ %s. Bỏ qua file cũ và tự động sinh lại embeddings phù hợp!",
-                        self._embeddings_path.name,
-                        emb.shape[0],
-                        len(self.codes),
-                        self._jsonl_path.name,
-                    )
-                    self._embeddings = None
+                self._embeddings = np.load(self._embeddings_path)
+                logger.info(
+                    "ICD10VectorSearch: Đã tải ma trận embeddings %s (shape: %r)",
+                    self._embeddings_path.name,
+                    self._embeddings.shape,
+                )
             except Exception as exc:
                 logger.warning(
                     "Không thể load file embeddings %s: %s",
@@ -1550,24 +1539,22 @@ class ICD10VectorSearch:
         if not query or not self.codes:
             return []
 
-        # 1 & 2. Đảm bảo model và embeddings sẵn sàng (và khớp số lượng mã)
-        if self._embeddings is None or len(self._embeddings) != len(self.codes):
+        # 1 & 2. Đảm bảo model và embeddings sẵn sàng
+        if self._embeddings is None:
             logger.info(
-                "ICD10VectorSearch: Đang sinh embeddings cho %d mã ICD...",
-                len(self.codes),
+                "ICD10VectorSearch: Không tìm thấy file embeddings.npy có sẵn. Đang sinh trực tiếp..."
             )
             try:
                 t0 = time.time()
-                new_emb = self._encode_safe(
+                self._embeddings = self._encode_safe(
                     self.descs_raw,
                     batch_size=128,
                     show_progress_bar=True,
                     normalize_embeddings=True,
                     convert_to_numpy=True,
                 )
-                if new_emb is None or len(new_emb) != len(self.codes):
+                if self._embeddings is None or len(self._embeddings) == 0:
                     return []
-                self._embeddings = new_emb
                 try:
                     np.save(self._embeddings_path, self._embeddings)
                     logger.info(
@@ -1674,7 +1661,7 @@ class ICD10VectorSearch:
         Returns: dict {code: cosine_sim} (giá trị ∈ [0, 1] cho vectors đã chuẩn hoá L2).
         """
         self._ensure_loaded()
-        if not query or not codes or self._embeddings is None or len(self._embeddings) != len(self.codes):
+        if not query or not codes or self._embeddings is None:
             return {}
 
         q_vec = self._encode_safe(
@@ -1809,18 +1796,8 @@ class ICD10BM25Index:
 
         tokenized: list[list[str]] = []
 
-        # 1. Try load token cache (nếu không cũ hơn file gốc)
-        cache_valid = False
-        if self._tokens_cache_path.exists() and self._jsonl_path.exists():
-            try:
-                if self._tokens_cache_path.stat().st_mtime >= self._jsonl_path.stat().st_mtime:
-                    cache_valid = True
-            except Exception:
-                cache_valid = True
-        elif self._tokens_cache_path.exists():
-            cache_valid = True
-
-        if cache_valid:
+        # 1. Try load token cache
+        if self._tokens_cache_path.exists():
             try:
                 t0 = time.time()
                 with gzip.open(self._tokens_cache_path, "rt", encoding="utf-8") as f:
@@ -1831,17 +1808,11 @@ class ICD10BM25Index:
                         row = json.loads(line)
                         self.codes.append(row["code"])
                         tokenized.append(row["tokens"])
-                # Nếu cache chứa số lượng dòng quá sai lệch với file nguồn (ví dụ cache 71k dòng nhưng jsonl 15k dòng), bỏ qua cache
-                if self._jsonl_path.name == "icd10.jsonl" and len(self.codes) > 20000:
-                    logger.warning("BM25 cache %s có %d dòng KHÔNG KHỚP với %s (15k dòng) → rebuild", self._tokens_cache_path.name, len(self.codes), self._jsonl_path.name)
-                    self.codes.clear()
-                    tokenized.clear()
-                else:
-                    logger.info(
-                        "BM25: loaded %d tokenized docs từ cache (%.2fs)",
-                        len(self.codes),
-                        time.time() - t0,
-                    )
+                logger.info(
+                    "BM25: loaded %d tokenized docs từ cache (%.2fs)",
+                    len(self.codes),
+                    time.time() - t0,
+                )
             except Exception as exc:
                 logger.warning("BM25 cache load fail (%s) → rebuild", exc)
                 self.codes.clear()

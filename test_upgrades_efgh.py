@@ -39,22 +39,3 @@ def test_upgrade_f_concurrent_enrichment():
     final = assemble_record(input_text, raw_entities, retriever, icd_retriever=None)
     assert len(final) == 3
     assert all("candidates" in rec for rec in final)
-
-
-def test_icd_stale_embeddings_and_bounds(tmp_path: Path):
-    """Kiểm tra xử lý ma trận embeddings cũ lệch số dòng và bounds check trong ICD10VectorSearch."""
-    import numpy as np
-    from src.icd_rag import ICD10VectorSearch
-
-    fake_jsonl = tmp_path / "fake_icd.jsonl"
-    fake_jsonl.write_text('{"code":"A00","desc_vi":"Bệnh tả"}\n{"code":"A01","desc_vi":"Thương hàn"}\n', encoding="utf-8")
-    fake_npy = tmp_path / "fake_emb.npy"
-    # Ma trận cũ có 10 dòng, trong khi fake_jsonl chỉ có 2 dòng -> lệch số lượng
-    stale_emb = np.zeros((10, 1024), dtype=np.float32)
-    np.save(fake_npy, stale_emb)
-
-    vs = ICD10VectorSearch(jsonl_path=fake_jsonl, embeddings_path=fake_npy)
-    vs._ensure_loaded()
-    # Ma trận cũ bị từ chối do 10 dòng != 2 dòng
-    assert vs._embeddings is None
-    assert len(vs.codes) == 2
