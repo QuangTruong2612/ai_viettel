@@ -715,7 +715,6 @@ def main(argv: list[str] | None = None) -> int:
                     logger.exception("Future CRASH: %s → continue", exc)
                     _try_recover_ollama(llm, -1)
     # Save caches
-    translator.save_cache()
     icd_retriever.save_index()
     return 0
 

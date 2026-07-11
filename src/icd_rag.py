@@ -1198,35 +1198,7 @@ class ICDRetriever:
             codes = self._exact_match_vn_substring(text_clean)
             if codes:
                 return codes
-            # Cũng thử VN → EN translation cho text_clean
-            try:
-                en_text = self.translator.translate(text_clean) if self.translator else text_clean
-                if en_text and en_text.lower() != text_clean.lower():
-                    en_lower = en_text.lower().strip()
-                    for name, idx in self.idx.name_to_idx.items():
-                        if en_lower in name.lower():
-                            code = self.idx.codes[idx]
-                            if code not in codes:
-                                codes.append(code)
-                    if codes:
-                        return codes
-            except Exception:
-                pass
 
-        # Tier 4: Try direct VN → EN translation (full text)
-        try:
-            en_text = self.translator.translate(text) if self.translator else text
-            if en_text and en_text.lower() != text.lower():
-                en_lower = en_text.lower().strip()
-                for name, idx in self.idx.name_to_idx.items():
-                    if en_lower in name.lower():
-                        code = self.idx.codes[idx]
-                        if code not in codes:
-                            codes.append(code)
-                if codes:
-                    return codes
-        except Exception:
-            pass
 
         # Tier 5: Drop more modifiers (suffix)
         text_clean2 = _re.sub(
