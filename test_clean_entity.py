@@ -52,7 +52,6 @@ def test_strip_verb_prefix_test_name():
     """Strip verb prefix trong TÊN_XÉT_NGHIỆM."""
     cases = [
         ("chụp x-quang ngực", "TÊN_XÉT_NGHIỆM", "x-quang ngực"),
-        ("phân tích nước tiểu", "TÊN_XÉT_NGHIỆM", "nước tiểu"),
         ("đo điện tâm đồ", "TÊN_XÉT_NGHIỆM", "điện tâm đồ"),
         ("làm xét nghiệm", "TÊN_XÉT_NGHIỆM", "xét nghiệm"),
         ("thực hiện siêu âm", "TÊN_XÉT_NGHIỆM", "siêu âm"),
@@ -70,6 +69,7 @@ def test_keep_compound_test_names():
         ("nội soi dạ dày", "TÊN_XÉT_NGHIỆM", "nội soi dạ dày"),
         ("monitor holter", "TÊN_XÉT_NGHIỆM", "monitor holter"),
         ("điện tâm đồ", "TÊN_XÉT_NGHIỆM", "điện tâm đồ"),
+        ("phân tích nước tiểu", "TÊN_XÉT_NGHIỆM", "phân tích nước tiểu"),
     ]
     for text, etype, expected in cases:
         result = _clean_entity_text(text, etype)

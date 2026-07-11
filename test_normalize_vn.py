@@ -23,7 +23,7 @@ def test_1_normalize_abbreviation_exact():
         ("NMCT", "nhồi máu cơ tim"),
         ("ĐTĐ", "đái tháo đường"),
         ("COPD", "bệnh phổi tắc nghẽn mạn"),
-        ("OSA", "ngưng thừ khi ngủ"),
+        ("OSA", "ngưng thở khi ngủ"),
         ("HC", "hạch"),
     ]
     for input_text, expected in cases:

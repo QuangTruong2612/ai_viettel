@@ -196,13 +196,10 @@ def _normalize_vn_term(text: str) -> str:
     for abbr, full in sorted_abbrs:
         if len(abbr) < 3:  # Skip very short abbreviations (2-char) to avoid false positives
             continue
-        # Match whole word only (vd "tha" không match "thalamic")
-        # Use regex with word boundaries
         import re as _re
         pattern = _re.compile(r"\b" + _re.escape(abbr) + r"\b")
         if pattern.search(s_lower):
-            s_lower = pattern.sub(full, s_lower, count=1)
-            break  # Only apply first (longest) abbreviation match
+            s_lower = pattern.sub(full, s_lower)
 
     # 3. Synonym replacement (whole word)
     import re as _re
@@ -218,6 +215,7 @@ def _normalize_vn_term(text: str) -> str:
 # ---------------------------------------------------------------------- #
 # Data structures
 # ---------------------------------------------------------------------- #
+
 
 
 
@@ -336,10 +334,19 @@ def _filter_irrelevant_codes(
                 out.append(code)
             continue
 
-        # O00-O9A: pregnancy
+        # O00-O9A: pregnancy & obstetric conditions
         if code.startswith("O") and len(code) >= 2 and code[1].isdigit() and code[:2] < "O9":
             if any(kw in entity_lower for kw in (
                 "pregnancy", "mang thai", "thai kỳ", "obstetric", "gestation",
+                "chuyển dạ", "thai", "sản", "vỡ ối", "rỉ ối", "tiền sản giật", "sinh con",
+            )):
+                out.append(code)
+            continue
+
+        # P00-P96: Perinatal / Newborn conditions (chỉ dành cho sơ sinh / thai nhi)
+        if code.startswith("P") and len(code) >= 2 and code[1].isdigit():
+            if any(kw in entity_lower for kw in (
+                "sơ sinh", "thai nhi", "newborn", "perinatal", "fetal", "fetus", "nhũ nhi",
             )):
                 out.append(code)
             continue
@@ -472,6 +479,27 @@ class ICDRetriever:
 
     # ------------------------------------------------------------------ #
 
+    def _filter_and_sort_codes(self, codes: list[str], text: str) -> list[str]:
+        if not codes:
+            return []
+        filtered = _filter_irrelevant_codes(list(codes), text, self.idx)
+        restricted = _restrict_chapter(filtered, text)
+        result = restricted if restricted else (filtered if filtered else list(codes))
+        
+        # Smart sorting: ưu tiên các chương bệnh phổ biến cho người lớn (I, J, K, E, N, M, S, T, C, D, G, A, B, R)
+        # đẩy O (thai sản), P (sơ sinh), V/W/X/Y (tác nhân bên ngoài), Z (tiền căn) xuống dưới nếu không rõ
+        def _chapter_priority(code: str) -> tuple[int, str]:
+            if not code:
+                return (99, code)
+            ch = code[0].upper()
+            if ch in ('I', 'J', 'K', 'E', 'N', 'M', 'C', 'D', 'G', 'A', 'B', 'R', 'S', 'T'):
+                return (1, code)
+            if ch in ('L', 'H', 'F'):
+                return (2, code)
+            return (3, code)
+            
+        return sorted(set(result), key=_chapter_priority)
+
     def lookup(
         self,
         vn_text: str,
@@ -482,84 +510,48 @@ class ICDRetriever:
 
         Format dữ liệu mới (ICD10_Data.json): Mã bệnh + Tên bệnh gốc (TIẾNG VIỆT).
         → Match trực tiếp VN-VN, KHÔNG cần Translate VN→EN.
-
-        Args:
-            vn_text: text gốc (VN). Có thể đã qua rescan (LLM đã chuẩn hóa).
-            context_query: KHÔNG DÙNG — để giữ signature tương thích.
-            other_entities: list các entities khác trong cùng record
-                (drugs/symptoms). Dùng để build BM25 keyword-rich query.
-                Mặc định: rỗng.
-
-        Returns: list codes (string), unique + sorted.
-
-        Bug history:
-        1. Trước kia top_k=20 → quá nhiều noise. Fix: top_k=3 (strict).
-        2. Trước kia BM25 keyword dùng raw en_query (không có context) → fail
-           khi input chỉ nói "suy thận". Fix: enrich BM25 query với nearby
-           drugs/symptoms via build_context_query.
-        3. Format cũ dùng desc_en ICD NIH (English); data mới 2026-07 dùng
-           ICD10_Data.json (VN). Match trực tiếp VN-VN, bỏ qua Translate step.
         """
         if not vn_text:
             return []
 
         text = self._strip_clinical_prefix(vn_text)
         # R27.6 mới 2026-07-10: normalize abbreviation + synonym VN TRƯỚC lookup chain
-        # (THA → tăng huyết áp, u ác → u ác tính, ...) để tăng hit rate.
         text = _normalize_vn_term(text)
 
         # R27.7 mới 2026-07-10: short-circuit khi có direct match trong _icd_vn_to_codes
-        # (mapping VN → exact ICD codes). Tránh vector search reroute qua embedding
-        # cho known terms (vd "ngoại tâm thu nhĩ" → I48.x sai thay vì I49.1).
         if hasattr(self, '_icd_vn_to_codes'):
             key_lower = text.lower().strip()
             if key_lower in self._icd_vn_to_codes:
                 logger.debug("L0 short-circuit direct match: '%s' → %s", text, self._icd_vn_to_codes[key_lower])
-                return sorted(set(self._icd_vn_to_codes[key_lower]))[:2]
+                return self._filter_and_sort_codes(self._icd_vn_to_codes[key_lower], text)[:2]
 
         # L1: Exact (cao độ tin cậy nhất — cap 2)
         key = text.lower()
         if key in self.idx.exact:
-            return sorted(set(self.idx.exact[key]))[:2]
+            return self._filter_and_sort_codes(self.idx.exact[key], text)[:2]
 
-        # L1.5: VN prefix exact match — nếu text là prefix của desc_vi (vd
-        # "viêm tuyến mồ hôi" là prefix của "Viêm tuyến mồ hôi mủ [nhọt ổ gà]")
-        # → match. Fix bug L73.2 bị miss vì desc_vi có thêm "mủ [nhọt ổ gà]".
+        # L1.5: VN prefix exact match — nếu text là prefix của desc_vi
         prefix_codes = self._exact_match_vn_prefix(text)
         if prefix_codes:
-            return sorted(set(prefix_codes))[:2]
+            return self._filter_and_sort_codes(prefix_codes, text)[:2]
 
         # L1.7 (NEW 2026-07-10): VN substring match (text chứa trong desc_vi)
-        # Đưa LÊN TRƯỚC vector search vì substring chính xác hơn cho medical terms.
-        # "khối u trực tràng" → "u trực tràng" → substring match "U ác tính ở trực tràng" (C20)
-        # Min length 5 chars để tránh false positive.
         if len(text) >= 5:
             substring_codes = self._exact_match_vn_substring(text)
             if substring_codes:
                 logger.debug("L1.7 substring match '%s' → %s", text, substring_codes[:2])
-                return sorted(set(substring_codes))[:2]
+                return self._filter_and_sort_codes(substring_codes, text)[:2]
 
         # L2: Build query có context cho BM25 (dùng nearby drugs/symptoms)
         bm25_query = build_context_query(text, "CHẨN_ĐOÁN", other_entities)
         # Vector vẫn dùng text gốc (không contaminate embedding - bug history #4)
 
         # L3: Hybrid search với adaptive confidence-based cap (2026-07 fix):
-        # Ý tưởng: KHÔNG list ra hết mã đúng — chỉ return codes có cosine CAO
-        # và CÓ score gap tốt so với top-1. Nguyên tắc:
-        # 1. Threshold CAO (0.55) lọc ra codes chắc chắn liên quan — GIẢM từ 0.75 → 0.55 (R27.7)
-        #    vì 0.75 quá strict cho medical text + BGE-M3 multilingual
-        # 2. Adaptive cap: nếu top-1 cosine rất cao → return 1 code; nếu các top
-        #    scores gần nhau (gap < 0.10) → cap về 2-3 codes
-        # 3. "KHÔNG list ra hết mã đúng" → giảm precision penalty Set-based F1.
         if self.local_search is not None:
-            # Multi-query vector search (R27.7 mới 2026-07-10):
-            # Search với MULTIPLE variants của text để tăng recall
             queries_to_try = [text]
-            # Thêm normalized variants nếu khác
             normalized = _normalize_vn_term(text)
             if normalized != text:
                 queries_to_try.append(normalized)
-            # Thêm VN→EN translation đã bị loại bỏ vì ICD database là tiếng Việt
 
             all_matched_set: set[str] = set()
             all_scores: dict[str, float] = {}
@@ -569,7 +561,6 @@ class ICDRetriever:
                 ) or []
                 for code in matched:
                     all_matched_set.add(code)
-                    # Lấy score cao nhất giữa các queries
                     if self.local_search.vector_search is not None:
                         scores = self.local_search.vector_search.score_codes(q, [code])
                         if code in scores:
@@ -577,109 +568,57 @@ class ICDRetriever:
 
             all_matched = list(all_matched_set)
             if all_matched:
-                # Sort by cosine desc
                 sorted_codes = sorted(
                     all_matched,
                     key=lambda c: -all_scores.get(c, 0.0),
                 )
-                # Adaptive cap: keep codes within score gap < 0.10 of top-1
                 if sorted_codes and all_scores:
                     top1_score = all_scores.get(sorted_codes[0], 0.0)
                     kept = [
                         c for c in sorted_codes
                         if all_scores.get(c, 0.0) >= top1_score - 0.10
                     ]
-                    # Final cap top-2 (Set-based F1 với expected ~1-2 codes thì OK)
-                    kept = kept[:2]
+                    kept = kept[:4]
                 else:
-                    kept = sorted_codes[:2]
-                kept = _filter_irrelevant_codes(kept, text, self.idx)
-                if kept:
-                    # Chapter restriction (2026-07 fix L73.2 case): nếu text match
-                    # clinical keyword → restrict to relevant ICD chapter.
-                    restricted = _restrict_chapter(kept, text)
-                    if restricted:
-                        return restricted[:2]
-                    # Fallback 2026-07-09 (R27.2): nếu text match chapter keyword
-                    # (vd "tuyến mồ hôi" → L73) mà `kept` không có code L73 nào
-                    # → thử VN substring match trong index (re-search toàn bộ).
-                    # Nếu substring match thành công → trả codes đúng.
-                    # Nếu vẫn rỗng → return [] (KHÔNG fallback về kept SAI).
-                    if _text_matches_chapter_keyword(text):
-                        # Try prefix match first (nếu desc_vi bắt đầu bằng text)
-                        prefix_codes = self._exact_match_vn_prefix(text)
-                        if prefix_codes:
-                            return sorted(set(prefix_codes))[:2]
-                        # Try substring match (desc_vi chứa text)
-                        chapter_codes = self._chapter_codes_lookup(text)
-                        if chapter_codes:
-                            return sorted(set(chapter_codes))[:2]
-                    return kept[:2]
+                    kept = sorted_codes[:4]
+                return self._filter_and_sort_codes(kept, text)[:2]
 
-        # L4: Local fuzzy match trên names VN (threshold 75, cap 2) — R27.7 giảm từ 85 → 75
+        # L4: Local fuzzy match trên names VN (threshold 75, cap 2)
         fuzzy_vn = self._fuzzy_local(text, threshold=75)
         if fuzzy_vn:
-            fuzzy_vn = _filter_irrelevant_codes(fuzzy_vn, text, self.idx)
-            if fuzzy_vn:
-                restricted = _restrict_chapter(fuzzy_vn[:2], text)
-                if restricted:
-                    return restricted
-                if _text_matches_chapter_keyword(text):
-                    prefix_codes = self._exact_match_vn_prefix(text)
-                    if prefix_codes:
-                        return sorted(set(prefix_codes))[:2]
-                    # R27.2: thử substring match trong ICD index
-                    chapter_codes = self._chapter_codes_lookup(text)
-                    if chapter_codes:
-                        return sorted(set(chapter_codes))[:2]
-                return fuzzy_vn[:2]
+            return self._filter_and_sort_codes(fuzzy_vn, text)[:2]
 
         # L5: BM25 fallback (top-2 — strict hơn cho Set-based F1)
         if self.local_search is not None and hasattr(self.local_search, 'bm25_index'):
             bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=2)
             if bm25_codes:
-                bm25_codes = _filter_irrelevant_codes(bm25_codes, text, self.idx)
+                bm25_codes = self._filter_and_sort_codes(bm25_codes, text)
                 if bm25_codes:
-                    restricted = _restrict_chapter(bm25_codes[:2], text)
-                    if restricted:
-                        return restricted
-                    if _text_matches_chapter_keyword(text):
-                        prefix_codes = self._exact_match_vn_prefix(text)
-                        if prefix_codes:
-                            return sorted(set(prefix_codes))[:2]
-                        # R27.2: thử substring match trong ICD index
-                        chapter_codes = self._chapter_codes_lookup(text)
-                        if chapter_codes:
-                            return sorted(set(chapter_codes))[:2]
                     return bm25_codes[:2]
 
         # L6 (NEW R27.7 2026-07-10): Aggressive final fallback - thử MULTIPLE strategies
-        # khi L1-L5 đều fail. Đây là "last resort" để tránh empty candidates.
-        # 1. Re-search substring với normalized text (nếu khác original)
         if len(text) >= 5:
             substring_codes = self._exact_match_vn_substring(text)
             if substring_codes:
                 logger.debug("L6 substring fallback '%s' → %s", text, substring_codes[:2])
-                return sorted(set(substring_codes))[:2]
+                return self._filter_and_sort_codes(substring_codes, text)[:2]
 
-        # 2. Chapter-based lookup (nếu text có organ keyword)
         if _text_matches_chapter_keyword(text):
             prefix_codes = self._exact_match_vn_prefix(text)
             if prefix_codes:
-                return sorted(set(prefix_codes))[:2]
+                return self._filter_and_sort_codes(prefix_codes, text)[:2]
             chapter_codes = self._chapter_codes_lookup(text)
             if chapter_codes:
                 logger.debug("L6 chapter lookup '%s' → %s", text, chapter_codes[:2])
-                return sorted(set(chapter_codes))[:2]
+                return self._filter_and_sort_codes(chapter_codes, text)[:2]
 
-        # 3. Lower threshold vector search (last resort)
         if self.local_search is not None:
             low_threshold_codes = self.local_search.search(
                 text, threshold=0.40, top_k=5
             ) or []
             if low_threshold_codes:
                 logger.debug("L6 low-threshold vector '%s' → %s", text, low_threshold_codes[:2])
-                return sorted(set(low_threshold_codes))[:2]
+                return self._filter_and_sort_codes(low_threshold_codes, text)[:2]
 
         return []  # noqa: RET504
 
@@ -1145,6 +1084,42 @@ class ICDRetriever:
             "viêm tĩnh mạch chi": ["I80.0"],
             "suy giãn tĩnh mạch": ["I83"],
             "giãn tĩnh mạch": ["I83"],
+
+            # === MỚI 2026-07-11 — CHẤN THƯƠNG, XUẤT HUYẾT, NGOẠI KHOA CHUNG ===
+            "chấn thương": ["T14", "T14.9"],
+            "tai nạn": ["V99", "X59"],
+            "xuất huyết nội sọ": ["I61", "I61.9"],
+            "xuất huyết não": ["I61", "I61.9"],
+            "chảy máu nội sọ": ["I61", "I61.9"],
+            "chảy máu não": ["I61", "I61.9"],
+            "gãy xương": ["T14.2"],
+            "gãy cổ xương đùi di lệch": ["S72.0"],
+            "gãy cổ xương đùi": ["S72.0"],
+            "bệnh bạch cầu dòng tủy mãn tính": ["C92.1"],
+            "bạch cầu cấp": ["C95.0"],
+            "xuất huyết tiêu hóa": ["K92.2"],
+            "xuất huyết dạ dày": ["K92.2"],
+            "suy hô hấp": ["J96", "J96.9"],
+            "suy hô hấp cấp": ["J96.0"],
+            "suy hô hấp mạn": ["J96.1"],
+            "nhiễm trùng huyết": ["A41", "A41.9"],
+            "nhiễm khuẩn huyết": ["A41", "A41.9"],
+            "sốc nhiễm khuẩn": ["R57.2"],
+            "đau đầu": ["R51"],
+            "nhức đầu": ["R51"],
+            "chóng mặt": ["R42"],
+            "buồn nôn": ["R11"],
+            "nôn": ["R11"],
+            "sốt": ["R50", "R50.9"],
+            "sốt cao": ["R50"],
+            "ho": ["R05"],
+            "khó thở": ["R06.0"],
+            "đau ngực": ["R07.4"],
+            "đau bụng": ["R10.4"],
+            "đau bụng vùng thượng vị": ["R10.1"],
+            "tiêu chảy": ["A09", "K52.9"],
+            "táo bón": ["K59.0"],
+            "phù": ["R60", "R60.9"],
         }
 
     def _chapter_codes_lookup(self, text: str) -> list[str]:

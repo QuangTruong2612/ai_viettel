@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.icd_rag import ICDRetriever, ICD10VectorSearch, Translator  # noqa: E402
+from src.icd_rag import ICDRetriever, ICD10VectorSearch  # noqa: E402
 from src.inference import _call_with_retry  # noqa: E402
 from src.llm_client import LLMClient  # noqa: E402
 from src.postprocess import assemble_record, validate_output, write_output  # noqa: E402
@@ -79,9 +79,8 @@ def main() -> int:
 
     llm = LLMClient()
     retriever = RxNormRetriever()
-    translator = Translator(llm_client=llm)
     local_search = ICD10VectorSearch()
-    icd = ICDRetriever(translator=translator, local_search=local_search)
+    icd = ICDRetriever(local_search=local_search)
     few_shot = format_few_shot_messages(load_few_shot())
 
     user_prompt = build_user_prompt(EXAMPLE_INPUT)

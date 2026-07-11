@@ -1136,11 +1136,8 @@ _PURE_DURATION_ENHANCED_RE = re.compile(
     r"^(?:"
     r"\d+\s+(?:giây|phút|giờ|ngày|tuần|tháng|năm)(?:\s+(?:qua|trước|sau))?"
     r"|"
-    r"\d{1,2}\s+(?:giây|phút|giờ|ngày|tuần|tháng|năm)(?:\s+(?:qua|trước|sau))?"
-    r"|"
-    r"(?:kéo\s+dài|khởi\s+phát\s+lúc|bắt\s+đầu\s+lúc|cách\s+\d+|trong\s+vòng)"
-    r"\s+\d+(?:\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm))?"
-    r"(?:\s+(?:qua|trước|sau))?"
+    r"(?:kéo\s+dài|khởi\s+phát\s+lúc|bắt\s+đầu\s+lúc|cách(?:\s+\d+)?|trong(?:\s+vòng)?)"
+    r"\s*(?:\d+\s*)?(?:giây|phút|giờ|ngày|tuần|tháng|năm)(?:\s+(?:qua|trước|sau))?"
     r")$",
     re.IGNORECASE | re.UNICODE,
 )

@@ -56,7 +56,7 @@ def test_3_prompt_integrity_and_offset():
     prompt = build_user_prompt(sample)
     
     # Kiểm tra phần sau INPUT:\n khớp chính xác với sample
-    input_part = prompt.split("INPUT:\n")[-1]
+    input_part = prompt.split("INPUT:\n")[-1].split("\n\nOUTPUT JSON ARRAY")[0]
     assert input_part == sample, f"Text corrupted in INPUT section!\nGot: {repr(input_part)}"
     print("✅ PASS test_3_prompt_integrity_and_offset: INPUT section is 100% exact match")
 
