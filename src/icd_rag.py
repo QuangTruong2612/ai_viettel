@@ -1508,12 +1508,23 @@ class ICD10VectorSearch:
         # 2. Tải ma trận nhúng .npy nếu có sẵn
         if self._embeddings_path.exists():
             try:
-                self._embeddings = np.load(self._embeddings_path)
-                logger.info(
-                    "ICD10VectorSearch: Đã tải ma trận embeddings %s (shape: %r)",
-                    self._embeddings_path.name,
-                    self._embeddings.shape,
-                )
+                emb = np.load(self._embeddings_path)
+                if emb.shape[0] == len(self.codes):
+                    self._embeddings = emb
+                    logger.info(
+                        "ICD10VectorSearch: Đã tải ma trận embeddings %s (shape: %r)",
+                        self._embeddings_path.name,
+                        self._embeddings.shape,
+                    )
+                else:
+                    logger.warning(
+                        "ICD10VectorSearch: File embeddings %s có %d dòng KHÔNG KHỚP với %d dòng từ %s. Bỏ qua file cũ và tự động sinh lại embeddings phù hợp!",
+                        self._embeddings_path.name,
+                        emb.shape[0],
+                        len(self.codes),
+                        self._jsonl_path.name,
+                    )
+                    self._embeddings = None
             except Exception as exc:
                 logger.warning(
                     "Không thể load file embeddings %s: %s",
@@ -1534,28 +1545,33 @@ class ICD10VectorSearch:
         if not query or not self.codes:
             return []
 
-        # 1 & 2. Đảm bảo model và embeddings sẵn sàng
-        if self._embeddings is None:
+        # 1 & 2. Đảm bảo model và embeddings sẵn sàng (và khớp số lượng mã)
+        if self._embeddings is None or len(self._embeddings) != len(self.codes):
             logger.info(
-                "ICD10VectorSearch: Không tìm thấy file embeddings.npy có sẵn. Đang sinh trực tiếp..."
+                "ICD10VectorSearch: Đang sinh embeddings cho %d mã ICD...",
+                len(self.codes),
             )
             try:
                 t0 = time.time()
-                self._embeddings = self._encode_safe(
+                new_emb = self._encode_safe(
                     self.descs_raw,
                     batch_size=128,
                     show_progress_bar=True,
                     normalize_embeddings=True,
                     convert_to_numpy=True,
                 )
-                if self._embeddings is None or len(self._embeddings) == 0:
+                if new_emb is None or len(new_emb) != len(self.codes):
                     return []
-                np.save(self._embeddings_path, self._embeddings)
-                logger.info(
-                    "Đã lưu ma trận nhúng ra %s (%.2fs)",
-                    self._embeddings_path,
-                    time.time() - t0,
-                )
+                self._embeddings = new_emb
+                try:
+                    np.save(self._embeddings_path, self._embeddings)
+                    logger.info(
+                        "Đã lưu ma trận nhúng ra %s (%.2fs)",
+                        self._embeddings_path,
+                        time.time() - t0,
+                    )
+                except Exception as exc_save:
+                    logger.warning("Không thể lưu %s: %s", self._embeddings_path, exc_save)
             except Exception as exc:
                 logger.error("Lỗi sinh embeddings: %s", exc)
                 return []
@@ -1572,13 +1588,15 @@ class ICD10VectorSearch:
             query_vec = query_vec.astype(self._embeddings.dtype)
 
         # 4. Tính Cosine Similarity bằng dot-product (vì vector đã được chuẩn hóa L2)
-        scores = np.dot(self._embeddings, query_vec)  # Shape: (71705,)
+        scores = np.dot(self._embeddings, query_vec)  # Shape: (N,)
 
         # 5. Sắp xếp lấy Top K
         top_indices = np.argsort(-scores)[:top_k]
 
         out: list[str] = []
         for idx in top_indices:
+            if idx < 0 or idx >= len(self.codes):
+                continue
             score = float(scores[idx])
             # Có thể lọc theo threshold (Cosine Similarity thường từ 0.0 -> 1.0)
             if score >= threshold:
@@ -1589,7 +1607,7 @@ class ICD10VectorSearch:
         logger.debug(
             "Vector search '%s' -> Top 1 score: %.3f (%s)",
             query,
-            scores[top_indices[0]] if len(top_indices) > 0 else 0.0,
+            scores[top_indices[0]] if len(top_indices) > 0 and 0 <= top_indices[0] < len(self.codes) else 0.0,
             out[0] if out else "None",
         )
         return out
@@ -1651,7 +1669,7 @@ class ICD10VectorSearch:
         Returns: dict {code: cosine_sim} (giá trị ∈ [0, 1] cho vectors đã chuẩn hoá L2).
         """
         self._ensure_loaded()
-        if not query or not codes or self._embeddings is None:
+        if not query or not codes or self._embeddings is None or len(self._embeddings) != len(self.codes):
             return {}
 
         q_vec = self._encode_safe(
@@ -1786,8 +1804,18 @@ class ICD10BM25Index:
 
         tokenized: list[list[str]] = []
 
-        # 1. Try load token cache
-        if self._tokens_cache_path.exists():
+        # 1. Try load token cache (nếu không cũ hơn file gốc)
+        cache_valid = False
+        if self._tokens_cache_path.exists() and self._jsonl_path.exists():
+            try:
+                if self._tokens_cache_path.stat().st_mtime >= self._jsonl_path.stat().st_mtime:
+                    cache_valid = True
+            except Exception:
+                cache_valid = True
+        elif self._tokens_cache_path.exists():
+            cache_valid = True
+
+        if cache_valid:
             try:
                 t0 = time.time()
                 with gzip.open(self._tokens_cache_path, "rt", encoding="utf-8") as f:
@@ -1798,11 +1826,17 @@ class ICD10BM25Index:
                         row = json.loads(line)
                         self.codes.append(row["code"])
                         tokenized.append(row["tokens"])
-                logger.info(
-                    "BM25: loaded %d tokenized docs từ cache (%.2fs)",
-                    len(self.codes),
-                    time.time() - t0,
-                )
+                # Nếu cache chứa số lượng dòng quá sai lệch với file nguồn (ví dụ cache 71k dòng nhưng jsonl 15k dòng), bỏ qua cache
+                if self._jsonl_path.name == "icd10.jsonl" and len(self.codes) > 20000:
+                    logger.warning("BM25 cache %s có %d dòng KHÔNG KHỚP với %s (15k dòng) → rebuild", self._tokens_cache_path.name, len(self.codes), self._jsonl_path.name)
+                    self.codes.clear()
+                    tokenized.clear()
+                else:
+                    logger.info(
+                        "BM25: loaded %d tokenized docs từ cache (%.2fs)",
+                        len(self.codes),
+                        time.time() - t0,
+                    )
             except Exception as exc:
                 logger.warning("BM25 cache load fail (%s) → rebuild", exc)
                 self.codes.clear()
