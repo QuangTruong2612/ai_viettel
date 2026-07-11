@@ -1599,7 +1599,7 @@ def assemble_record(
     # Phase 2: Parallel candidate attachment across CPU/Thread workers (Upgrade F)
     if len(final) > 1 and (retriever is not None or icd_retriever is not None):
         import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(final))) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(final))) as pool:
             futures = [
                 pool.submit(_attach_candidates, rec, rec["text"], rec["type"], rec, validated, retriever, icd_retriever)
                 for rec in final if rec["type"] in ("THUỐC", "CHẨN_ĐOÁN", "TRIỆU_CHỨNG")

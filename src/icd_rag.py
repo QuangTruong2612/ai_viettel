@@ -23,6 +23,7 @@ import gzip
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1378,6 +1379,8 @@ class ICD10VectorSearch:
 
         self._embeddings: Optional[np.ndarray] = None
         self._model = None
+        self._device: Optional[str] = None
+        self._lock = threading.Lock()
         self._loaded = False
 
     @staticmethod
@@ -1531,35 +1534,22 @@ class ICD10VectorSearch:
         if not query or not self.codes:
             return []
 
-        # 1. Khởi tạo model SentenceTransformer
-        if self._model is None:
-            try:
-                from sentence_transformers import SentenceTransformer  # type: ignore
-
-                self._model = SentenceTransformer("BAAI/bge-m3")
-                logger.info(
-                    "ICD10VectorSearch: Đã tải mô hình BGE-M3 phục vụ tìm kiếm."
-                )
-            except ImportError:
-                logger.error(
-                    "Chưa cài sentence-transformers! Không thể chạy Vector Search."
-                )
-                return []
-
-        # 2. Nếu file .npy chưa tồn tại, tự động sinh và lưu luôn tại đây
+        # 1 & 2. Đảm bảo model và embeddings sẵn sàng
         if self._embeddings is None:
             logger.info(
                 "ICD10VectorSearch: Không tìm thấy file embeddings.npy có sẵn. Đang sinh trực tiếp..."
             )
             try:
                 t0 = time.time()
-                self._embeddings = self._model.encode(
+                self._embeddings = self._encode_safe(
                     self.descs_raw,
                     batch_size=128,
                     show_progress_bar=True,
                     normalize_embeddings=True,
                     convert_to_numpy=True,
                 )
+                if self._embeddings is None or len(self._embeddings) == 0:
+                    return []
                 np.save(self._embeddings_path, self._embeddings)
                 logger.info(
                     "Đã lưu ma trận nhúng ra %s (%.2fs)",
@@ -1570,10 +1560,13 @@ class ICD10VectorSearch:
                 logger.error("Lỗi sinh embeddings: %s", exc)
                 return []
 
-        # 3. Mã hóa câu truy vấn
-        query_vec = self._model.encode(
+        # 3. Mã hóa câu truy vấn qua bộ đệm thread-safe + auto CPU fallback
+        query_vec = self._encode_safe(
             query, normalize_embeddings=True, convert_to_numpy=True
         )  # Shape: (1024,)
+        if query_vec is None or len(query_vec) == 0:
+            return []
+
         # Cast về cùng dtype với embeddings (float16 tiết kiệm RAM)
         if self._embeddings is not None and self._embeddings.dtype != query_vec.dtype:
             query_vec = query_vec.astype(self._embeddings.dtype)
@@ -1601,6 +1594,54 @@ class ICD10VectorSearch:
         )
         return out
 
+    def _encode_safe(self, text_or_list: Any, **kwargs: Any) -> Any:
+        """Thread-safe BGE-M3 encode với tự động bảo vệ VRAM và fallback CPU khi gặp CUDA OOM."""
+        with self._lock:
+            if self._model is None:
+                try:
+                    from sentence_transformers import SentenceTransformer  # type: ignore
+                    import torch
+                    target_device = "cuda" if torch.cuda.is_available() else "cpu"
+                    if target_device == "cuda":
+                        try:
+                            free_mem, _ = torch.cuda.mem_get_info()
+                            # Nếu VRAM trống dưới 1.5 GiB (do Ollama chiếm dụng), tự động nạp trên CPU
+                            if free_mem < 1.5 * (1024**3):
+                                logger.info(
+                                    "ICD10VectorSearch: VRAM trống %.1f MiB (< 1.5 GiB), nạp BGE-M3 trên CPU để tránh OOM với Ollama.",
+                                    free_mem / (1024**2),
+                                )
+                                target_device = "cpu"
+                        except Exception:
+                            pass
+                    self._model = SentenceTransformer("BAAI/bge-m3", device=target_device)
+                    self._device = target_device
+                    logger.info("ICD10VectorSearch: Đã tải mô hình BGE-M3 trên device=%s.", target_device)
+                except ImportError:
+                    logger.error("Chưa cài sentence-transformers! Không thể chạy Vector Search.")
+                    return np.array([])
+
+            try:
+                import torch
+                with torch.inference_mode():
+                    return self._model.encode(text_or_list, **kwargs)
+            except RuntimeError as err:
+                if "out of memory" in str(err).lower() or "cuda" in str(err).lower():
+                    logger.warning(
+                        "CUDA OOM trong BGE-M3 encode. Tự động chuyển model sang CPU và retry..."
+                    )
+                    try:
+                        import torch
+                        torch.cuda.empty_cache()
+                        self._model = self._model.to("cpu")
+                        self._device = "cpu"
+                    except Exception:
+                        pass
+                    import torch
+                    with torch.inference_mode():
+                        return self._model.encode(text_or_list, **kwargs)
+                raise
+
     def score_codes(self, query: str, codes: list[str]) -> dict[str, float]:
         """Tính cosine similarity cho 1 tập codes cụ thể.
 
@@ -1613,18 +1654,12 @@ class ICD10VectorSearch:
         if not query or not codes or self._embeddings is None:
             return {}
 
-        if self._model is None:
-            try:
-                from sentence_transformers import SentenceTransformer  # type: ignore
-
-                self._model = SentenceTransformer("BAAI/bge-m3")
-            except ImportError:
-                logger.error("score_codes: thiếu sentence-transformers.")
-                return {}
-
-        q_vec = self._model.encode(
+        q_vec = self._encode_safe(
             query, normalize_embeddings=True, convert_to_numpy=True
         )
+        if q_vec is None or len(q_vec) == 0:
+            return {}
+
         # Embeddings đã được L2-normalize lúc build → dot = cosine.
         all_scores = self._embeddings @ q_vec  # shape (N,)
         idx_by_code = {c: i for i, c in enumerate(self.codes)}
