@@ -265,126 +265,6 @@ class ICDIndex:
 # ---------------------------------------------------------------------- #
 
 
-class Translator:
-    """Dịch cụm ngắn VN -> EN. 2 tầng:
-    1. Dict cache (preset các bệnh phổ biến).
-    2. LLM nếu cache miss (qwen3.5-4b đã đủ thông minh cho cụm 1-3 từ y khoa).
-    """
-
-    def __init__(
-        self, llm_client: Any = None, cache_path: Optional[Path] = None
-    ) -> None:
-        self.llm_client = llm_client
-        self._cache: dict[str, str] = {}
-        self._cache_path = cache_path or (DATA_DIR / "translation_cache.json")
-        if self._cache_path.exists():
-            try:
-                self._cache = json.loads(self._cache_path.read_text(encoding="utf-8"))
-            except Exception:
-                self._cache = {}
-
-    # ------------------------------------------------------------------ #
-
-    def preset(self, mapping: dict[str, str]) -> None:
-        """Thêm mapping thủ công vào cache (verbatim + diacritic-stripped).
-
-        Bug history:
-        1. Trước kia cache chỉ key theo lowercase literal → query không dấu miss.
-        2. NFKD không strip được ký tự `đ` (U+0111 LATIN SMALL LETTER D WITH STROKE)
-           vì nó không có decomposition → fix bằng replace thủ công.
-
-        Fix: lưu CẢ key literal và key bỏ dấu + xử lý đ/Đ đặc biệt.
-        """
-        import unicodedata as _ud
-
-        def _strip(s: str) -> str:
-            # Xử lý đ/Đ TRƯỚC khi NFKD (NFKD không strip được)
-            s = s.lower().strip().replace("đ", "d").replace("Đ", "D")
-            nfkd = _ud.normalize("NFKD", s)
-            return "".join(c for c in nfkd if not _ud.combining(c))
-
-        for vi, en in mapping.items():
-            vi_l = vi.lower().strip()
-            self._cache[vi_l] = en.strip()
-            self._cache[_strip(vi)] = en.strip()
-
-    def save_cache(self) -> None:
-        self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-        self._cache_path.write_text(
-            json.dumps(self._cache, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-    # ------------------------------------------------------------------ #
-
-    def translate(self, text: str) -> str:
-        """Dịch 1 cụm tiếng Việt sang tiếng Anh (y khoa, ngắn gọn).
-
-        Trả về tiếng Anh nếu thành công; ngược lại trả về text gốc để caller vẫn tra được.
-
-        Lookup cache 2 lần: (1) key literal lowercase, (2) key sau khi bỏ dấu + đ.
-        """
-        if not text:
-            return ""
-        import unicodedata as _ud
-
-        key_literal = text.lower().strip()
-        if key_literal in self._cache:
-            return self._cache[key_literal]
-        # Xử lý đặc biệt cho 'đ' trước khi NFKD
-        text_for_strip = key_literal.replace("đ", "d").replace("Đ", "D")
-        nfkd = _ud.normalize("NFKD", text_for_strip)
-        key_strip = "".join(c for c in nfkd if not _ud.combining(c))
-        if key_strip in self._cache:
-            return self._cache[key_strip]
-
-        if self.llm_client is None:
-            return text  # Không có LLM → trả gốc
-
-        # Gọi LLM
-        prompt = (
-            "You are a professional medical translator. Translate the following Vietnamese clinical diagnosis "
-            "term or abbreviation into standard English medical terminology used in clinical records.\n\n"
-            "Guidelines:\n"
-            "1. Output ONLY the translated English phrase. No explanations, no markdown, no quotes, no extra words.\n"
-            "2. Expand and translate common Vietnamese medical abbreviations:\n"
-            "   - THA -> essential hypertension\n"
-            "   - ĐTĐ / ĐTĐ type 2 / ĐTĐ type II -> type 2 diabetes mellitus\n"
-            "   - COPD -> chronic obstructive pulmonary disease\n"
-            "   - NMCT -> myocardial infarction\n"
-            "   - ST -> heart failure\n"
-            "   - VP -> pneumonia\n"
-            "   - VPQ -> bronchopneumonia\n"
-            "   - HPQ / Hen phế quản -> asthma\n"
-            "   - CVA -> cerebrovascular accident\n"
-            "3. Translate clinical modifiers accurately:\n"
-            "   - 'cấp' -> 'acute'\n"
-            "   - 'mạn' / 'mạn tính' -> 'chronic'\n"
-            "   - 'cộng đồng' -> 'community-acquired'\n"
-            "   - 'độ I/II/III' -> 'grade I/II/III' (e.g., 'suy tim độ III' -> 'heart failure grade III')\n"
-            "   - 'giai đoạn I/II/III/IV' -> 'stage I/II/III/IV'\n"
-            "4. Keep it concise, clinical, and standard. Avoid layperson terms (e.g., use 'essential hypertension' instead of 'high blood pressure').\n\n"
-            f"Vietnamese: {text}\n"
-            "English:"
-        )
-        try:
-            msg = [{"role": "user", "content": prompt}]
-            resp = self.llm_client._client.chat.completions.create(  # noqa: SLF001
-                model=self.llm_client.config.model,
-                messages=msg,
-                temperature=0.0,
-                max_tokens=64,
-            )
-            en = (resp.choices[0].message.content or "").strip().strip('"').strip("'")
-            en = re.sub(r"^English:\s*", "", en, flags=re.IGNORECASE)
-            if en:
-                # Lưu cả key literal và key strip để lần sau hit
-                self._cache[key_literal] = en
-                self._cache[key_strip] = en
-                return en
-        except Exception as exc:
-            logger.warning("Translate lỗi (%r): %s", text, exc)
-        return text
 
 
 # ---------------------------------------------------------------------- #
@@ -514,13 +394,12 @@ def build_context_query(
 class ICDRetriever:
     """High-level wrapper: exact + semantic extraction + fuzzy (offline).
 
-    Pipeline 5 lớp (chạy hoàn toàn local, KHÔNG gọi NIH API):
-      L1: Exact match dict tiếng Anh (prebuilt, ICDIndex)
-      L2: VN -> EN translation (Translator, cached)
-      L3: Semantic extraction (BGE-M3 cosine ≥ 0.7) — trả TẤT CẢ codes match,
+    Pipeline 4 lớp (chạy hoàn toàn local, KHÔNG gọi NIH API):
+      L1: Exact match dict tiếng Việt (prebuilt, ICDIndex)
+      L2: Semantic extraction (BGE-M3 cosine ≥ 0.7) — trả TẤT CẢ codes match,
             không cap top-K. BM25 keyword dùng để mở rộng candidates.
-      L4: Fuzzy match EN (rapidfuzz, partial_ratio)
-      L5: Fuzzy match VN (rapidfuzz, partial_ratio)
+      L3: Fuzzy match EN (rapidfuzz, partial_ratio)
+      L4: Fuzzy match VN (rapidfuzz, partial_ratio)
 
     Mặc định `use_hybrid=True`; truyền `use_hybrid=False` để fallback về vector-only.
     """
@@ -528,14 +407,12 @@ class ICDRetriever:
     def __init__(
         self,
         index_path: Optional[Path] = None,
-        translator: Optional[Translator] = None,
         local_search: Optional["ICD10VectorSearch | ICD10HybridSearch"] = None,
         use_hybrid: bool = True,
         hybrid_alpha: float = 0.6,
         hybrid_beta: float = 0.4,
     ) -> None:
         self.idx = self._load_index(index_path)
-        self.translator = translator or Translator()
         # local_search: nếu user truyền ICD10HybridSearch thì dùng trực tiếp;
         # nếu truyền ICD10VectorSearch mà use_hybrid=True thì auto-wrap;
         # nếu None và use_hybrid=True thì tạo hybrid mới (wrap vector mặc định).
@@ -682,14 +559,7 @@ class ICDRetriever:
             normalized = _normalize_vn_term(text)
             if normalized != text:
                 queries_to_try.append(normalized)
-            # Thêm VN→EN translation nếu có translator
-            if self.translator is not None:
-                try:
-                    en_text = self.translator.translate(text)
-                    if en_text and en_text != text:
-                        queries_to_try.append(en_text)
-                except Exception:
-                    pass
+            # Thêm VN→EN translation đã bị loại bỏ vì ICD database là tiếng Việt
 
             all_matched_set: set[str] = set()
             all_scores: dict[str, float] = {}

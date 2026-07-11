@@ -1459,196 +1459,7 @@ def _split_long_imaging_result(
     return result if len(result) >= 2 else None
 
 
-# ---------------------------------------------------------------------- #
-# LLM Context Rescanning — rà soát ngữ cảnh để tối ưu câu truy vấn
-# ---------------------------------------------------------------------- #
 
-
-def batch_rescan_entities(
-    entities: list[dict],
-    llm_client: Any,
-) -> dict[str, str]:
-    """Rescan nhiều entities trong 1 LLM call duy nhất.
-
-    Trước đây, mỗi entity được rescan riêng lẻ → note có 30 entities = 30 LLM calls
-    liên tiếp → dễ trigger Ollama 500 crash ("model runner has unexpectedly stopped")
-    do resource pressure tích lũy. Batch này gộp thành 1 call duy nhất.
-
-    Args:
-        entities: list các entity có type 'THUỐC' hoặc 'CHẨN_ĐOÁN'.
-                  Mỗi dict cần 'text' và 'type'.
-        llm_client: LLMClient instance (đã có _client + config).
-
-    Returns:
-        dict mapping {original_text: rescanned_text}.
-        Entities không rescan được (fail, invalid) sẽ KHÔNG có trong dict
-        — caller dùng original_text làm fallback.
-    """
-    if not entities or llm_client is None:
-        return {}
-
-    # Filter & dedup: chỉ THUỐC + CHẨN_ĐOÁN cần rescan
-    to_rescan: list[tuple[int, str]] = []  # (idx, text)
-    seen: set[str] = set()
-    for i, e in enumerate(entities):
-        etype = e.get("type", "")
-        if etype not in ("THUỐC", "CHẨN_ĐOÁN"):
-            continue
-        text = str(e.get("text", "")).strip()
-        if text and text not in seen:
-            seen.add(text)
-            to_rescan.append((len(to_rescan), text))
-
-    if not to_rescan:
-        return {}
-
-    n = len(to_rescan)
-    # Build compact prompt
-    lines = []
-    for idx, (i, t) in enumerate(to_rescan, 1):
-        # Type tag để LLM biết phải xử lý thế nào
-        etype = entities[next(j for j, e in enumerate(entities)
-                              if e.get("text") == t)].get("type")
-        tag = "DRUG" if etype == "THUỐC" else "DIAG"
-        lines.append(f"{i}. [{tag}] {t}")
-
-    entities_list = "\n".join(lines)
-
-    prompt = (
-        "You are a clinical entity refiner. For each entity below, output a "
-        "standardized English ICD/RxNorm-searchable phrase.\n\n"
-        "STRICT RULES:\n"
-        "1. For DRUG: keep generic name + strength + route + frequency "
-        "(e.g., 'metoprolol 25 mg oral bid'). Strip VN parentheticals like '(uống hôm nay)'.\n"
-        "2. For DIAGNOSIS: translate VERBATIM to English clinical phrase "
-        "(e.g., 'suy thận mãn' → 'chronic kidney disease'). Keep ALL modifiers.\n"
-        "3. DO NOT add context that is NOT in the entity text.\n"
-        "4. Keep each output ≤ 100 chars.\n\n"
-        f"Entities (n={n}):\n{entities_list}\n\n"
-        f'Output JSON object: {{"1": "refined_text", "2": "refined_text", ...}}\n'
-        "Use the SAME NUMBERING as input. JSON only, no explanation."
-    )
-
-    # Call LLM once với retry
-    msg = [{"role": "user", "content": prompt}]
-    last_exc: Exception | None = None
-    for attempt in range(3):
-        try:
-            resp = llm_client._client.chat.completions.create(  # noqa: SLF001
-                model=llm_client.config.model,
-                messages=msg,
-                temperature=0.0,
-                max_tokens=min(2048, 100 * n + 200),  # dynamic: ~100 chars/entity + overhead
-            )
-            content = (resp.choices[0].message.content or "").strip()
-
-            # Extract JSON
-            try:
-                result_map = llm_client._extract_json(content)
-            except Exception:
-                # Fallback: try regex extract JSON object
-                result_map = _regex_extract_json_object(content)
-            if not isinstance(result_map, dict):
-                raise ValueError(f"Expected JSON object, got {type(result_map).__name__}")
-
-            # Map back: key "1" → entity[0].text
-            out: dict[str, str] = {}
-            for i, (_, text) in enumerate(to_rescan, 1):
-                refined = result_map.get(str(i), result_map.get(i, ""))
-                if isinstance(refined, str) and refined.strip():
-                    if _validate_rescan_output(refined, text, entities[next(
-                        j for j, e in enumerate(entities) if e.get("text") == text)].get("type", "")):
-                        out[text] = refined.strip()
-            logger.debug(
-                "Batch rescan: %d/%d entities refined successfully",
-                len(out), n,
-            )
-            return out
-
-        except Exception as exc:
-            last_exc = exc
-            err_str = str(exc).lower()
-            is_transient = (
-                "500" in err_str
-                or "model runner" in err_str
-                or "unexpectedly stopped" in err_str
-                or "connection" in err_str
-                or "timeout" in err_str
-            )
-            if is_transient and attempt < 2:
-                wait = 2 ** (attempt + 2)  # 4s, 8s — longer than per-entity (Ollama needs time to recover)
-                logger.warning(
-                    "Batch rescan lỗi transient (attempt %d/3, wait %ds): %r",
-                    attempt + 1, wait, exc,
-                )
-                import time as _t
-                _t.sleep(wait)
-                continue
-            break
-    if last_exc is not None:
-        logger.warning(
-            "Batch rescan lỗi (%d entities): %s → fallback per-entity",
-            n, last_exc,
-        )
-    return {}
-
-
-def _regex_extract_json_object(content: str) -> dict | None:
-    """Fallback: extract JSON object bằng regex khi _extract_json fail.
-    """
-    import re
-    # Tìm {...} đầu tiên
-    start = content.find("{")
-    end = content.rfind("}")
-    if start < 0 or end < 0 or end <= start:
-        return None
-    candidate = content[start: end + 1]
-    try:
-        import json
-        return json.loads(candidate)
-    except Exception:
-        return None
-
-
-def _validate_rescan_output(
-    result: str,
-    entity_text: str,
-    entity_type: str,
-) -> bool:
-    """Validate rescan LLM output. Return False nếu output đáng ngờ.
-
-    Reject nếu:
-    - Output quá dài (>200 chars) — có thể chứa explanation
-    - Output chứa nhiều câu (có dấu . nhiều) — LLM đang explain
-    - Output chứa "I cannot", "I don't", "Note:", "The patient" — LLM nói nhảm
-    - Output chứa "Note that", "Please note" — LLM giải thích
-    - Cho THUỐC: output phải chứa first word (drug name) của entity
-    """
-    if not result:
-        return False
-    if len(result) > 200:
-        return False
-    if result.count(".") > 2:
-        return False
-    bad_starts = (
-        "i cannot", "i don't", "i'm sorry", "note:", "the patient",
-        "please note", "note that", "as an ai", "as a language",
-    )
-    lower = result.lower()
-    for bad in bad_starts:
-        if lower.startswith(bad):
-            return False
-    # Drug-specific check: first word of entity_text should appear in result
-    if entity_type == "THUỐC" and entity_text:
-        first_word = entity_text.strip().split()[0].lower() if entity_text.strip() else ""
-        # Loại bỏ common prefix như "thuốc"
-        if first_word in ("thuốc", "drug", "medicine"):
-            first_word = (
-                entity_text.strip().split()[1].lower() if len(entity_text.strip().split()) > 1 else ""
-            )
-        if first_word and len(first_word) > 2 and first_word not in lower:
-            return False
-    return True
 
 
 # ---------------------------------------------------------------------- #
@@ -1920,14 +1731,12 @@ def assemble_record(
 
     Pipeline:
       1. Chuẩn hoá entities (validate position, expand duplicate, dedup, drop noise)
-      2. Batch rescan VN→EN cho ICD lookup (giảm load Ollama)
-      3. Clean từng entity text (strip modifiers, verbs, parens, drop duration)
-      4. Dedup cuối cùng (R10 STRICT + overlap dedup + R22 cho TÊN_XN)
-      5. Gán candidates (RxNorm cho THUỐC, ICD cho CHẨN_ĐOÁN)
-      6. Sort theo position
+      2. Clean từng entity text (strip modifiers, verbs, parens, drop duration)
+      3. Dedup cuối cùng (R10 STRICT + overlap dedup + R22 cho TÊN_XN)
+      4. Gán candidates (RxNorm cho THUỐC, ICD cho CHẨN_ĐOÁN)
+      5. Sort theo position
     """
     validated = _prepare_validated_entities(input_text, raw_entities)
-    rescan_cache = batch_rescan_entities(validated, llm_client)
 
     seen_test_names: set[str] = set()
     seen_entities: list[tuple[str, str, list[int]]] = []  # (norm_text, type, [start, end])
@@ -1935,7 +1744,7 @@ def assemble_record(
     final: list[dict[str, Any]] = []
     for ent in validated:
         record = _emit_entity_record(
-            ent, input_text, validated, retriever, icd_retriever, rescan_cache,
+            ent, input_text, validated, retriever, icd_retriever,
             seen_test_names, seen_entities,
         )
         if record is not None:
@@ -2028,22 +1837,15 @@ def align_and_expand_entities(
             ent = {**ent, "text": cleaned}
         pre_cleaned.append(ent)
 
-    # ── Dedup-by-text: LLM hay trả duplicate semantically identical entities ─────
-    # Nhóm theo (text_lower, type) để merge assertions và tránh align 2 lần
-    seen_semantic: dict[tuple[str, str], dict[str, Any]] = {}
+    # ── Map tuần tự: Giữ nguyên các assertions độc lập của LLM ──────────────────
+    # Thay vì merge assertions (làm lây lan isHistorical/isNegated sai), ta gom 
+    # danh sách các entity do LLM sinh ra để map tuần tự vào các vị trí trong text.
+    from collections import defaultdict
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for ent in pre_cleaned:
         text = str(ent.get("text", "")).strip()
         etype = ent.get("type", "")
-        key = (text.lower(), etype)
-        if key not in seen_semantic:
-            seen_semantic[key] = ent
-        else:
-            # Merge assertions: giữ union của cả 2
-            existing_assertions = set(seen_semantic[key].get("assertions", []))
-            new_assertions = set(ent.get("assertions", []))
-            merged = sorted(existing_assertions | new_assertions)
-            seen_semantic[key] = {**seen_semantic[key], "assertions": merged}
-    unique_entities = list(seen_semantic.values())
+        groups[(text.lower(), etype)].append(ent)
 
     # ── Prefix/suffix modifiers regex (dùng cho stripped scan) ─────────────────
     _MOD_PREFIX = re.compile(
@@ -2056,19 +1858,14 @@ def align_and_expand_entities(
     )
 
     # ── Exhaustive Multi-pass Alignment ────────────────────────────────────────
-    # Với mỗi entity đã được clean + dedup theo ngữ nghĩa:
-    # - Tìm TẤT CẢ vị trí xuất hiện của text trong input_text
-    # - Mỗi occurrence → 1 entity riêng với position chính xác
     aligned: list[dict[str, Any]] = []
     input_lower = input_text.lower()
 
-    for ent in unique_entities:
-        text = str(ent.get("text", "")).strip()
-        etype = ent.get("type", "")
-        if not text or len(text) < 2:
+    for (text_lower, etype), ents in groups.items():
+        base_text = str(ents[0].get("text", "")).strip()
+        if not base_text or len(base_text) < 2:
             continue
 
-        text_lower = text.lower()
         all_spans: set[tuple[int, int]] = set()
 
         # Pass 1: Exact substring scan (case-insensitive)
@@ -2077,12 +1874,10 @@ def align_and_expand_entities(
             idx = input_lower.find(text_lower, start)
             if idx < 0:
                 break
-            all_spans.add((idx, idx + len(text)))
+            all_spans.add((idx, idx + len(base_text)))
             start = idx + 1
 
         # Pass 2: Modifiers-stripped scan (R14/R25)
-        # VD: LLM trả "tăng đánh trống ngực" → stripped = "đánh trống ngực"
-        # → tìm các lần xuất hiện "đánh trống ngực" khắp văn bản (cả ở vtrí không có prefix)
         stripped_text = _MOD_PREFIX.sub("", text_lower).strip()
         stripped_text = _MOD_SUFFIX.sub("", stripped_text).strip()
         if stripped_text and stripped_text != text_lower and len(stripped_text) >= 4:
@@ -2100,31 +1895,41 @@ def align_and_expand_entities(
         # Pass 3: Typo recovery (R23) — chỉ khi Pass 1+2 không tìm thấy gì
         if not all_spans:
             hint_pos = 0
-            pos_field = ent.get("position", [0, 0])
+            pos_field = ents[0].get("position", [0, 0])
             if isinstance(pos_field, list) and len(pos_field) == 2:
                 try:
                     hint_pos = int(pos_field[0])
                 except (ValueError, TypeError):
                     hint_pos = 0
-            recovered = _try_recover_typo(text, input_text, hint_pos=hint_pos)
+            recovered = _try_recover_typo(base_text, input_text, hint_pos=hint_pos)
             if recovered is not None:
                 recovered_text, rs, re_ = recovered
                 all_spans.add((rs, re_))
-                text = recovered_text  # Cập nhật text sang form đúng chính tả
+                # Cập nhật text sang form đúng chính tả cho các entity trong group
+                for ent in ents:
+                    ent["text"] = recovered_text
                 logger.debug(
-                    "Align: typo recovery '%s' → '%s' at %d", ent.get("text", ""), text, rs
+                    "Align: typo recovery '%s' → '%s' at %d", base_text, recovered_text, rs
                 )
 
         if not all_spans:
-            logger.debug("Align: không tìm được span cho '%s' (%s) → bỏ", text, etype)
+            logger.debug("Align: không tìm được span cho '%s' (%s) → bỏ", base_text, etype)
             continue
 
-        # Tạo 1 entity cho mỗi occurrence được tìm thấy
-        for span_start, span_end in sorted(all_spans):
-            # Lấy text từ input_text thực tế (đúng case gốc)
+        # Gán tuần tự LLM entities cho các spans tìm được để GIỮ NGUYÊN ASSERTIONS
+        sorted_spans = sorted(list(all_spans))
+        for i, (span_start, span_end) in enumerate(sorted_spans):
             actual_text = input_text[span_start:span_end]
+            if i < len(ents):
+                ent_to_use = ents[i]
+            else:
+                # Nếu text xuất hiện nhiều hơn số LLM trả về -> auto-expand (bảo vệ recall)
+                # XÓA assertions để tránh gán nhầm isHistorical/isNegated
+                ent_to_use = ents[0].copy()
+                ent_to_use["assertions"] = []
+                
             new_ent = {
-                **ent,
+                **ent_to_use,
                 "text": actual_text,
                 "position": [span_start, span_end],
             }
@@ -2290,7 +2095,6 @@ def _attach_candidates(
     validated: list[dict[str, Any]],
     retriever: RxNormRetriever,
     icd_retriever: Optional[ICDRetriever],
-    rescan_cache: dict[str, str],
 ) -> None:
     """Gán candidates cho record theo type (RxNorm cho THUỐC, ICD cho CHẨN_ĐOÁN).
 
@@ -2310,11 +2114,8 @@ def _attach_candidates(
             e for e in validated
             if e.get("text", "").strip() and e is not ent
         ]
-        # Rescan to EN via batch_rescan_entities cache
-        rescan = rescan_cache.get(text)
-        query = rescan if rescan else text
         try:
-            codes = icd_retriever.lookup(query, other_entities=other_ents)
+            codes = icd_retriever.lookup(text, other_entities=other_ents)
             record["candidates"] = list(codes) if codes else []
         except Exception as exc:
             logger.warning("ICD lookup fail for '%s': %s", text, exc)
@@ -2326,7 +2127,6 @@ def _emit_entity_record(
     validated: list[dict[str, Any]],
     retriever: RxNormRetriever,
     icd_retriever: Optional[ICDRetriever],
-    rescan_cache: dict[str, str],
     seen_test_names: set[str],
     seen_entities: list[tuple[str, str, list[int]]],
 ) -> dict[str, Any] | None:
@@ -2388,7 +2188,7 @@ def _emit_entity_record(
     record = _build_entity_record(text, etype, pos, ent)
     _attach_candidates(
         record, text, etype, ent, validated,
-        retriever, icd_retriever, rescan_cache,
+        retriever, icd_retriever,
     )
     return record
 

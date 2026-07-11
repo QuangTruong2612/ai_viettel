@@ -90,37 +90,35 @@ AI_VIETTEL/
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ INPUT: hồ sơ bệnh án tiếng Việt (input/N.txt)              │
+│ INPUT: hồ sơ bệnh án tiếng Việt (input/N.txt / input/N.json) │
 └──────────────────────────────────────────────────────────────┘
                           ↓
 ┌──────────────────────────────────────────────────────────────┐
 │ GIAI ĐOẠN 1 — Clinical NER (LLM via Ollama)                  │
-│ • Preprocess input (strip markdown, N/A, truncate)            │
+│ • Preprocess input (strip markdown, N/A, truncate)           │
 │ • Adaptive few-shot (auto-budget theo context length)        │
 │ • Build SYSTEM_PROMPT + few-shot messages                    │
-│ • LLM call (qwen2.5:7b / qwen3.5:9b / etc.)                 │
+│ • LLM call (qwen2.5:7b / qwen3.5:9b / etc.)                  │
 │ • JSON parser với retry + recovery                           │
-│ Output: JSON array entities (text, type, position, ...)     │
+│ Output: JSON array entities (text, type, position, ...)      │
 └──────────────────────────────────────────────────────────────┘
                           ↓
 ┌──────────────────────────────────────────────────────────────┐
-│ GIAI ĐOẠN 2 — LLM Rescan (batch)                             │
-│ • For each THUỐC + CHẨN_ĐOÁN:                                 │
-│   - Translate VN→EN medical phrase (LLM call, cached)        │
-│ • Context enrichment từ nearby entities                       │
-└──────────────────────────────────────────────────────────────┘
-                          ↓
-┌──────────────────────────────────────────────────────────────┐
-│ GIAI ĐOẠN 3 — Postprocess + RAG Population                   │
-│ • Validate positions (auto-fix nếu LLM sai index)             │
+│ GIAI ĐOẠN 2 — Postprocess & Candidate Linking (Offline RAG)  │
+│ • Validate positions (auto-fix nếu LLM sai index)            │
 │ • Dedupe entities (giữ duplicate ở vị trí khác nhau - R8)    │
-│ • Detect substring entities (drop shorter)                   │
-│ • Detect assertions (isHistorical/isNegated/isFamily)        │
-│ • Populate candidates:                                         │
+│ • Detect substring entities & smart assertions               │
+│ • 4-Tier Cascading Candidate Linking:                        │
 │   - THUỐC → RxNormRetriever.lookup()                         │
+│     * Tier 0: Drug Pre-cleaner (tách route/freq/doseform)    │
+│     * Tier 1: INN ↔ USAN & Brand VN dictionary mapping       │
+│     * Tier 2: Exact tuple match (ingredient, strength)       │
+│     * Tier 3: Hybrid search (BGE-M3 + BM25) & Fuzzy match    │
 │   - CHẨN_ĐOÁN → ICDRetriever.lookup()                        │
-│   - Smart assert detection (LLM bỏ sót)                      │
-│ Output: Final JSON array với đầy đủ 5 trường               │
+│     * Tier 0: Clinical prefix & abbreviation dictionary      │
+│     * Tier 1: Direct VN-VN exact/substring match (O(1))      │
+│     * Tier 2: Context-Enriched Hybrid Search (BGE-M3 + BM25) │
+│ Output: Final JSON array với đầy đủ 5 trường                 │
 └──────────────────────────────────────────────────────────────┘
                           ↓
 ┌──────────────────────────────────────────────────────────────┐
@@ -131,28 +129,30 @@ AI_VIETTEL/
 ### Hybrid RAG Architecture (ICD + RxNorm)
 
 ```
-Query (VN/EN drug or disease text)
+Query (VN diagnosis or drug text)
               ↓
-┌─────────────────────────────────┐
-│  L1: Exact match (fast path)     │  ← (ingredient, strength) for RxNorm
-│  - O(1) dictionary lookup         │  ← name → code for ICD
-└─────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  Tier 0 & 1: Pre-cleaner & Exact Match Dictionary (Fast Path)   │
+│  - Strip liều dùng/cách dùng cho Thuốc (_strip_route_freq)      │
+│  - Tra từ điển INN ↔ USAN, Brand VN, viết tắt Y khoa VN         │
+│  → HIT? Return ngay mã (O(1), độ chính xác 100%, không tốn GPU)  │
+└─────────────────────────────────────────────────────────────────┘
               ↓ (miss)
-┌─────────────────────────────────┐
-│  L2: Hybrid search                │
-│  ┌────────────────────────────┐  │
-│  │ Vector (BGE-M3 cosine)      │  │  ← semantic similarity
-│  │   ↓                          │  │  ← multilingual (VN/EN)
-│  │ BM25 keyword                 │  │  ← exact token match
-│  │   ↓                          │  │
-│  │ Union candidates             │  │  ← expand recall
-│  │ Re-score cosine ≥ 0.7       │  │  ← filter noise
-│  └────────────────────────────┘  │
-└─────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  Tier 2: Context-Enriched Hybrid Search                         │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ Context Enrichment (thêm thuốc/triệu chứng lân cận)      │  │
+│  │   ↓                                                       │  │
+│  │ Vector (BGE-M3 cosine ≥ threshold)                        │  │
+│  │   + BM25 keyword search                                   │  │
+│  │   ↓                                                       │  │
+│  │ Union & Re-score cosine                                   │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
               ↓ (miss)
-┌─────────────────────────────────┐
-│  L3: Fuzzy match (rapidfuzz)     │  ← VN/EN variants, partial_ratio
-└─────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  Tier 3: Fuzzy Match (rapidfuzz) & Chapter Restriction          │
+└─────────────────────────────────────────────────────────────────┘
               ↓
          Return top-1 rxcui / ICD code(s)
 ```
@@ -317,10 +317,11 @@ Schema:
 Pipeline:
 
 ```
-VN diagnosis text → ICD10VectorSearch (BGE-M3 cosine ≥ 0.7)
-                  + ICD10BM25Index (expand candidates)
-                  → ICD10HybridSearch (union + re-score)
-                  + _filter_irrelevant_codes (drop F10/T36/V/W/Y/Z)
+VN diagnosis text → Tier 0: Tra từ điển viết tắt/tiền tố chuyên khoa (THA → I10, ...)
+                  → Tier 1: Direct VN-VN exact/substring match trong desc_vi (O(1))
+                  → Tier 2: Context-Enriched Hybrid Search (BGE-M3 + BM25)
+                  + _filter_irrelevant_codes (drop F10/T36/V/W/Y/Z nếu không hợp ngữ cảnh)
+                  → Tier 3: Chapter Restriction & Fuzzy Match (rapidfuzz)
                   → top-K ICD codes
 ```
 
@@ -355,13 +356,11 @@ Schema:
 Pipeline:
 
 ```
-VN/EN drug text → _parse_drug (strip route/freq, parse ing+strength)
-                 ↓
-                 L1: Exact match (ing, strength) → top-1 rxcui
-                 ↓ (miss)
-                 L2: Hybrid search (BGE-M3 + BM25) — semantic match
-                 ↓ (miss)
-                 L3: Fuzzy match trên names
+VN/EN drug text → Tier 0: Drug Pre-cleaner (_strip_route_freq loại bỏ liều dùng, po, bid)
+                → Tier 1: Tra từ điển INN ↔ USAN & Brand VN (_alias_to_generic: Panadol → Acetaminophen)
+                → Tier 2: Exact tuple match (ingredient, strength) → top-1 rxcui
+                → Tier 3: Hybrid search (BGE-M3 + BM25) với cleaned query
+                → Tier 4: Fuzzy match trên names (rapidfuzz) & Compound drug split
 ```
 
 Strength normalization: `"25 mg"`, `"25mg"`, `"25MG"`, `"25.0 MG"` → cùng key `"25MG"`.

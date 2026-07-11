@@ -154,7 +154,9 @@ _DRUG_ALIASES: dict[str, str] = {
     "losec": "omeprazole", "prilosec": "omeprazole",
     "pantoloc": "pantoprazole",
     # Antibiotic
-    "augmentin": "amoxicillin",
+    "augmentin": "amoxicillin / clavulanate",
+    "klamentin": "amoxicillin / clavulanate",
+    "curam": "amoxicillin / clavulanate",
     "zithromax": "azithromycin",
     "cipro": "ciprofloxacin",
     "keflex": "cephalexin",
@@ -168,8 +170,18 @@ _DRUG_ALIASES: dict[str, str] = {
     "prozac": "fluoxetine",
     "lyrica": "pregabalin",
     "neurontin": "gabapentin",
-    # Misc
+    # Misc & INN/USAN Vietnamese common terms
     "ventolin": "albuterol", "salbutamol": "albuterol",
+    "adrenalin": "epinephrine", "adrenaline": "epinephrine",
+    "noradrenalin": "norepinephrine", "noradrenaline": "norepinephrine",
+    "vitamin pp": "niacin",
+    "vitamin c": "ascorbic acid",
+    "vitamin b1": "thiamine",
+    "vitamin b6": "pyridoxine",
+    "vitamin b12": "cyanocobalamin",
+    "decolgen": "acetaminophen / chlorpheniramine / phenylephrine",
+    "tiffy": "acetaminophen / chlorpheniramine / phenylephrine",
+    "panadol extra": "acetaminophen / caffeine",
     "symbicort": "budesonide",
     "singulair": "montelukast",
     "trileptal": "oxcarbazepine",
@@ -652,9 +664,13 @@ class RxNormHybridSearch:
         thr = threshold if threshold is not None else self.threshold
         fanout = max(self.fanout, 30)
 
+        # Drug Pre-cleaner: loại bỏ route, freq, doseform trước khi search (vd "po bid 1 viên")
+        cleaned_query = _strip_route_freq(query)
+        search_q = cleaned_query if cleaned_query.strip() else query
+
         # 1. Get candidates from vector + BM25
-        vec_codes = self.vector_search.search(query, top_k=fanout, threshold=0.0) or []
-        bm25_codes, _ = self.bm25_index.search(query, top_k=fanout)
+        vec_codes = self.vector_search.search(search_q, top_k=fanout, threshold=0.0) or []
+        bm25_codes, _ = self.bm25_index.search(search_q, top_k=fanout)
 
         # 2. Union
         candidates = list(dict.fromkeys(vec_codes + bm25_codes))

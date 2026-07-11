@@ -35,7 +35,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.llm_client import LLMClient
-from src.icd_rag import ICDRetriever, ICD10VectorSearch, Translator
+from src.icd_rag import ICDRetriever, ICD10VectorSearch
 from src.postprocess import (
     assemble_record, validate_output, write_output,
     preprocess_input_for_llm,
@@ -111,8 +111,7 @@ def _reset_per_record_state() -> None:
     Mỗi input phải xử lý ĐỘC LẬP — không tích lũy state từ record trước:
       - Xoá last_raw_response (tránh leak từ record trước)
       - Reset rec_id
-      - Translator cache GIỮ NGUYÊN (intentional cache hit, KHÔNG xoá)
-      - rescan_cache, lookup context: fresh mỗi record (handled trong postprocess)
+      - lookup context: fresh mỗi record (handled trong postprocess)
       - Ollama KV cache: GIỮ nguyên vì persistent connection — control
         bằng Modelfile `keep_alive` (đã note trong README).
     """
@@ -312,7 +311,6 @@ def process_record(
     Đảm bảo context cô lập per-record:
       - Reset module-level state trước khi xử lý
       - LLM call rebuilds msgs từ đầu (stateless)
-      - Translator cache giữ (intentional cache hit)
     """
     _reset_per_record_state()
     _CURRENT_REC_ID[0] = rec_id
@@ -567,155 +565,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 3
 
-    translator = Translator(llm_client=llm)
-    # === ENHANCED ICD EXACT MATCH (mới 2026-07-09) ===
-    # Thêm 30+ common VN terms vào exact match dict để L1 match ngay từ đầu.
-    # Tránh vector search noise (BGE-M3 có thể match sai như "ung thư phổi" → "A30 Cholera").
-    translator.preset({
-        # === Oncology (C00-D48) ===
-        "ung thư phổi": "lung cancer",
-        "ung thư phổi không tế bào nhỏ": "non-small cell lung cancer",
-        "ung thư phổi tế bào nhỏ": "small cell lung cancer",
-        "u ác tính phổi": "lung cancer",  # BYT VN dùng "U ác tính" thay vì "Ung thư"
-        "k phổi": "lung cancer",  # K = ung thư (viết tắt)
-        "ung thư vú": "breast cancer",
-        "ung thư gan": "liver cancer",
-        "ung thư dạ dày": "stomach cancer",
-        "ung thư đại tràng": "colon cancer",
-        "ung thư trực tràng": "rectal cancer",
-        "ung thư buồng trứng": "ovarian cancer",
-        "ung thư cổ tử cung": "cervical cancer",
-        "ung thư tuyến tiền liệt": "prostate cancer",
-        "ung thư bàng quang": "bladder cancer",
-        "ung thư não": "brain cancer",
-        "u não": "brain tumor",
-        "u ác tính não": "brain cancer",
-        "di căn não": "secondary brain cancer",
-        "u ác tính thứ phát ở não": "secondary brain cancer",
-        "di căn xương": "secondary bone cancer",
-        "di căn gan": "secondary liver cancer",
-        "di căn phổi": "secondary lung cancer",
-        "di căn": "secondary malignant neoplasm",
-        # === Cardiovascular (I00-I99) ===
-        "tăng huyết áp": "essential hypertension",
-        "tăng huyết áp vô căn": "essential hypertension",
-        "tăng huyết áp thứ phát": "secondary hypertension",
-        "cao huyết áp": "essential hypertension",
-        "nhồi máu cơ tim": "acute myocardial infarction",
-        "nhồi máu cơ tim cấp": "acute myocardial infarction",
-        "đau thắt ngực": "angina pectoris",
-        "đau thắt ngực ổn định": "stable angina",
-        "đau thắt ngực không ổn định": "unstable angina",
-        "suy tim": "heart failure",
-        "suy tim sung huyết": "congestive heart failure",
-        "suy tim tâm thu": "systolic heart failure",
-        "suy tim tâm trương": "diastolic heart failure",
-        "rung nhĩ": "atrial fibrillation",
-        "cuồng nhĩ": "atrial flutter",
-        "ngoại tâm thu thất": "premature ventricular contraction",
-        "ngoại tâm thu nhĩ": "premature atrial contraction",
-        "nhịp xoang": "sinus rhythm",
-        "rung thất": "ventricular fibrillation",
-        "block nhĩ thất": "atrioventricular block",
-        "tắc mạch": "thrombosis",
-        "tắc mạch huyết khối": "thrombosis",
-        "huyết khối": "thrombosis",
-        "thuyên tắc phổi": "pulmonary embolism",
-        "sa van hai lá": "mitral valve prolapse",
-        "sa van 2 lá": "mitral valve prolapse",
-        "sa van mitral": "mitral valve prolapse",
-        "hở van hai lá": "mitral valve insufficiency",
-        "hở van 2 lá": "mitral valve insufficiency",
-        "hẹp van hai lá": "mitral valve stenosis",
-        "sa van động mạch chủ": "aortic valve prolapse",
-        # === Respiratory (J00-J99) ===
-        "viêm phổi": "pneumonia",
-        "hen phế quản": "asthma",
-        "hen suyễn": "asthma",
-        "bệnh phổi tắc nghẽn mạn tính": "copd",
-        "copd": "copd",
-        "viêm phế quản": "bronchitis",
-        "viêm phế quản cấp": "acute bronchitis",
-        "viêm phế quản mạn": "chronic bronchitis",
-        "tràn khí màng phổi": "pneumothorax",
-        "tràn dịch màng phổi": "pleural effusion",
-        # === Digestive (K00-K95) ===
-        "viêm dạ dày": "gastritis",
-        "loét dạ dày": "gastric ulcer",
-        "loét tá tràng": "duodenal ulcer",
-        "trào ngược dạ dày thực quản": "gerd",
-        "gerd": "gerd",
-        "viêm đại tràng": "colitis",
-        "viêm ruột thừa": "appendicitis",
-        "xơ gan": "liver cirrhosis",
-        "viêm gan b": "hepatitis b",
-        "viêm gan c": "hepatitis c",
-        "viêm gan": "hepatitis",
-        "sỏi mật": "gallstones",
-        "viêm tụy": "pancreatitis",
-        "thoát vị": "hernia",
-        "thoát vị đĩa đệm": "disc herniation",
-        "trĩ": "hemorrhoids",
-        # === Endocrine (E00-E90) ===
-        "đái tháo đường": "diabetes mellitus",
-        "đái tháo đường type 2": "type 2 diabetes mellitus",
-        "đái tháo đường type 1": "type 1 diabetes mellitus",
-        "đái tháo đường tuýp 2": "type 2 diabetes mellitus",
-        "đái tháo đường tuýp 1": "type 1 diabetes mellitus",
-        "suy giáp": "hypothyroidism",
-        "cường giáp": "hyperthyroidism",
-        "basedow": "graves disease",
-        "suy thượng thận": "adrenal insufficiency",
-        "hội chứng cushing": "cushing syndrome",
-        # === Renal/Urinary (N00-N99) ===
-        "suy thận": "renal failure",
-        "suy thận cấp": "acute renal failure",
-        "suy thận mạn": "chronic kidney disease",
-        "sỏi thận": "kidney stones",
-        "viêm bàng quang": "cystitis",
-        "viêm đường tiết niệu": "urinary tract infection",
-        "nhiễm trùng tiết niệu": "urinary tract infection",
-        "viêm thận": "nephritis",
-        "hội chứng thận hư": "nephrotic syndrome",
-        # === Neurology (G00-G99) ===
-        "đột quỵ": "stroke",
-        "tai biến mạch máu não": "stroke",
-        "nhồi máu não": "cerebral infarction",
-        "xuất huyết não": "cerebral hemorrhage",
-        "động kinh": "epilepsy",
-        "parkinson": "parkinsons disease",
-        "alzheimer": "alzheimers disease",
-        "đau nửa đầu": "migraine",
-        "đau đầu": "headache",
-        "viêm màng não": "meningitis",
-        # === Musculoskeletal (M00-M99) ===
-        "thoái hóa khớp": "osteoarthritis",
-        "thoái hóa cột sống": "spinal osteoarthritis",
-        "viêm khớp": "arthritis",
-        "viêm khớp dạng thấp": "rheumatoid arthritis",
-        "gout": "gout",
-        "loãng xương": "osteoporosis",
-        "thoát vị đĩa đệm cổ": "cervical disc herniation",
-        "thoát vị đĩa đệm thắt lưng": "lumbar disc herniation",
-        # === Blood (D50-D89) ===
-        "thiếu máu": "anemia",
-        "thiếu máu thiếu sắt": "iron deficiency anemia",
-        "xuất huyết giảm tiểu cầu": "thrombocytopenia",
-        "leukemia": "leukemia",
-        "lymphoma": "lymphoma",
-        # === Skin (L00-L99) ===
-        "viêm da": "dermatitis",
-        "viêm da cơ địa": "atopic dermatitis",
-        "vẩy nến": "psoriasis",
-        "eczema": "eczema",
-        "viêm tuyến mồ hôi mủ": "hidradenitis suppurativa",
-        "nhọt ổ gà": "hidradenitis suppurativa",
-    })
     retriever = RxNormRetriever()
     # VectorSearch: BGE-M3 vector search trên toàn bộ 71k mã ICD-10
     local_search = ICD10VectorSearch()
     icd_retriever = ICDRetriever(
-        translator=translator, local_search=local_search
+        local_search=local_search
     )
     # Adaptive few-shot cap based on context budget.
     # Tính số few-shot vừa đủ dựa trên: target_ctx - sys_prompt - max_tokens - user_input.
