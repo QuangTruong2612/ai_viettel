@@ -507,10 +507,10 @@ class ICDRetriever:
         else:
             self.local_search = local_search  # type: ignore[assignment] -- caller opted out
 
-        # Fix #6 (R27.7): Init `_icd_vn_to_codes` dict NGAY trong __init__ để L0 short-circuit
-        # trong `lookup()` work ngay từ lần đầu (trước đó dict chỉ được init khi method
-        # `_exact_match_vn_substring()` được gọi, gây miss known ICD codes).
-        self._exact_match_vn_substring("")  # Dummy call để populate dict
+        # Fix #6 (R27.7): Populate `_icd_vn_to_codes` dict NGAY trong __init__ để L0
+        # short-circuit trong `lookup()` work ngay từ lần đầu (trước đó dict là dead code
+        # nằm sau `return` của `_exact_match_vn_substring` nên không bao giờ được set).
+        self._init_icd_vn_to_codes()
 
     # ------------------------------------------------------------------ #
 
@@ -879,9 +879,9 @@ class ICDRetriever:
                     out.append(code)
         return out
 
-    # ICD direct mapping (R27.5, 2026-07-09): VN → exact ICD codes
-        # Vì desc_en BYT VN không exact match EN translation (vd "lung cancer" vs
-        # "Malignant neoplasm of bronchus and lung") → cần dict mapping trực tiếp.
+    def _init_icd_vn_to_codes(self) -> None:
+        # ICD direct mapping (R27.5): VN → exact ICD codes.
+        # desc_en BYT không exact-match bản dịch EN nên cần map trực tiếp.
         self._icd_vn_to_codes = {
             "ung thư phổi": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
             "ung thư phổi không tế bào nhỏ": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],

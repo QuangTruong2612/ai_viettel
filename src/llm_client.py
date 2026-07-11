@@ -35,7 +35,7 @@ class LLMConfig:
     # max_tokens=6144 đủ chứa JSON ~40 entities + chain-of-thought reasoning dài.
     # Tăng từ 4096 (2026-07-09) sau khi 4096 bị thiếu với input 1.txt (chỉ 17 entities).
     # 6144 cho buffer thoải mái cho CoT + JSON output dài (30-40 entities).
-    max_tokens: int = 6144
+    max_tokens: int = 8192
     timeout: int = 900  # 15 phút/request (tăng từ 600 cho max_tokens cao + CoT reasoning)
     max_retries: int = 1  # giảm retry để fail fast
 
