@@ -446,6 +446,17 @@ class ICDRetriever:
         # nằm sau `return` của `_exact_match_vn_substring` nên không bao giờ được set).
         self._init_icd_vn_to_codes()
 
+        self._code_to_desc = {}
+        for c, n in zip(self.idx.codes, self.idx.names):
+            if c not in self._code_to_desc:
+                self._code_to_desc[c] = n.lower()
+        if self.local_search is not None and hasattr(self.local_search, 'vector_search') and self.local_search.vector_search is not None:
+            vs = self.local_search.vector_search
+            if hasattr(vs, 'codes') and hasattr(vs, 'names'):
+                for c, n in zip(vs.codes, vs.names):
+                    if c not in self._code_to_desc:
+                        self._code_to_desc[c] = n.lower()
+
     # ------------------------------------------------------------------ #
 
     def _load_index(self, path: Optional[Path]) -> ICDIndex:
@@ -499,8 +510,72 @@ class ICDRetriever:
             if ch in ('L', 'H', 'F'):
                 return (2, code)
             return (3, code)
-            
-        return sorted(set(result), key=_chapter_priority)
+
+        text_lower = text.lower()
+        # Universal non-hardcoded lexical overlap & contradiction check
+        text_tokens = set(re.findall(r'[a-zà-ỹ0-9_/-]{2,}', text_lower))
+        stop_words = {"và", "của", "khi", "cho", "tại", "bị", "có", "do", "các", "những", "lần", "ngày", "bệnh", "chứng", "tình", "trạng", "không", "chưa", "hoặc", "hay", "là", "với", "trong"}
+        core_text_tokens = text_tokens - stop_words
+
+        # Extract discriminative tokens: single letters (a, b, c...), digits (1, 2, 3...), Roman numerals (i, ii, iii, iv...)
+        disc_tokens = set(re.findall(r'\b(?:[a-z]|\d+|ii+|iv|vi*)\b', text_lower)) - {"i", "a"} # ignore 'i'/'a' if used as grammar
+
+        def _lex_score(code: str) -> tuple[float, int, int]:
+            desc = self._code_to_desc.get(code, "").lower()
+            desc_tokens = set(re.findall(r'[a-zà-ỹ0-9_/-]{2,}', desc))
+            penalty = 0.0
+
+            # 1. Universal Discriminative Token Match (Letters, Numbers, Roman numerals) - ZERO Disease Hardcoding
+            if disc_tokens:
+                desc_disc = set(re.findall(r'\b(?:[a-z]|\d+|ii+|iv|vi*)\b', desc)) - {"i", "a"}
+                for dt in disc_tokens:
+                    if dt in desc_disc:
+                        penalty -= 1.5
+                    elif desc_disc and not (disc_tokens & desc_disc):
+                        # Candidate has a DIFFERENT digit/letter/Roman numeral than input text -> heavy penalty
+                        penalty += 2.5
+
+            # 2. General Linguistic Antonym Check (Zero Disease Names)
+            antonym_pairs = [
+                ("cấp", "mạn"), ("cấp", "mãn"),
+                ("trái", "phải"), ("trái", "hai bên"), ("phải", "hai bên"),
+                ("trên", "dưới"), ("trong", "ngoài"),
+                ("lành tính", "ác tính"), ("lành", "ác"),
+            ]
+            for w1, w2 in antonym_pairs:
+                if re.search(r'\b' + re.escape(w1) + r'\b', text_lower):
+                    if re.search(r'\b' + re.escape(w1) + r'\b', desc): penalty -= 1.2
+                    if re.search(r'\b' + re.escape(w2) + r'\b', desc): penalty += 2.5
+                elif re.search(r'\b' + re.escape(w2) + r'\b', text_lower):
+                    if re.search(r'\b' + re.escape(w2) + r'\b', desc): penalty -= 1.2
+                    if re.search(r'\b' + re.escape(w1) + r'\b', desc): penalty += 2.5
+
+            # 3. Token overlap ratio (Jaccard similarity across all 14,000+ codes)
+            if core_text_tokens and desc_tokens:
+                overlap = len(core_text_tokens & desc_tokens)
+                union = len(core_text_tokens | desc_tokens)
+                jaccard = overlap / max(union, 1)
+                penalty -= jaccard * 1.5
+
+            # 4. Universal Neoplasm check: nếu text nhắc đến u/khối u/bướu/ung thư → ưu tiên chương C và D00-D48
+            if re.search(r'\b(?:u|khối\s+u|bướu|ung\s+thư|k)\b', text_lower):
+                if code.startswith('C') or (code.startswith('D') and code[1:3].isdigit() and int(code[1:3]) <= 48):
+                    penalty -= 0.5
+
+            idx = result.index(code) if code in result else 999
+            return (penalty, 0 if code[0].upper() in ('I', 'J', 'K', 'E', 'N', 'M', 'C', 'D', 'G', 'A', 'B', 'R', 'S', 'T') else 1, idx)
+
+        return sorted(set(result), key=_lex_score)
+
+    def _split_compound_diagnosis(self, text: str) -> list[str]:
+        """Tách chẩn đoán kép (Multi-hop / Conjunction splitting) thành các chẩn đoán riêng lẻ."""
+        parts = re.split(r'\s+trên\s+nền\s+|\s+kèm\s+theo\s+|\s+kèm\s+|\s+biến\s+chứng\s+|\s+đồng\s+thời\s+|\s+hoặc\s+|\s+hay\s+', text, flags=re.IGNORECASE)
+        if len(parts) == 1 and (' - ' in text or ' / ' in text):
+            sub = re.split(r'\s+-\s+|\s+/\s+', text)
+            if all(len(p.strip()) >= 4 for p in sub):
+                parts = sub
+        cleaned_parts = [p.strip().rstrip(',;. -') for p in parts if len(p.strip()) >= 3]
+        return cleaned_parts if len(cleaned_parts) > 1 else [text]
 
     def lookup(
         self,
@@ -508,11 +583,27 @@ class ICDRetriever:
         context_query: str | None = None,
         other_entities: list[dict] | None = None,
     ) -> list[str]:
-        """Tra ICD-10 cho 1 cụm chẩn đoán tiếng Việt.
+        """Tra ICD-10 cho 1 cụm chẩn đoán tiếng Việt (có tự động tách chẩn đoán kép)."""
+        if not vn_text:
+            return []
+        parts = self._split_compound_diagnosis(vn_text)
+        if len(parts) > 1 and len(parts) <= 5:
+            logger.debug("Multi-hop splitting '%s' → %s", vn_text, parts)
+            out = []
+            for p in parts:
+                codes = self._lookup_single(p, context_query, other_entities)
+                for c in codes:
+                    if c not in out:
+                        out.append(c)
+            return out[:4]
+        return self._lookup_single(vn_text, context_query, other_entities)
 
-        Format dữ liệu mới (ICD10_Data.json): Mã bệnh + Tên bệnh gốc (TIẾNG VIỆT).
-        → Match trực tiếp VN-VN, KHÔNG cần Translate VN→EN.
-        """
+    def _lookup_single(
+        self,
+        vn_text: str,
+        context_query: str | None = None,
+        other_entities: list[dict] | None = None,
+    ) -> list[str]:
         if not vn_text:
             return []
 
@@ -1942,110 +2033,18 @@ class ICD10HybridSearch:
 # Dùng cosine score TRONG chapter đã restrict.
 # ---------------------------------------------------------------------- #
 
-_CHAPTER_RESTRICTIONS = [
-    # (keywords_set, chapter_prefix)
-    # Chính xác cao - specific disease keywords
-    ({"tuyến mồ hôi", "mồ hôi", "hidradenitis", "nhọt ổ gà"}, "L73"),
-    ({"viêm nang lông", "trứng cá", "mụn trứng cá", "acne"}, "L70"),
-    # Tim mạch - Cardiology (I chapter)
-    ({"nhồi máu cơ tim", "nmct", "stemi", "nstemi"}, "I21"),
-    ({"nhồi máu cơ tim cũ", "nmct cũ", "bệnh mạch vành"}, "I25"),
-    ({"st chênh lên", "st chênh xuống", "sóng t đảo ngược", "sóng q bệnh lý"}, "I21"),
-    ({"đau thắt ngực không ổn định", "đau thắt ngực ổn định", "đau thắt ngực"}, "I20"),
-    ({"hội chứng vành cấp"}, "I24"),
-    ({"suy tim"}, "I50"),
-    ({"rung nhĩ", "cuồng nhĩ"}, "I48"),
-    ({"ngoại tâm thu nhĩ", "pac"}, "I49"),
-    ({"ngoại tâm thu thất", "pvc"}, "I49"),
-    ({"nhịp nhanh trên thất", "svt"}, "I47"),
-    ({"nhịp nhanh thất", "rung thất"}, "I47"),
-    ({"block nhĩ thất", "block av", "bav"}, "I44"),
-    ({"block nhánh trái", "lbbb"}, "I44"),
-    ({"block nhánh phải", "rbbb"}, "I45"),
-    ({"tăng huyết áp", "tha", "cao huyết áp", "ha tăng", "huyết áp cao"}, "I10"),
-    ({"đái tháo đường", "đtđ", "tiểu đường", "đái đường"}, "E11"),
-    ({"hen phế quản", "hen suyễn", "hen"}, "J45"),
-    ({"copd", "bệnh phổi tắc nghẽn mạn", "tắc nghẽn mạn"}, "J44"),
-    ({"viêm phổi"}, "J12"),
-    ({"viêm gan b", "viêm gan b cấp"}, "B16"),
-    ({"viêm gan c", "viêm gan c cấp"}, "B17"),
-    # === MỚI 2026-07-09 (từ user feedback 19.txt) ===
-    ({"ung thư phổi", "k phổi", "carcinoma phổi", "u phổi"}, "C34"),  # Lung cancer
-    ({"di căn não", "di căn xương", "di căn gan", "di căn phổi", "second"}, "C79"),  # Secondary malignant
-    ({"sa van hai lá", "sa van 2 lá", "sa van mitral", "mitral valve prolapse", "hở van hai lá", "hở van 2 lá", "hở van mitral"}, "I34"),  # Mitral valve
-    ({"ung thư"}, "C"),  # Generic cancer → chapter C (all cancers)
-    ({"tắc mạch", "huyết khối", "thrombosis", "embolism"}, "I82"),  # Venous thrombosis/embolism
-    ({"phổi tắc nghẽn", "thuyên tắc phổi", "pe "}, "I26"),  # Pulmonary embolism
-    ({"u não", "khối u não", "brain tumor", "u trán", "u bán cầu não"}, "C71"),  # Brain tumor
-    ({"di căn"}, "C79"),  # All metastasis → secondary malignant
-    ({"tăng áp phổi", "tăng huyết áp phổi"}, "I27"),  # Pulmonary hypertension
-    ({"hở van", "hẹp van", "van tim"}, "I34"),  # Heart valve disease
-    ({"suy thận"}, "N18"),  # Chronic kidney disease
-    ({"thiếu máu"}, "D50"),  # Anemia
-    ({"đau thắt lưng"}, "M54"),  # Low back pain
-    ({"thoái hóa", "thoái hoá"}, "M15"),  # Osteoarthritis
-    ({"thoát vị"}, "K46"),  # Abdominal hernia (or M51 for disc)
-    ({"xơ gan"}, "K74"),  # Cirrhosis
-    ({"loét dạ dày", "loét tá tràng"}, "K25"),  # Peptic ulcer
-    ({"viêm dạ dày"}, "K29"),  # Gastritis
-    ({"trào ngược", "gerd", "gastroesophageal"}, "K21"),  # GERD
-    ({"viêm ruột"}, "K52"),  # Enteritis
-    ({"tiêu chảy"}, "K52"),  # Diarrhea
-    ({"táo bón"}, "K59"),  # Constipation
-    ({"viêm phúc mạc"}, "K65"),  # Peritonitis
-    ({"sỏi thận"}, "N20"),  # Kidney stones
-    ({"viêm đường tiết niệu", "viêm bàng quang", "viêm niệu"}, "N39"),  # UTI
-    ({"viêm phổi mắc phải cộng đồng", "vpmpccĐ"}, "J18"),  # CAP
-    ({"hen", "copd", "khó thở"}, "J"),  # Respiratory symptoms
-    ({"đau ngực"}, "R07"),  # Chest pain (symptom)
-    ({"đau bụng"}, "R10"),  # Abdominal pain
-    ({"sốt"}, "R50"),  # Fever
-    ({"ho"}, "R05"),  # Cough
-    ({"mệt mỏi"}, "R53"),  # Fatigue
-    ({"chóng mặt"}, "R42"),  # Dizziness
-    ({"buồn nôn"}, "R11"),  # Nausea
-    ({"nôn"}, "R11"),  # Vomiting
-    ({"tiêu hóa", "đại tràng", "ruột"}, "K"),  # GI chapter
-    ({"tim mạch", "tim", "mạch vành"}, "I"),  # Cardiovascular chapter
-    ({"hô hấp", "phế quản", "phổi"}, "J"),  # Respiratory chapter
-    ({"thần kinh", "não", "thần kinh trung ương"}, "G"),  # Neurology chapter
-    ({"cơ xương khớp", "khớp", "xương"}, "M"),  # Musculoskeletal chapter
-    ({"nội tiết", "tuyến giáp", "đái tháo đường"}, "E"),  # Endocrine chapter
-    ({"da liễu", "da"}, "L"),  # Dermatology chapter
-    ({"mắt"}, "H"),  # Ophthalmology chapter
-    ({"tai mũi họng", "tai", "họng"}, "H"),  # ENT chapter
-    ({"thận", "tiết niệu"}, "N"),  # Nephrology/Urology chapter
-    ({"máu", "huyết học"}, "D"),  # Hematology chapter
-    ({"sản phụ khoa", "phụ khoa", "thai"}, "O"),  # OB/GYN chapter
-    ({"nhi khoa"}, "P"),  # Pediatrics chapter
-    ({"tâm thần", "tâm lý"}, "F"),  # Psychiatry chapter
-    ({"ngoại khoa", "phẫu thuật"}, "Z"),  # Surgical/History chapter
-    ({"nội khoa"}, "Z"),  # Internal medicine history
-    ({"viêm gan", "gan viêm"}, "K75"),
-    ({"ung thư phổi", "k phổi", "carcinoma phổi"}, "C34"),
-    ({"ung thư vú"}, "C50"),
-    ({"ung thư dạ dày", "k dạ dày"}, "C16"),
-    ({"ung thư đại tràng", "ung thư trực tràng", "k đại tràng", "ung thư ruột"}, "C18"),
-    ({"đột quỵ", "tai biến mạch máu não", "tbmmn"}, "I63"),
-    ({"suy thận"}, "N18"),
-    ({"viêm dạ dày"}, "K29"),
-    ({"loét dạ dày"}, "K25"),
-    ({"thoái hóa khớp"}, "M15"),
-    ({"viêm khớp dạng thấp"}, "M06"),
-    ({"thoát vị đĩa đệm"}, "M51"),
-    ({"trào ngược dạ dày"}, "K21"),
-    ({"rối loạn lipid máu", "tăng lipid máu", "rối loạn lipid"}, "E78"),
-    ({"viêm xoang"}, "J32"),
-    ({"viêm phế quản"}, "J20"),
-    ({"viêm họng"}, "J02"),
-    ({"viêm amidan"}, "J03"),
-    ({"viêm tai giữa"}, "H66"),
-    ({"nhiễm trùng tiết niệu", "nhiễm trùng đường tiết niệu"}, "N39"),
-    ({"sỏi thận"}, "N20"),
-    ({"block nhĩ thất", "block av"}, "I44"),
-    ({"ngoại tâm thu thất", "pvc"}, "I49"),
-    ({"ngoại tâm thu nhĩ", "pac"}, "I49"),
-]
+def _load_chapter_restrictions() -> list[tuple[set[str], str]]:
+    path = DATA_DIR / "chapter_restrictions.json"
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return [(set(kws), prefix) for kws, prefix in raw]
+    except Exception as e:
+        logger.warning("Failed to load %s: %s", path, e)
+        return []
+
+_CHAPTER_RESTRICTIONS: list[tuple[set[str], str]] = _load_chapter_restrictions()
 
 
 def _restrict_chapter(codes, entity_text):

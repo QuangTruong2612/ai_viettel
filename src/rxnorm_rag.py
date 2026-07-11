@@ -108,105 +108,48 @@ def _strip_route_freq(text: str) -> str:
 # Cập nhật 2026-07.
 # ---------------------------------------------------------------------- #
 
-_DRUG_ALIASES: dict[str, str] = {
-    # Analgesic / antipyretic
-    "panadol": "acetaminophen", "panadol extra": "acetaminophen",  # EU/UK → US generic in index
-    "efferalgan": "acetaminophen",  # FR
-    "doliprane": "acetaminophen",  # FR
-    "paracetamol": "acetaminophen",  # EU/UK → US generic in index
-    "tylenol": "acetaminophen",  # US
-    "acetaminophen": "acetaminophen",  # already generic (no-op)
-    "aspirin": "aspirin",  # generic rồi
-    "aspegic": "aspirin",  # aspirin lysine
-    "bayer": "aspirin",
-    # Anti-inflammatory / NSAID
-    "voltaren": "diclofenac", "voltaren gel": "diclofenac",
-    "ibuprofen": "ibuprofen", "advil": "ibuprofen", "motrin": "ibuprofen",
-    "celebrex": "celecoxib",
-    "meloxicam": "meloxicam", "mobic": "meloxicam",
-    "naproxen": "naproxen", "aleve": "naproxen",
-    # Cardiovascular - antihypertensive
-    "norvasc": "amlodipine", "istin": "amlodipine",
-    "lopressor": "metoprolol", "betaloc": "metoprolol",
-    "tenormin": "atenolol",
-    "coreg": "carvedilol", "dilatrend": "carvedilol",
-    "capoten": "captopril", "lopril": "captopril",
-    "zestril": "lisinopril",
-    "cozaar": "losartan", "cozaar plus": "losartan",
-    "diovan": "valsartan",
-    # Statin
-    "lipitor": "atorvastatin", "atorvastatin": "atorvastatin",
-    "zocor": "simvastatin", "simvastatin": "simvastatin",
-    "crestor": "rosuvastatin",
-    # Antiplatelet / anticoag
-    "plavix": "clopidogrel",
-    "eliquis": "apixaban",
-    "xarelto": "rivaroxaban",
-    "coumadin": "warfarin", "marevan": "warfarin",
-    # Diabetes
-    "glucophage": "metformin", "glucophage xr": "metformin",
-    "glucovance": "metformin",
-    "januvia": "sitagliptin",
-    "amaryl": "glimepiride",
-    "diamicron": "gliclazide",
-    # GI
-    "nexium": "esomeprazole",
-    "losec": "omeprazole", "prilosec": "omeprazole",
-    "pantoloc": "pantoprazole",
-    # Antibiotic
-    "augmentin": "amoxicillin / clavulanate",
-    "klamentin": "amoxicillin / clavulanate",
-    "curam": "amoxicillin / clavulanate",
-    "zithromax": "azithromycin",
-    "cipro": "ciprofloxacin",
-    "keflex": "cephalexin",
-    "vibramycin": "doxycycline",
-    # CNS
-    "stilnox": "zolpidem",
-    "xanax": "alprazolam",
-    "valium": "diazepam",
-    "lexapro": "escitalopram",
-    "zoloft": "sertraline",
-    "prozac": "fluoxetine",
-    "lyrica": "pregabalin",
-    "neurontin": "gabapentin",
-    # Misc & INN/USAN Vietnamese common terms
-    "ventolin": "albuterol", "salbutamol": "albuterol",
-    "adrenalin": "epinephrine", "adrenaline": "epinephrine",
-    "noradrenalin": "norepinephrine", "noradrenaline": "norepinephrine",
-    "vitamin pp": "niacin",
-    "vitamin c": "ascorbic acid",
-    "vitamin b1": "thiamine",
-    "vitamin b6": "pyridoxine",
-    "vitamin b12": "cyanocobalamin",
-    "decolgen": "acetaminophen / chlorpheniramine / phenylephrine",
-    "tiffy": "acetaminophen / chlorpheniramine / phenylephrine",
-    "panadol extra": "acetaminophen / caffeine",
-    "symbicort": "budesonide",
-    "singulair": "montelukast",
-    "trileptal": "oxcarbazepine",
-    "depakote": "valproic acid",
-    "lamictal": "lamotrigine",
-}
+def _load_drug_aliases() -> dict[str, str]:
+    path = DATA_DIR / "drug_aliases.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("Failed to load %s: %s", path, e)
+        return {}
+
+_DRUG_ALIASES: dict[str, str] = _load_drug_aliases()
 
 
 def _alias_to_generic(drug_text: str) -> str:
-    """Translate brand name in drug text → generic name.
-
-    VD: "Panadol 500mg" → "paracetamol 500mg"
-        "Voltaren gel 50g" → "diclofenac gel 50g" (giữ strength + form)
-    Logic: extract first word (likely drug name) → lookup in _DRUG_ALIASES → replace.
-    """
+    """Translate brand name / misspellings in drug text → generic name (Robust against prefixes like thuốc, viên, viên uống...)."""
     if not drug_text or not _DRUG_ALIASES:
         return drug_text
     text_lower = drug_text.lower().strip()
-    # Thử match từ đầu (longest first)
+    
+    # Strip common Vietnamese prefix words before matching
+    prefix_re = re.compile(r"^(?:viên\s+uống|viên\s+nén|viên\s+nang|thuốc\s+viên|thuốc\s+tiêm|thuốc\s+uống|thuốc|viên|viêm|tiêm|ống|gói|lọ|dung\s+dịch|hỗn\s+dịch|siro)\s+", re.IGNORECASE)
+    stripped_prefix = ""
+    m = prefix_re.match(drug_text)
+    while m:
+        stripped_prefix += m.group(0)
+        drug_text = drug_text[len(m.group(0)):].lstrip()
+        text_lower = drug_text.lower().strip()
+        m = prefix_re.match(drug_text)
+
+    # Thử match từ dài nhất trước
     for brand in sorted(_DRUG_ALIASES.keys(), key=len, reverse=True):
         if text_lower.startswith(brand + " ") or text_lower == brand:
             generic = _DRUG_ALIASES[brand]
-            # Preserve rest of text (strength, route, etc.)
             rest = drug_text[len(brand):].lstrip()
             return f"{generic} {rest}".strip() if rest else generic
+        # Nếu brand nằm giữa hoặc có từ lót
+        pattern = r"\b" + re.escape(brand) + r"\b"
+        if re.search(pattern, text_lower):
+            generic = _DRUG_ALIASES[brand]
+            replaced = re.sub(pattern, generic, drug_text, count=1, flags=re.IGNORECASE)
+            return replaced.strip()
+
     return drug_text
 
 

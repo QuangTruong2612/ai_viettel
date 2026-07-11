@@ -479,6 +479,34 @@ def load_few_shot(path: Path | None = None) -> list[dict]:
     return examples
 
 
+def select_dynamic_few_shot(examples: list[dict], input_text: str, k: int) -> list[dict]:
+    """Chọn k few-shot examples có độ tương đồng ngữ cảnh/chuyên khoa cao nhất với input_text."""
+    if not examples or k <= 0:
+        return []
+    if k >= len(examples):
+        return examples
+
+    def _get_tokens(t: str) -> set[str]:
+        words = re.findall(r'[a-zà-ỹ0-9_/-]{3,}', t.lower())
+        stop = {"của", "và", "có", "cho", "trong", "với", "được", "các", "những", "lúc", "tại", "vào", "ra", "bệnh", "nhân", "ngày", "lần", "tiền", "sử", "hiện", "tại", "không", "chưa", "khi"}
+        return set(w for w in words if w not in stop)
+
+    in_tokens = _get_tokens(input_text)
+    if not in_tokens:
+        return examples[:k]
+
+    scored = []
+    for idx, ex in enumerate(examples):
+        ex_tokens = _get_tokens(ex.get("input", ""))
+        overlap = len(in_tokens & ex_tokens)
+        union = len(in_tokens | ex_tokens) or 1
+        score = overlap / union
+        scored.append((score, -idx, ex))
+
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [item[2] for item in scored[:k]]
+
+
 def format_few_shot_messages(examples: list[dict]) -> list[dict[str, str]]:
     """Chuyển few-shot examples sang OpenAI chat messages.
 

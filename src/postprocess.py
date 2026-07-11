@@ -513,33 +513,27 @@ _IS_FAMILY_PATTERNS = [
     r"ng[ưu]ờ[i]\s+th[âa]n",
     r"h[ọo]\s+h[âa]ng",
     # Family-style markers that ONLY indicate isFamily (not isHistorical)
-    r"(?:cha|mẹ|anh|chị|em|ông|bà|cô|dì|chú|bác)",
+    r" (?:cha|mẹ|anh|chị|em|ông|bà|cô|dì|chú|bác) ",
 ]
 
 _IS_FAMILY_RE = re.compile("|".join(_IS_FAMILY_PATTERNS), re.IGNORECASE | re.UNICODE)
 
 
-# Bug history: LLM 7B extract nhầm lifestyle/social/psychology words thành
-# TRIỆU_CHỨNG dù đã có R3 trong prompt (vd "căng thẳng", "cà phê có caffeine",
-# "mất việc làm 8 ngày trước"). Fix: hard filter trong postprocess — drop entity
-# có text khớp keyword lifestyle/social/psychology. Defense-in-depth để LLM
-# vẫn gặp score cao khi extract thì vẫn bị filter.
-_LIFESTYLE_KEYWORDS: set[str] = {
-    # Lifestyle / risk factor
-    "hút thuốc lá", "thuốc lá", "hút thuốc", "uống rượu", "rượu bia",
-    "cà phê", "trà", "tập thể dục", "luyện tập", "căng thẳng", "stress",
-    "chế độ ăn", "ăn kiêng", "ngủ ít", "ngủ nhiều", "ngủ đủ",
-    # Social events
-    "mất việc", "mất việc làm", "mới nghỉ việc", "nghỉ việc",
-    "ly hôn", "ly thân", "chuyển nhà", "kết hôn", "sinh con",
-    "thất nghiệp", "bị sa thải", "sa thải",
-    # General psychology (non-clinical)
-    "vui", "buồn", "lo lắng", "cô đơn", "giận", "sợ", "lo", "bực",
-    "căng", "áp lực", "mệt mỏi tinh thần",
-}
+def _load_set_from_json(filename: str) -> set[str]:
+    path = _PROJECT_ROOT / "data" / filename
+    if not path.exists():
+        return set()
+    try:
+        return set(json.loads(path.read_text(encoding="utf-8")))
+    except Exception as e:
+        logger.warning("Failed to load %s: %s", path, e)
+        return set()
+
+
+_LIFESTYLE_KEYWORDS: set[str] = _load_set_from_json("lifestyle_keywords.json")
 
 _LIFESTYLE_RE = re.compile(
-    r"\b(" + "|".join(re.escape(k) for k in sorted(_LIFESTYLE_KEYWORDS, key=len, reverse=True)) + r")\b",
+    r"\b(" + "|".join(re.escape(k) for k in sorted(_LIFESTYLE_KEYWORDS, key=len, reverse=True)) + r")\b" if _LIFESTYLE_KEYWORDS else r"(?!x)x",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -548,197 +542,7 @@ _LIFESTYLE_RE = re.compile(
 _seen_count: int = 0
 
 
-# Bug history: LLM 7B hay gán nhầm tên thuốc thành TÊN_XÉT_NGHIỆM
-# hoặc TRIỆU_CHỪNG (vd "guaifenesin ml" bị gán "TÊN_XÉT_NGHIỆM").
-# Fix: rescue - nếu first_word của text khớp common drug name → ép về THUỐC.
-_COMMON_DRUG_NAMES: set[str] = {
-    # Cough / expectorant
-    "guaifenesin",
-    "dextromethorphan",
-    "codeine",
-    "ephedrine",
-    "phenylephrine",
-    "diphenhydramine",
-    "chlorpheniramine",
-    "loratadine",
-    "cetirizine",
-    "fexofenadine",
-    "desloratadine",
-    "levocetirizine",
-    "promethazine",
-    # Antibiotics
-    "amoxicillin",
-    "ampicillin",
-    "azithromycin",
-    "ciprofloxacin",
-    "levofloxacin",
-    "moxifloxacin",
-    "cefixime",
-    "ceftriaxone",
-    "cefuroxime",
-    "cefepime",
-    "cefazolin",
-    "cephalexin",
-    "doxycycline",
-    "minocycline",
-    "tetracycline",
-    "erythromycin",
-    "metronidazole",
-    "tinidazole",
-    "nitrofurantoin",
-    "trimethoprim",
-    "vancomycin",
-    "linezolid",
-    "meropenem",
-    "imipenem",
-    # Cardiovascular
-    "amlodipine",
-    "nifedipine",
-    "felodipine",
-    "diltiazem",
-    "verapamil",
-    "atenolol",
-    "metoprolol",
-    "bisoprolol",
-    "carvedilol",
-    "propranolol",
-    "lisinopril",
-    "enalapril",
-    "ramipril",
-    "losartan",
-    "valsartan",
-    "irbesartan",
-    "candesartan",
-    "olmesartan",
-    "telmisartan",
-    "hydrochlorothiazide",
-    "furosemide",
-    "spironolactone",
-    "eplerenone",
-    "atorvastatin",
-    "rosuvastatin",
-    "simvastatin",
-    "pravastatin",
-    "clopidogrel",
-    "aspirin",
-    "warfarin",
-    "apixaban",
-    "rivaroxaban",
-    "dabigatran",
-    "digoxin",
-    "amiodarone",
-    "sotalol",
-    # Diabetes
-    "metformin",
-    "glipizide",
-    "gliclazide",
-    "glyburide",
-    "glimepiride",
-    "sitagliptin",
-    "linagliptin",
-    "vildagliptin",
-    "empagliflozin",
-    "dapagliflozin",
-    "liraglutide",
-    "semaglutide",
-    "insulin",
-    "insulin-glargine",
-    "insulin-aspart",
-    "insulin-lispro",
-    # GI
-    "omeprazole",
-    "pantoprazole",
-    "lansoprazole",
-    "esomeprazole",
-    "rabeprazole",
-    "ranitidine",
-    "famotidine",
-    "cimetidine",
-    "ondansetron",
-    "metoclopramide",
-    "domperidone",
-    "loperamide",
-    "lactulose",
-    "bisacodyl",
-    "senna",
-    "docusate",
-    # Respiratory
-    "salbutamol",
-    "albuterol",
-    "ipratropium",
-    "tiotropium",
-    "formoterol",
-    "salmeterol",
-    "budesonide",
-    "fluticasone",
-    "beclomethasone",
-    "montelukast",
-    "theophylline",
-    # CNS
-    "paracetamol",
-    "acetaminophen",
-    "ibuprofen",
-    "naproxen",
-    "diclofenac",
-    "meloxicam",
-    "celecoxib",
-    "etoricoxib",
-    "piroxicam",
-    "tramadol",
-    "morphine",
-    "fentanyl",
-    "oxycodone",
-    "gabapentin",
-    "pregabalin",
-    "carbamazepine",
-    "lamotrigine",
-    "topiramate",
-    "sertraline",
-    "fluoxetine",
-    "escitalopram",
-    "venlafaxine",
-    "duloxetine",
-    "amitriptyline",
-    "mirtazapine",
-    "haloperidol",
-    "risperidone",
-    "olanzapine",
-    "quetiapine",
-    "aripiprazole",
-    "diazepam",
-    "lorazepam",
-    "alprazolam",
-    "clonazepam",
-    "midazolam",
-    "zopiclone",
-    "zolpidem",
-    # Other
-    "methotrexate",
-    "azathioprine",
-    "cyclophosphamide",
-    "hydroxychloroquine",
-    "allopurinol",
-    "febuxostat",
-    "colchicine",
-    "prednisone",
-    "prednisolone",
-    "methylprednisolone",
-    "dexamethasone",
-    "hydrocortisone",
-    "thyroxine",
-    "levothyroxine",
-    "methimazole",
-    "calcium",
-    "iron",
-    "folic-acid",
-    "nystatin",
-    "fluconazole",
-    "itraconazole",
-    "amphotericin",
-    "acyclovir",
-    "valacyclovir",
-    "oseltamivir",
-}
+_COMMON_DRUG_NAMES: set[str] = _load_set_from_json("common_drug_names.json")
 
 
 
@@ -796,14 +600,21 @@ def _detect_assertions_from_context(
             found.append("isFamily")
             break
 
-    # isNegated: check "không", "chưa", "âm tính" trong window 20 chars trước entity.
+    # isNegated: check "không", "chưa", "âm tính", "loại trừ" trong window trước entity.
     # Lưu ý: "không" có thể nằm sát entity (vd "không sốt" → pre_window kết thúc bằng "khô").
-    near = text_lower[max(0, pos - 15):pos + 5]  # rộng hơn để bắt "không "
+    near = text_lower[max(0, pos - 35):pos + min(len(entity_text), 15)]  # rộng hơn để bắt đủ ngữ cảnh phủ định
     found_negated = False
-    for neg in ("không", "chưa", "âm tính"):
+    neg_phrases = (
+        "không thấy", "chưa thấy", "chưa có dấu hiệu", "loại trừ",
+        "không có", "chưa có", "không phát hiện", "âm tính",
+        "không ghi nhận", "chưa ghi nhận", "không sốt", "không ho",
+        "không", "chưa"
+    )
+    for neg in neg_phrases:
         if neg in near:
-            found_negated = True
-            break
+            if re.search(r'\b' + re.escape(neg) + r'\b', near):
+                found_negated = True
+                break
     if found_negated and "isNegated" not in found:
         found.append("isNegated")
 
@@ -1781,6 +1592,37 @@ def _split_drug_disease_connector(
     return out
 
 
+def _split_test_name_value_connector(
+    input_text: str,
+    raw_entities: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Tách cụm 'Tên xét nghiệm [là/:/=] Giá trị' mà LLM vô tình gộp vào 1 entity (R7).
+
+    Ví dụ: 'bilirubin toàn phần (tbili) là 2.4' -> 'bilirubin toàn phần (tbili)' (TÊN_XN) + '2.4' (KQ_XN).
+           'kali là 2.4' -> 'kali' (TÊN_XN) + '2.4' (KQ_XN).
+    """
+    out: list[dict[str, Any]] = []
+    connector_pattern = re.compile(r"\s+(?:là|=|:|đạt|ở\s+mức)\s+(?=\d)", re.IGNORECASE)
+
+    for ent in raw_entities:
+        if not isinstance(ent, dict):
+            continue
+        text = str(ent.get("text", "")).strip()
+        etype = ent.get("type", "")
+        if etype in ("KẾT_QUẢ_XÉT_NGHIỆM", "TÊN_XÉT_NGHIỆM") and connector_pattern.search(text):
+            parts = connector_pattern.split(text, maxsplit=1)
+            if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                name_part = parts[0].strip()
+                val_part = parts[1].strip()
+                if not re.match(r'^[\d,.\s]+$', name_part):
+                    out.append({**ent, "text": name_part, "type": "TÊN_XÉT_NGHIỆM", "position": [0, 0]})
+                    out.append({**ent, "text": val_part, "type": "KẾT_QUẢ_XÉT_NGHIỆM", "position": [0, 0]})
+                    logger.debug("Tách Test+Value: %r -> %r + %r", text, name_part, val_part)
+                    continue
+        out.append(ent)
+    return out
+
+
 def _filter_vital_signs_dump(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Theo xác nhận của user: các chuỗi mã hóa/sinh hiệu (như VS98.3 12987 56 18 99RA) không bị cấm nếu được trích xuất là KẾT_QUẢ_XÉT_NGHIỆM."""
     return list(entities)
@@ -1794,7 +1636,7 @@ def align_and_expand_entities(
 
     LLM chỉ cần trả về text + type + assertions (không cần đếm position).
     Hàm này tự động:
-      1. Pre-clean & split: tách cụm bị gộp (Drug+Disease), clean verb prefix.
+      1. Pre-clean & split: tách cụm bị gộp (Drug+Disease, Test+Value), clean verb prefix.
       2. Exhaustive multi-pass alignment: tìm TẤT CẢ occurrences của mỗi text
          trong input_text qua 3 lớp (Exact → Modifiers-stripped → Typo recovery).
       3. Tạo 1 entity riêng biệt cho MỖI occurrence → không bao giờ miss duplicate.
@@ -1807,8 +1649,9 @@ def align_and_expand_entities(
     Returns:
         list entities với position chính xác 100%, đầy đủ duplicates.
     """
-    # ── Pre-process: tách Drug+Disease connector ─────────────────────────────────────
-    raw_list = _split_drug_disease_connector(input_text, raw_entities)
+    # ── Pre-process: tách Drug+Disease & Test+Value connector ────────────────────────
+    raw_list = _split_test_name_value_connector(input_text, raw_entities)
+    raw_list = _split_drug_disease_connector(input_text, raw_list)
 
     # ── Pre-clean: strip verb prefix, parens admin, leading verbs trên từng entity ──
     pre_cleaned: list[dict[str, Any]] = []
@@ -2165,6 +2008,14 @@ def _emit_entity_record(
     for idx in reversed(to_remove):
         seen_entities.pop(idx)
     seen_entities.append((norm_text, etype, [cur_start, cur_end]))
+
+    # Auto-detect assertions from context if missing or incomplete
+    detected = _detect_assertions_from_context(text, input_text, etype, cur_start)
+    if detected:
+        existing = set(ent.get("assertions", []))
+        for d in detected:
+            if d not in existing:
+                ent.setdefault("assertions", []).append(d)
 
     # Build record + attach candidates
     record = _build_entity_record(text, etype, pos, ent)

@@ -47,6 +47,7 @@ from src.prompts import (
     build_user_prompt,
     format_few_shot_messages,
     load_few_shot,
+    select_dynamic_few_shot,
 )
 from src.rxnorm_rag import RxNormRetriever
 
@@ -603,7 +604,8 @@ def main(argv: list[str] | None = None) -> int:
         # Ít nhất 1 example để có diversity, nhiều nhất theo budget
         auto_few_shot = max(0, min(auto_few_shot, args.max_few_shot))
 
-    few_shot = format_few_shot_messages(all_examples[:auto_few_shot])
+    selected_examples = select_dynamic_few_shot(all_examples, input_text, auto_few_shot)
+    few_shot = format_few_shot_messages(selected_examples)
     # Dùng real token estimate cho log
     sys_tokens_for_log = sys_tokens_real
     logger.info(
