@@ -1785,16 +1785,8 @@ def _split_drug_disease_connector(
 
 
 def _filter_vital_signs_dump(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Chặn lệnh CẤM 1: bỏ sinh hiệu gộp hoặc số rác dạng VS98.3 12987 56 18 99RA."""
-    out: list[dict[str, Any]] = []
-    vs_dump_pattern = re.compile(r"^VS\s*\d+\.\d+|\b\d{5,}\b", re.IGNORECASE)
-    for ent in entities:
-        text = str(ent.get("text", "")).strip()
-        if vs_dump_pattern.match(text):
-            logger.debug("Bỏ sinh hiệu gộp rác (Cấm 1): %r", text)
-            continue
-        out.append(ent)
-    return out
+    """Theo xác nhận của user: các chuỗi mã hóa/sinh hiệu (như VS98.3 12987 56 18 99RA) không bị cấm nếu được trích xuất là KẾT_QUẢ_XÉT_NGHIỆM."""
+    return list(entities)
 
 
 def align_and_expand_entities(
@@ -2167,22 +2159,15 @@ def _emit_entity_record(
 
     norm_text = text.lower().strip()
 
-    # Dedup check
-    if etype == "TÊN_XÉT_NGHIỆM":
-        # R22: test name dedupe theo text (chỉ giữ 1)
-        if norm_text in seen_test_names:
-            return None
-        seen_test_names.add(norm_text)
-    else:
-        # R10 STRICT + OVERLAP DEDUP
-        is_duplicate, to_remove = _is_overlap_dup(
-            norm_text, etype, cur_start, cur_end, seen_entities,
-        )
-        if is_duplicate:
-            return None
-        for idx in reversed(to_remove):
-            seen_entities.pop(idx)
-        seen_entities.append((norm_text, etype, [cur_start, cur_end]))
+    # Dedup check (R10 STRICT + OVERLAP DEDUP cho tất cả các loại, kể cả TÊN_XÉT_NGHIỆM nếu khác position)
+    is_duplicate, to_remove = _is_overlap_dup(
+        norm_text, etype, cur_start, cur_end, seen_entities,
+    )
+    if is_duplicate:
+        return None
+    for idx in reversed(to_remove):
+        seen_entities.pop(idx)
+    seen_entities.append((norm_text, etype, [cur_start, cur_end]))
 
     # Build record + attach candidates
     record = _build_entity_record(text, etype, pos, ent)
