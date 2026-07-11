@@ -902,15 +902,20 @@ def _drop_substring_entities(entities: list[dict]) -> list[dict]:
             text_j = str(ent_j.get("text", "")).strip()
             if not text_j or len(text_j) >= len(text_i):
                 continue
-            # text_j ngắn hơn text_i: check substring OR semantic overlap when positions intersect
+            # text_j ngắn hơn text_i: CHỈ drop nếu 2 span có overlap vị trí (intersect) trên văn bản
+            # Tránh drop nhầm các entity độc lập ở vị trí khác chỉ vì trùng substring (vd "đánh trống ngực" vs "Tăng đánh trống ngực" ở 2 đoạn khác nhau)
             pos_i = ent_i.get("position", [0, 0])
             pos_j = ent_j.get("position", [0, 0])
-            pos_overlap = (isinstance(pos_i, list) and isinstance(pos_j, list) and len(pos_i) == 2 and len(pos_j) == 2 and max(pos_i[0], pos_j[0]) < min(pos_i[1], pos_j[1]))
-            if text_j in text_i or (pos_overlap and _is_semantic_overlap(text_j, text_i)):
+            pos_overlap = (
+                isinstance(pos_i, list) and isinstance(pos_j, list)
+                and len(pos_i) == 2 and len(pos_j) == 2
+                and max(pos_i[0], pos_j[0]) < min(pos_i[1], pos_j[1])
+            )
+            if pos_overlap and (text_j in text_i or _is_semantic_overlap(text_j, text_i)):
                 drop_indices.add(j)
                 logger.debug(
-                    "Drop substring/semantic entity '%s' (subset of '%s')",
-                    text_j, text_i,
+                    "Drop substring/semantic entity '%s' (subset of '%s' at pos %s vs %s)",
+                    text_j, text_i, pos_j, pos_i,
                 )
 
     return [ent for idx, ent in enumerate(entities) if idx not in drop_indices]
