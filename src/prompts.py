@@ -3,17 +3,18 @@ from __future__ import annotations
 SYSTEM_PROMPT = """<role>
 You are an expert Vietnamese Clinical NER Specialist with 20+ years of experience in Vietnamese medical records. Your task is to extract precise medical entities from Vietnamese clinical records across 5 standard categories: THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM.
 
-🎯 KIM CHỈ NAM Y KHOA LÂM SÀNG (2 mục tiêu SONG SONG):
-1. **MẠNH** (Recall cao): Trích xuất ĐẦY ĐỦ entities trong input, kể cả ở các section dễ bị miss (Điều trị, Đánh giá, monitor holter findings, drugs trong "Được chỉ định"). 1 hồ sơ có thể có 30-50 entities hợp lệ.
-2. **CHÍNH XÁC** (Precision cao): Phân loại đúng type, giữ verbatim text trong input, position chính xác character offset.
+🔥 KIM CHỈ NAM TRÍCH XUẤT KIỆT ĐỂ (EXHAUSTIVE EXTRACTION - MUST NOT MISS ANY ENTITY):
+1. **QUÉT KIỆT ĐỂ 100% THỰC THỂ TRONG 5 TYPE (Recall tối đa)**: Bạn PHẢI đọc kỹ từng câu, từng dòng từ đầu đến cuối hồ sơ. MỖI từ hoặc cụm từ thuộc 1 trong 5 loại thực thể (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM) ĐỀU PHẢI ĐƯỢC TRÍCH XUẤT. Tuyệt đối KHÔNG ĐƯỢC BỎ SÓT bất kỳ entity nào ở các phần: Tiền sử, Diễn biến, Khám lâm sàng, Cận lâm sàng, Chẩn đoán, Điều trị, Thuốc ra viện. 1 bệnh án chi tiết thường có 30-50+ entities.
+2. **CHUẨN XÁC VỊ TRÍ & PHÂN LOẠI (Precision cao)**: Phân loại đúng type theo bản chất y khoa, giữ verbatim text trong input (đã lược bỏ động từ dẫn/thời gian rác), position chính xác character offset.
 
-⚠️ **TRÁNH 2 THÁI CỰC**:
-- **Quá ít**: Bỏ sót drugs/abnormal findings/vital signs → giảm recall
-- **Quá nhiều/SAI**: Trích duration/lifestyle/verb clauses làm entity → giảm precision
+⚠️ **KIỂM TRA KIỆT ĐỂ 5 LOẠI THỰC THỂ (CHECKLIST TRƯỚC KHI XUẤT JSON)**:
+- 💊 **THUỐC**: Đã lấy hết thuốc trong "Tiền sử", "Thuốc đang dùng", "Điều trị", "Chỉ định ra viện" chưa? (Giữ nguyên liều lượng & pattern `x N` như `aspirin 325mg x 1`, `metoprolol 25mg po bid`).
+- 🩺 **CHẨN_ĐOÁN**: Đã lấy hết bệnh danh tiền sử, bệnh ra viện, và TẤT CẢ bất thường/tổn thương trên ECG/Siêu âm/CT/Khám (`tim to`, `tràn dịch màng phổi`, `ngoại tâm thu nhĩ`, `ngoại tâm thu thất`, `ST chênh lên`) chưa?
+- 🤒 **TRIỆU_CHỨNG**: Đã lấy hết biểu hiện cơ năng & thực thể của bệnh nhân (`đau ngực`, `khó thở`, `khó thở nhẹ`, `đánh trống ngực`, `mệt mỏi nhiều khi gắng sức`) chưa? Nếu lặp lại 3-4 lần ở các câu khác nhau → BẮT BUỘC lấy đủ 3-4 entities với positions khác nhau (R10 STRICT)!
+- 🔬 **TÊN_XÉT_NGHIỆM**: Đã lấy hết các chỉ định CLS, thăm dò, thủ thuật (`X-quang ngực`, `nước tiểu`, `ECG`, `siêu âm tim`, `monitor holter`) chưa? (Mỗi tên chỉ định giữ 1 lần xuất hiện đầu tiên theo R22).
+- 📊 **KẾT_QUẢ_XÉT_NGHIỆM**: Đã lấy hết chỉ số định lượng (`160/90 mmHg`, `96%`, `38.5°C`, `14 g/dL`) lẫn các kết quả bình thường (`bình thường`, `không ghi nhận gì bất thường`, `không có gì đáng chú ý`, `nhịp xoang chiếm ưu thế`, `nhịp xoang đều`) chưa?
 
-🎯 **NGUYÊN TẮC CỐT LÕI**: Chỉ trích xuất các THỰC THỂ Y KHOA LÂM SÀNG CỐT LÕI (Core Clinical Entities). Tuyệt đối KHÔNG trích xuất rác phi y khoa (sinh hiệu gộp, thời gian/thời lượng, lối sống, động từ dẫn, từ nối, câu dài).
-
-⚠️ **CHẤT LƯỢNG QUAN TRỌNG HƠN SỐ LƯỢNG**: 1 entity CHÍNH XÁC đúng type, đúng text, đúng position tốt hơn 5 entities sai. Trước khi thêm 1 entity vào output, TỰ HỎI: "Entity này có đúng type không? Text đã clean (không có verb/duration)? Position đã verify?"
+🎯 **NGUYÊN TẮC CỐT LÕI**: Chỉ trích xuất THỰC THỂ Y KHOA LÂM SÀNG CỐT LÕI. Tuyệt đối KHÔNG trích xuất rác phi y khoa (sinh hiệu gộp, thời gian độc lập `trong tuần qua`/`20 giây`, lối sống `rượu bia`/`thuốc lá`, động từ dẫn `cảm thấy`/`chụp`).
 </role>
 
 <clinical_definitions>
@@ -206,7 +207,7 @@ Body part là một phần tên test, KHÔNG tách:
 | `ngoại tâm thu thất` | CHẨN_ĐOÁN | Abnormal - ventricular premature beat (I49.3) |
 | `block nhĩ thất` | CHẨN_ĐOÁN | Abnormal - AV block (I44) |
 | `block nhánh` | CHẨN_ĐOÁN | Abnormal - bundle branch block |
-| `ST chênh lên` | CHẨN_ĐOÁN | Abnormal - STEMI finding (I22) |
+| `ST chênh lên` | CHẨN_ĐOÁN | Abnormal - STEMI finding (I21.3) |
 | `ST chênh xuống` | CHẨN_ĐOÁN | Abnormal - NSTEMI finding (I24.8) |
 | `sóng T đảo ngược` | CHẨN_ĐOÁN | Abnormal - T wave inversion |
 | `sóng Q bệnh lý` | CHẨN_ĐOÁN | Abnormal - pathologic Q wave (old MI) |
@@ -607,10 +608,10 @@ def format_few_shot_messages(examples: list[dict]) -> list[dict[str, str]]:
 def build_user_prompt(input_text: str) -> str:
     """Build user prompt với input text.
 
-    Format đơn giản: header yêu cầu NER + alert (nếu có) + input text.
+    Format mạnh và sắc bén: Yêu cầu trích xuất kiệt để 100% entities trong 5 loại + alert + input text.
 
     Args:
-        input_text: input clinical note nguyên bản (chưa chèn marker).
+        input_text: input clinical note nguyên bản.
 
     Returns:
         prompt string sẵn sàng gửi làm user message.
@@ -623,10 +624,18 @@ def build_user_prompt(input_text: str) -> str:
 
     alert_part = f"{alert}\n\n" if alert else ""
 
-    # Header ngắn gọn, chi tiết rule đã có trong SYSTEM_PROMPT
     return (
-        "Hãy trích xuất entities từ hồ sơ bệnh án tiếng Việt sau đây. "
-        "Output CHÍNH XÁC JSON array (không kèm giải thích, không kèm ```).\n\n"
+        "🎯 NHIỆM VỤ CẤP BÁCH: Quét kiệt để và trích xuất TOÀN BỘ thực thể y khoa từ hồ sơ bệnh án tiếng Việt dưới đây vào đúng 5 loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM).\n\n"
+        "🔥 QUY TẮC QUÉT KHÔNG ĐƯỢC BỎ SÓT BẤT KỲ ENTITY NÀO:\n"
+        "1. Quét từ chữ đầu tiên đến chữ cuối cùng (Lý do vào viện, Tiền sử, Khám, CLS, Chẩn đoán, Điều trị).\n"
+        "2. Đảm bảo thu thập ĐỦ 5 TYPE:\n"
+        "   - 💊 THUỐC: Lấy cả thuốc đang dùng, thuốc tiền sử lẫn thuốc mới kê (giữ liều lượng, pattern `x 1`, `x 2`).\n"
+        "   - 🩺 CHẨN_ĐOÁN: Lấy bệnh tiền căn, chẩn đoán xác định/ra viện và TẤT CẢ bất thường trên tim mạch/hình ảnh (`ngoại tâm thu`, `ST chênh lên`, `tim to`, `tràn dịch`).\n"
+        "   - 🤒 TRIỆU_CHỨNG: Lấy đủ mọi than phiền (`đau ngực`, `khó thở`, `khó thở nhẹ`, `đánh trống ngực`, `mệt mỏi nhiều khi gắng sức`), lặp lại ở N câu thì lấy đủ N entities (R10 STRICT).\n"
+        "   - 🔬 TÊN_XÉT_NGHIỆM: Lấy đủ chỉ định/thủ thuật (`X-quang ngực`, `ECG`, `nước tiểu`, `siêu âm tim`, `monitor holter`).\n"
+        "   - 📊 KẾT_QUẢ_XÉT_NGHIỆM: Lấy đủ chỉ số định lượng (`160/90 mmHg`, `96%`, `38.5°C`) và kết quả định tính/bình thường (`nhịp xoang chiếm ưu thế`, `bình thường`, `không ghi nhận gì bất thường`).\n"
+        "3. Tách bạch rõ ràng: Cắt sạch động từ dẫn (`cảm thấy`, `chụp`) & thời lượng rác (`trong tuần qua`).\n\n"
         f"{alert_part}"
-        f"INPUT:\n{input_text}"
+        f"INPUT:\n{input_text}\n\n"
+        "OUTPUT CHÍNH XÁC MẢNG JSON ARRAY (Tuyệt đối không kèm lời giải thích hay markdown fence ```):"
     )

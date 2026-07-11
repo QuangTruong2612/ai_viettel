@@ -240,6 +240,59 @@ def _call_with_retry(
 
 
 # ---------------------------------------------------------------------- #
+# Section-Based Chunking helper (Cách 1 - Exhaustive NER)
+# ---------------------------------------------------------------------- #
+
+
+def _split_into_sections(text: str, max_chunk_len: int = 1400) -> list[tuple[str, int]]:
+    """Tách bài án dài thành các chunks theo đoạn (paragraphs) giữ nguyên absolute offset.
+
+    Trả về danh sách tuple: (chunk_text, chunk_offset_in_original_text).
+    Nếu bài án ngắn (<= max_chunk_len), trả về [(text, 0)].
+    """
+    if len(text) <= max_chunk_len:
+        return [(text, 0)]
+
+    lines = text.splitlines(keepends=True)
+    chunks: list[tuple[str, int]] = []
+    current_lines: list[str] = []
+    current_len = 0
+    current_offset = 0
+
+    for line in lines:
+        line_len = len(line)
+        # Ưu tiên tách tại tiêu đề lớn nếu chunk hiện tại đã đủ lớn (> 400 chars)
+        stripped = line.strip()
+        is_header = False
+        if current_len > 400 and (
+            stripped.startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "I.", "II.", "III.", "IV.", "V."))
+            or stripped.startswith(("Tiền sử", "Bệnh sử", "Khám", "Đánh giá", "Xét nghiệm", "Chẩn đoán", "Điều trị", "Lý do nhập viện"))
+        ):
+            is_header = True
+
+        if current_lines and (current_len + line_len > max_chunk_len or is_header):
+            chunk_str = "".join(current_lines)
+            chunks.append((chunk_str, current_offset))
+            current_offset += current_len
+            current_lines = [line]
+            current_len = line_len
+        else:
+            current_lines.append(line)
+            current_len += line_len
+
+    if current_lines:
+        chunk_str = "".join(current_lines)
+        if chunks and len(chunk_str) < 250:
+            # Nếu chunk cuối quá ngắn (< 250 chars), gộp luôn vào chunk liền trước
+            prev_str, prev_offset = chunks.pop()
+            chunks.append((prev_str + chunk_str, prev_offset))
+        else:
+            chunks.append((chunk_str, current_offset))
+
+    return chunks
+
+
+# ---------------------------------------------------------------------- #
 # Per-record handler
 # ---------------------------------------------------------------------- #
 
@@ -315,45 +368,64 @@ def process_record(
             len(highlighted_input) - len(cleaned_input),
         )
 
-    user_prompt = build_user_prompt(highlighted_input)
-    # Log token budget TRƯỚC khi gọi LLM để debug nếu overflow
-    _log_token_budget(rec_id, llm, user_prompt, adaptive_few_shot)
-    try:
-        raw = _call_with_retry(
-            llm,
-            SYSTEM_PROMPT,
-            user_prompt,
-            history=adaptive_few_shot,
+    # Section-Based Chunking (Cách 1): nếu bài án dài (> 1400 chars), tách thành các chunks theo đoạn
+    # để LLM càn quét kiệt để từng đoạn nhỏ, triệt tiêu hiện tượng mỏi (fatigue) bỏ sót entities ở cuối.
+    chunks = _split_into_sections(highlighted_input, max_chunk_len=1400)
+    if len(chunks) > 1:
+        logger.info(
+            "[%d] Section-Based Chunking: Input %d chars → tách %d chunks để NER kiệt để",
+            rec_id, len(highlighted_input), len(chunks),
         )
-    except Exception as exc:
-        # Save debug info khi LLM fail để debug sau
-        logger.error("[%d] LLM fail hết retry: %s → ghi []", rec_id, exc)
-        debug_path = output_dir / f"{rec_id}.debug.txt"
-        try:
-            with debug_path.open("w", encoding="utf-8") as f:
-                f.write(f"RECORD {rec_id}\n")
-                f.write(f"INPUT (len={len(input_text)}):\n{input_text}\n\n")
-                f.write(f"RAW LLM RESPONSE ({len(_LAST_RAW_RESPONSE)} chars):\n")
-                f.write(_LAST_RAW_RESPONSE if _LAST_RAW_RESPONSE
-                        else "(empty)")
-            logger.info("[%d] Saved debug → %s", rec_id, debug_path.name)
-        except Exception as write_exc:
-            logger.warning("[%d] Cannot write debug file: %s", rec_id, write_exc)
-        write_output(output_dir / f"{rec_id}.json", [])
-        return
 
-    if not isinstance(raw, list):
-        # LLM đôi khi wrap trong object {"entities": [...]}
-        if isinstance(raw, dict):
-            for key in ("entities", "results", "data"):
-                if key in raw and isinstance(raw[key], list):
-                    raw = raw[key]
-                    break
-        if not isinstance(raw, list):
-            logger.warning(
-                "[%d] Output không phải list: %r → ghi []", rec_id, type(raw)
+    raw: list[dict[str, Any]] = []
+    for chunk_idx, (chunk_text, chunk_offset) in enumerate(chunks):
+        if not chunk_text.strip():
+            continue
+        chunk_prompt = build_user_prompt(chunk_text)
+        _log_token_budget(rec_id, llm, chunk_prompt, adaptive_few_shot)
+        try:
+            chunk_raw = _call_with_retry(
+                llm,
+                SYSTEM_PROMPT,
+                chunk_prompt,
+                history=adaptive_few_shot,
             )
-            raw = []
+            if not isinstance(chunk_raw, list):
+                if isinstance(chunk_raw, dict):
+                    for key in ("entities", "results", "data"):
+                        if key in chunk_raw and isinstance(chunk_raw[key], list):
+                            chunk_raw = chunk_raw[key]
+                            break
+                if not isinstance(chunk_raw, list):
+                    chunk_raw = []
+
+            # Điều chỉnh position [start, end] tương đối trong chunk về offset tuyệt đối trong highlighted_input
+            for ent in chunk_raw:
+                if isinstance(ent, dict) and "position" in ent and isinstance(ent["position"], list) and len(ent["position"]) == 2:
+                    try:
+                        s_rel, e_rel = int(ent["position"][0]), int(ent["position"][1])
+                        ent["position"] = [s_rel + chunk_offset, e_rel + chunk_offset]
+                    except (ValueError, TypeError):
+                        pass
+                raw.append(ent)
+
+            if len(chunks) > 1:
+                logger.debug(
+                    "[%d] Chunk %d/%d (offset %d, len %d) → %d entities",
+                    rec_id, chunk_idx + 1, len(chunks), chunk_offset, len(chunk_text), len(chunk_raw),
+                )
+        except Exception as exc:
+            logger.error("[%d] LLM fail chunk %d/%d: %s", rec_id, chunk_idx + 1, len(chunks), exc)
+            if len(chunks) == 1:
+                # Nếu chỉ có 1 chunk và fail → ghi debug và return rỗng
+                debug_path = output_dir / f"{rec_id}.debug.txt"
+                try:
+                    with debug_path.open("w", encoding="utf-8") as f:
+                        f.write(f"RECORD {rec_id}\nINPUT:\n{input_text}\n\nRAW RESPONSE:\n{_LAST_RAW_RESPONSE}\n")
+                except Exception:
+                    pass
+                write_output(output_dir / f"{rec_id}.json", [])
+                return
 
     # Debug: nếu LLM trả [] thì log raw response để chẩn đoán
     if not raw:

@@ -50,40 +50,75 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 # LLM hay output viết tắt (THA, NMCT, ĐTĐ, COPD, OSA, ...) mà ICD desc_vi
 # dùng full term (tăng huyết áp, nhồi máu cơ tim, đái tháo đường, ...).
 _VN_ABBREVIATIONS = {
-    # Tim mạch
+    # Tim mạch — BYT viết tắt chuẩn
     "tha": "tăng huyết áp",
+    "tăng ha": "tăng huyết áp",
+    "ha cao": "tăng huyết áp",
     "nmct": "nhồi máu cơ tim",
     "nmct cũ": "nhồi máu cơ tim cũ",
     "nmct mới": "nhồi máu cơ tim cấp",
+    "nmct cấp": "nhồi máu cơ tim cấp",
+    "nmct cấp stemi": "nhồi máu cơ tim cấp st chênh lên",
+    "stemi": "nhồi máu cơ tim cấp st chênh lên",
+    "nstemi": "nhồi máu cơ tim cấp không st chênh lên",
     "suy tim": "suy tim",
     "suy tim ứ huyết": "suy tim ứ huyết",
+    "suy tim nyha": "suy tim",
     "bt": "block tim",
+    "bav": "block nhĩ thất",
+    "bbb": "block nhánh",
+    "lbbb": "block nhánh trái",
+    "rbbb": "block nhánh phải",
     "ntts": "ngoại tâm thu",
+    "ntt nhĩ": "ngoại tâm thu nhĩ",
+    "ntt thất": "ngoại tâm thu thất",
     "ntts nhĩ": "ngoại tâm thu nhĩ",
     "ntts thất": "ngoại tâm thu thất",
     "bptt": "block nhĩ thất",
+    "pac": "ngoại tâm thu nhĩ",
+    "pvc": "ngoại tâm thu thất",
+    "af": "rung nhĩ",
+    "svt": "nhịp nhanh trên thất",
+    "vt": "nhịp nhanh thất",
+    "vf": "rung thất",
     "tđm": "tai biến mạch máu não",
     "tbmmn": "tai biến mạch máu não",
     "tbmmnn": "tai biến mạch máu não",
     "đột quỵ": "tai biến mạch máu não",
+    "cva": "tai biến mạch máu não",
+    "tia": "cơn thiếu máu não thoáng qua",
     # Nội tiết
     "đtđ": "đái tháo đường",
+    "dtd": "đái tháo đường",
     "đtđ type 2": "đái tháo đường type 2",
     "đtđ type 1": "đái tháo đường type 1",
     "đtđ2": "đái tháo đường type 2",
     "đtđ1": "đái tháo đường type 1",
+    "dm": "đái tháo đường",
+    "dm2": "đái tháo đường type 2",
+    "dm type 2": "đái tháo đường type 2",
+    "rlcd": "rối loạn chuyển hóa đường",
+    "rlld": "rối loạn lipid máu",
     # Hô hấp
     "copd": "bệnh phổi tắc nghẽn mạn",
+    "hpq": "hen phế quản",
     "hen pq": "hen phế quản",
     "vp": "viêm phổi",
+    "vpmpcđ": "viêm phổi mắc phải cộng đồng",
     "vpq": "viêm phế quản",
     "osa": "ngưng thở khi ngủ",
     "suy hô hấp": "suy hô hấp",
+    "tràn khí mp": "tràn khí màng phổi",
+    "tràn dịch mp": "tràn dịch màng phổi",
     # Thận - Tiết niệu
-    "st": "suy thận",
-    "stc": "suy thận cấp",
-    "stm": "suy thận mạn",
+    # IMPORTANT: 'st', 'stc', 'stm' bị xóa vì conflict với ECG term 'ST' (ST segment)
+    # Sử dụng full form "suy thận", "suy thận cấp", "suy thận mạn" thay thế.
+    "ckd": "suy thận mạn",  # CKD = Chronic Kidney Disease (sàng lọc TRUYỀN THUYẼN việt hóa)
+    "akf": "suy thận cấp",
+    "aki": "suy thận cấp",
     "vđtn": "viêm đường tiết niệu",
+    "ntn": "nhiễm trùng đường tiết niệu",
+    "uti": "viêm đường tiết niệu",
     # Tiêu hóa - Gan
     "vg": "viêm gan",
     "vgb": "viêm gan b",
@@ -91,15 +126,21 @@ _VN_ABBREVIATIONS = {
     "gerd": "trào ngược dạ dày thực quản",
     "ibs": "hội chứng ruột kích thích",
     "gastritis": "viêm dạ dày",
-    # Khác
+    # Ung thư / Khối u
     "hc": "hạch",
-    "k": "khối u",
+    "k": "ung thư",
     "ca": "ung thư",
     "ts": "tiền sử",
     "tm": "tiền sử",
     # Sản - Phụ khoa
     "có thai": "mang thai",
     "có thai tuần": "mang thai",
+    # Mắt
+    "dtvm": "đái tháo đường biến chứng võng mạc",
+    # Chỉnh hình
+    "oai": "thoái hóa khớp",
+    "ra": "viêm khớp dạng thấp",
+    "oa": "thoái hóa khớp",
 }
 
 # Map synonyms VN → canonical term (full term) trước khi lookup.
@@ -132,6 +173,11 @@ def _normalize_vn_term(text: str) -> str:
 
     Returns:
         Normalized text để feed vào lookup chain.
+
+    Bug history:
+    - v1: 'st' abbreviation conflict với ECG term 'ST' segment.
+      Fix: xóa 'st'/'stc'/'stm' khỏi _VN_ABBREVIATIONS để tránh normalize
+      'ST chênh lên' thành 'suy thận chênh lên'.
     """
     if not text:
         return text
@@ -144,8 +190,12 @@ def _normalize_vn_term(text: str) -> str:
         return _VN_ABBREVIATIONS[s_lower]
 
     # 2. Try matching each abbreviation as substring (length-sorted to match longest first)
+    # CHI MATCH substring nếu abbreviation dài ít nhất 3 ký tự để tránh false positive
+    # ("st" 2 ký tự có thể match 'st' trong 'ST chênh lên' — sai!)
     sorted_abbrs = sorted(_VN_ABBREVIATIONS.items(), key=lambda x: -len(x[0]))
     for abbr, full in sorted_abbrs:
+        if len(abbr) < 3:  # Skip very short abbreviations (2-char) to avoid false positives
+            continue
         # Match whole word only (vd "tha" không match "thalamic")
         # Use regex with word boundaries
         import re as _re
@@ -1026,7 +1076,45 @@ class ICDRetriever:
             "u ác tính thực quản": ["C15", "C15.0", "C15.1", "C15.2", "C15.3", "C15.4", "C15.5", "C15.8", "C15.9"],
             "khối u thực quản": ["C15", "D13.0"],
 
-            # === MỚI 2026-07-10 — TIM MẠCH (cardiology) ===
+            # === TIM MẠCH (Cardiology) — chuẩn BYT/WHO ICD-10 2026 ===
+            # Nhồi máu cơ tim và ECG findings
+            "nhồi máu cơ tim cấp st chênh lên": ["I21.0", "I21.1", "I21.2", "I21.3"],
+            "nmct cấp st chênh lên": ["I21.0", "I21.1", "I21.2", "I21.3"],
+            "nhồi máu cơ tim cấp không st chênh lên": ["I21.4"],
+            "nmct cấp không st chênh lên": ["I21.4"],
+            "nhồi máu cơ tim cũ": ["I25.2"],
+            "nmct cũ": ["I25.2"],
+            "bệnh tim thiếu máu cục bộ": ["I25"],
+            "bệnh mạch vành": ["I25", "I25.1"],
+            "hội chứng vành cấp": ["I24"],
+            "đau thắt ngực không ổn định": ["I20.0"],
+            "đau thắt ngực ổn định": ["I20.8"],
+            "st chênh lên": ["I21.3"],   # STEMI (acute)
+            "st chênh xuống": ["I21.4"],  # NSTEMI pattern
+            "st chênh lên v1-v4": ["I21.0"],
+            "st chênh lên v1-v6": ["I21.0"],
+            "sóng q bệnh lý": ["I25.2"],  # old MI
+            "sóng t đảo ngược": ["I24.8"],
+            # Rối loạn nhịp tim
+            "cuồng nhĩ": ["I48.3"],
+            "rung nhĩ kèm đáp ứng thất nhanh": ["I48"],
+            "nhịp nhanh trên thất": ["I47.1"],
+            "nhịp nhanh thất": ["I47.2"],
+            "rung thất": ["I49.0"],
+            "block nhánh trái": ["I44.4", "I44.5", "I44.6"],
+            "block nhánh phải": ["I45.0", "I45.1", "I45.2"],
+            "block nhánh": ["I44.4", "I45.0"],
+            "hội chứng sick sinus": ["I49.5"],
+            "nhịp nhanh xoang": ["R00.0"],
+            "nhịp chậm xoang": ["R00.1"],
+            # Block nhĩ thất
+            "block nhĩ thất": ["I44", "I44.0", "I44.1", "I44.2", "I44.3"],
+            "block nhĩ thất độ 1": ["I44.0"],
+            "block nhĩ thất độ 2": ["I44.1"],
+            "block nhĩ thất độ 3": ["I44.2"],
+            "block nhĩ thất hoàn toàn": ["I44.2"],
+            "block tim": ["I44"],
+            # Van tim
             "tách thành động mạch chủ": ["I71.0"],
             "phình động mạch chủ": ["I71"],
             "phình động mạch chủ bụng": ["I71.4"],
@@ -1039,15 +1127,33 @@ class ICDRetriever:
             "hẹp động mạch": ["I77.1"],
             "tắc động mạch": ["I74"],
             "viêm tắc động mạch": ["I74"],
+            "hở van động mạch chủ": ["I35.1"],
+            "hẹp van động mạch chủ": ["I35.0"],
+            "hở van ba lá": ["I36.1"],
+            "hẹp van ba lá": ["I36.0"],
+            # Viêm cơ tim, màng ngoài tim
             "viêm nội tâm mạc": ["I33", "I33.0", "I33.9"],
             "viêm nội tâm mạc nhiễm khuẩn": ["I33.0"],
             "viêm cơ tim": ["I40", "I40.0", "I40.1", "I40.8", "I40.9"],
+            "viêm màng ngoài tim": ["I30"],
+            "tràn dịch màng tim": ["I31.3"],
             "bệnh cơ tim": ["I42"],
             "bệnh cơ tim phì đại": ["I42.1"],
-            "block nhĩ thất": ["I44", "I44.0", "I44.1", "I44.2", "I44.3", "I44.4", "I44.5", "I44.6", "I44.7"],
-            "block tim": ["I44"],
-            "st chênh lên": ["I22"],  # subsequent STEMI
-            "st chênh xuống": ["I24.8"],
+            "bệnh cơ tim giãn": ["I42.0"],
+            # Suy tim theo mức độ
+            "suy tim độ i nyha": ["I50.9"],
+            "suy tim độ ii nyha": ["I50.9"],
+            "suy tim độ iii nyha": ["I50.0"],
+            "suy tim độ iv nyha": ["I50.0"],
+            "suy tim tâm thu": ["I50.1"],
+            "suy tim tâm trương": ["I50.9"],
+            "suy tim cấp": ["I50.9"],
+            "suy tim mạn": ["I50.9"],
+            # Mạch máu
+            "huyết khối tĩnh mạch sâu": ["I82.4"],
+            "dvt": ["I82.4"],
+            "thuyên tắc phổi": ["I26", "I26.0", "I26.9"],
+            "pe": ["I26.9"],
 
             # === MỚI 2026-07-10 — TIÊU HÓA, GAN, MẬT ===
             "viêm gan virus": ["B15", "B16", "B17", "B18", "B19"],
@@ -1080,6 +1186,8 @@ class ICDRetriever:
             "viêm tiểu phế quản": ["J21"],
             "hen phế quản": ["J45", "J45.0", "J45.1", "J45.8", "J45.9"],
             "hen suyễn": ["J45"],
+            "viêm phổi mắc phải cộng đồng": ["J18", "J18.9"],
+            "viêm phổi cộng đồng": ["J18", "J18.9"],
             "tràn khí màng phổi": ["J93"],
             "tràn dịch màng phổi": ["J90"],
             "xẹp phổi": ["J98.1"],
@@ -2005,12 +2113,24 @@ class ICD10HybridSearch:
 
 _CHAPTER_RESTRICTIONS = [
     # (keywords_set, chapter_prefix)
+    # Chính xác cao - specific disease keywords
     ({"tuyến mồ hôi", "mồ hôi", "hidradenitis", "nhọt ổ gà"}, "L73"),
     ({"viêm nang lông", "trứng cá", "mụn trứng cá", "acne"}, "L70"),
-    ({"nhồi máu cơ tim", "nmct"}, "I21"),
-    ({"đau thắt ngực", "đau ngực thắt", "đau thắt"}, "I20"),
-    ({"suy tim", "suy tim ứ huyết"}, "I50"),
-    ({"rung nhĩ"}, "I48"),
+    # Tim mạch - Cardiology (I chapter)
+    ({"nhồi máu cơ tim", "nmct", "stemi", "nstemi"}, "I21"),
+    ({"nhồi máu cơ tim cũ", "nmct cũ", "bệnh mạch vành"}, "I25"),
+    ({"st chênh lên", "st chênh xuống", "sóng t đảo ngược", "sóng q bệnh lý"}, "I21"),
+    ({"đau thắt ngực không ổn định", "đau thắt ngực ổn định", "đau thắt ngực"}, "I20"),
+    ({"hội chứng vành cấp"}, "I24"),
+    ({"suy tim"}, "I50"),
+    ({"rung nhĩ", "cuồng nhĩ"}, "I48"),
+    ({"ngoại tâm thu nhĩ", "pac"}, "I49"),
+    ({"ngoại tâm thu thất", "pvc"}, "I49"),
+    ({"nhịp nhanh trên thất", "svt"}, "I47"),
+    ({"nhịp nhanh thất", "rung thất"}, "I47"),
+    ({"block nhĩ thất", "block av", "bav"}, "I44"),
+    ({"block nhánh trái", "lbbb"}, "I44"),
+    ({"block nhánh phải", "rbbb"}, "I45"),
     ({"tăng huyết áp", "tha", "cao huyết áp", "ha tăng", "huyết áp cao"}, "I10"),
     ({"đái tháo đường", "đtđ", "tiểu đường", "đái đường"}, "E11"),
     ({"hen phế quản", "hen suyễn", "hen"}, "J45"),
