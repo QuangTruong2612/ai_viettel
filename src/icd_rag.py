@@ -483,8 +483,10 @@ class ICDRetriever:
         if not codes:
             return []
         filtered = _filter_irrelevant_codes(list(codes), text, self.idx)
+        if not filtered:
+            return []
         restricted = _restrict_chapter(filtered, text)
-        result = restricted if restricted else (filtered if filtered else list(codes))
+        result = restricted if restricted else filtered
         
         # Smart sorting: ưu tiên các chương bệnh phổ biến cho người lớn (I, J, K, E, N, M, S, T, C, D, G, A, B, R)
         # đẩy O (thai sản), P (sơ sinh), V/W/X/Y (tác nhân bên ngoài), Z (tiền căn) xuống dưới nếu không rõ
@@ -811,6 +813,18 @@ class ICDRetriever:
             "tbmmnn": ["I63", "I64"],  # Tai biến mạch máu não
             "copd": ["J44", "J44.0", "J44.1", "J44.8", "J44.9"],  # Bệnh phổi tắc nghẽn mạn
             "osa": ["G47.3"],  # Ngưng thở khi ngủ
+            "ngưng thở khi ngủ": ["G47.3"],
+            "ngừng thở khi ngủ": ["G47.3"],
+            "ngưng thở khi ngủ do tắc nghẽn": ["G47.3"],
+            "ngừng thở khi ngủ do tắc nghẽn": ["G47.3"],
+            "nhiễm khuẩn huyết do tụ cầu vàng": ["A41.0"],
+            "nhiễm khuẩn huyết do tụ cầu vàng nhạy cảm methicillin": ["A41.0"],
+            "nhiễm khuẩn đường tiết niệu": ["N39.0"],
+            "nhiễm khuẩn đường tiết niệu tái phát": ["N39.0"],
+            "viêm đường tiết niệu": ["N39.0"],
+            "bất thường điện giải": ["E87.8"],
+            "rối loạn điện giải": ["E87.8"],
+            "tử vong": ["R96", "R96.1", "R98"],
             "hc": ["R59"],  # Hạch (general lymphadenopathy)
 
             # === MỚI 2026-07-10 — synonyms cho u (R27.6) ===
