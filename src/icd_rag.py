@@ -490,7 +490,7 @@ class ICDRetriever:
 
     # ------------------------------------------------------------------ #
 
-    def _filter_and_sort_codes(self, codes: list[str], text: str) -> list[str]:
+    def _filter_and_sort_codes(self, codes: list[str], text: str, other_entities: list[dict] | None = None) -> list[str]:
         if not codes:
             return []
         filtered = _filter_irrelevant_codes(list(codes), text, self.idx)
@@ -499,6 +499,8 @@ class ICDRetriever:
         restricted = _restrict_chapter(filtered, text)
         result = restricted if restricted else filtered
         
+        boosted_prefixes = _get_boosted_prefixes(other_entities)
+
         # Smart sorting: ưu tiên các chương bệnh phổ biến cho người lớn (I, J, K, E, N, M, S, T, C, D, G, A, B, R)
         # đẩy O (thai sản), P (sơ sinh), V/W/X/Y (tác nhân bên ngoài), Z (tiền căn) xuống dưới nếu không rõ
         def _chapter_priority(code: str) -> tuple[int, str]:
@@ -515,7 +517,7 @@ class ICDRetriever:
         # Universal non-hardcoded lexical overlap & contradiction check
         text_tokens = set(re.findall(r'[a-zà-ỹ0-9_/-]{2,}', text_lower))
         stop_words = {"và", "của", "khi", "cho", "tại", "bị", "có", "do", "các", "những", "lần", "ngày", "bệnh", "chứng", "tình", "trạng", "không", "chưa", "hoặc", "hay", "là", "với", "trong"}
-        core_text_tokens = text_tokens - stop_words
+        core_text_tokens = _expand_tokens_with_synonyms(text_tokens - stop_words, text_lower)
 
         # Extract discriminative tokens: single letters (a, b, c...), digits (1, 2, 3...), Roman numerals (i, ii, iii, iv...)
         disc_tokens = set(re.findall(r'\b(?:[a-z]|\d+|ii+|iv|vi*)\b', text_lower)) - {"i", "a"} # ignore 'i'/'a' if used as grammar
@@ -524,6 +526,10 @@ class ICDRetriever:
             desc = self._code_to_desc.get(code, "").lower()
             desc_tokens = set(re.findall(r'[a-zà-ỹ0-9_/-]{2,}', desc))
             penalty = 0.0
+
+            # 0. Drug <-> Disease Co-occurrence Cross-Scoring (Upgrade 3)
+            if boosted_prefixes and any(code.startswith(bp) for bp in boosted_prefixes):
+                penalty -= 2.5
 
             # 1. Universal Discriminative Token Match (Letters, Numbers, Roman numerals) - ZERO Disease Hardcoding
             if disc_tokens:
@@ -586,6 +592,13 @@ class ICDRetriever:
         """Tra ICD-10 cho 1 cụm chẩn đoán tiếng Việt (có tự động tách chẩn đoán kép)."""
         if not vn_text:
             return []
+        if not hasattr(self, '_cache'):
+            self._cache = {}
+        other_key = tuple(sorted((str(e.get("text", "")).strip().lower(), str(e.get("type", ""))) for e in (other_entities or []))) if other_entities else ()
+        cache_key = (vn_text.strip().lower(), context_query, other_key)
+        if cache_key in self._cache:
+            return list(self._cache[cache_key])
+
         parts = self._split_compound_diagnosis(vn_text)
         if len(parts) > 1 and len(parts) <= 5:
             logger.debug("Multi-hop splitting '%s' → %s", vn_text, parts)
@@ -595,8 +608,14 @@ class ICDRetriever:
                 for c in codes:
                     if c not in out:
                         out.append(c)
-            return out[:4]
-        return self._lookup_single(vn_text, context_query, other_entities)
+            result = out[:4]
+        else:
+            result = self._lookup_single(vn_text, context_query, other_entities)
+
+        if len(self._cache) > 4096:
+            self._cache.clear()
+        self._cache[cache_key] = result
+        return list(result)
 
     def _lookup_single(
         self,
@@ -616,76 +635,61 @@ class ICDRetriever:
             key_lower = text.lower().strip()
             if key_lower in self._icd_vn_to_codes:
                 logger.debug("L0 short-circuit direct match: '%s' → %s", text, self._icd_vn_to_codes[key_lower])
-                return self._filter_and_sort_codes(self._icd_vn_to_codes[key_lower], text)[:2]
+                return self._filter_and_sort_codes(self._icd_vn_to_codes[key_lower], text, other_entities=other_entities)[:2]
 
         # L1: Exact (cao độ tin cậy nhất — cap 2)
         key = text.lower()
         if key in self.idx.exact:
-            return self._filter_and_sort_codes(self.idx.exact[key], text)[:2]
+            return self._filter_and_sort_codes(self.idx.exact[key], text, other_entities=other_entities)[:2]
 
         # L1.5: VN prefix exact match — nếu text là prefix của desc_vi
         prefix_codes = self._exact_match_vn_prefix(text)
         if prefix_codes:
-            return self._filter_and_sort_codes(prefix_codes, text)[:2]
+            return self._filter_and_sort_codes(prefix_codes, text, other_entities=other_entities)[:2]
 
         # L1.7 (NEW 2026-07-10): VN substring match (text chứa trong desc_vi)
         if len(text) >= 5:
             substring_codes = self._exact_match_vn_substring(text)
             if substring_codes:
                 logger.debug("L1.7 substring match '%s' → %s", text, substring_codes[:2])
-                return self._filter_and_sort_codes(substring_codes, text)[:2]
+                return self._filter_and_sort_codes(substring_codes, text, other_entities=other_entities)[:2]
 
         # L2: Build query có context cho BM25 (dùng nearby drugs/symptoms)
         bm25_query = build_context_query(text, "CHẨN_ĐOÁN", other_entities)
         # Vector vẫn dùng text gốc (không contaminate embedding - bug history #4)
 
-        # L3: Hybrid search với adaptive confidence-based cap (2026-07 fix):
+        # L3: Hybrid RRF search (Vector BGE-M3 + BM25 Reciprocal Rank Fusion - Upgrade B):
         if self.local_search is not None:
             queries_to_try = [text]
             normalized = _normalize_vn_term(text)
             if normalized != text:
                 queries_to_try.append(normalized)
 
-            all_matched_set: set[str] = set()
-            all_scores: dict[str, float] = {}
+            rrf_scores: dict[str, float] = {}
             for q in queries_to_try:
-                matched = self.local_search.search(
-                    q, threshold=0.55, top_k=20
-                ) or []
-                for code in matched:
-                    all_matched_set.add(code)
-                    if self.local_search.vector_search is not None:
-                        scores = self.local_search.vector_search.score_codes(q, [code])
-                        if code in scores:
-                            all_scores[code] = max(all_scores.get(code, 0.0), scores[code])
+                matched_vec = self.local_search.search(q, threshold=0.50, top_k=15) or []
+                for rank, code in enumerate(matched_vec, start=1):
+                    rrf_scores[code] = rrf_scores.get(code, 0.0) + (1.0 / (60 + rank))
 
-            all_matched = list(all_matched_set)
-            if all_matched:
-                sorted_codes = sorted(
-                    all_matched,
-                    key=lambda c: -all_scores.get(c, 0.0),
-                )
-                if sorted_codes and all_scores:
-                    top1_score = all_scores.get(sorted_codes[0], 0.0)
-                    kept = [
-                        c for c in sorted_codes
-                        if all_scores.get(c, 0.0) >= top1_score - 0.10
-                    ]
-                    kept = kept[:4]
-                else:
-                    kept = sorted_codes[:4]
-                return self._filter_and_sort_codes(kept, text)[:2]
+                if hasattr(self.local_search, 'bm25_index'):
+                    bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=15)
+                    for rank, code in enumerate(bm25_codes or [], start=1):
+                        rrf_scores[code] = rrf_scores.get(code, 0.0) + (1.0 / (60 + rank))
+
+            if rrf_scores:
+                sorted_codes = sorted(rrf_scores.keys(), key=lambda c: -rrf_scores[c])
+                return self._filter_and_sort_codes(sorted_codes[:6], text, other_entities=other_entities)[:2]
 
         # L4: Local fuzzy match trên names VN (threshold 75, cap 2)
         fuzzy_vn = self._fuzzy_local(text, threshold=75)
         if fuzzy_vn:
-            return self._filter_and_sort_codes(fuzzy_vn, text)[:2]
+            return self._filter_and_sort_codes(fuzzy_vn, text, other_entities=other_entities)[:2]
 
         # L5: BM25 fallback (top-2 — strict hơn cho Set-based F1)
         if self.local_search is not None and hasattr(self.local_search, 'bm25_index'):
             bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=2)
             if bm25_codes:
-                bm25_codes = self._filter_and_sort_codes(bm25_codes, text)
+                bm25_codes = self._filter_and_sort_codes(bm25_codes, text, other_entities=other_entities)
                 if bm25_codes:
                     return bm25_codes[:2]
 
@@ -694,16 +698,16 @@ class ICDRetriever:
             substring_codes = self._exact_match_vn_substring(text)
             if substring_codes:
                 logger.debug("L6 substring fallback '%s' → %s", text, substring_codes[:2])
-                return self._filter_and_sort_codes(substring_codes, text)[:2]
+                return self._filter_and_sort_codes(substring_codes, text, other_entities=other_entities)[:2]
 
         if _text_matches_chapter_keyword(text):
             prefix_codes = self._exact_match_vn_prefix(text)
             if prefix_codes:
-                return self._filter_and_sort_codes(prefix_codes, text)[:2]
+                return self._filter_and_sort_codes(prefix_codes, text, other_entities=other_entities)[:2]
             chapter_codes = self._chapter_codes_lookup(text)
             if chapter_codes:
                 logger.debug("L6 chapter lookup '%s' → %s", text, chapter_codes[:2])
-                return self._filter_and_sort_codes(chapter_codes, text)[:2]
+                return self._filter_and_sort_codes(chapter_codes, text, other_entities=other_entities)[:2]
 
         if self.local_search is not None:
             low_threshold_codes = self.local_search.search(
@@ -711,7 +715,7 @@ class ICDRetriever:
             ) or []
             if low_threshold_codes:
                 logger.debug("L6 low-threshold vector '%s' → %s", text, low_threshold_codes[:2])
-                return self._filter_and_sort_codes(low_threshold_codes, text)[:2]
+                return self._filter_and_sort_codes(low_threshold_codes, text, other_entities=other_entities)[:2]
 
         return []  # noqa: RET504
 
@@ -2045,6 +2049,83 @@ def _load_chapter_restrictions() -> list[tuple[set[str], str]]:
         return []
 
 _CHAPTER_RESTRICTIONS: list[tuple[set[str], str]] = _load_chapter_restrictions()
+
+
+class DynamicConfigManager:
+    """Hot-Reloading Config & Pre-tokenized Trie/Cache (Upgrade E - ZERO Hardcode)."""
+    def __init__(self) -> None:
+        self.synonym_rings: dict[str, list[str]] = {}
+        self.cooccurrence_map: dict[str, list[str]] = {}
+        self._synonym_tokens_cache: dict[str, set[str]] = {}
+        self._mtimes: dict[Path, float] = {}
+        self._last_check: float = 0.0
+        self.reload_if_needed(force=True)
+
+    def reload_if_needed(self, force: bool = False) -> None:
+        now = time.time()
+        if not force and (now - self._last_check) < 2.0:
+            return
+        self._last_check = now
+
+        syn_path = DATA_DIR / "synonym_rings.json"
+        coocc_path = DATA_DIR / "drug_disease_cooccurrence.json"
+
+        # Check synonym rings
+        if syn_path.exists():
+            mtime = syn_path.stat().st_mtime
+            if force or self._mtimes.get(syn_path) != mtime:
+                self._mtimes[syn_path] = mtime
+                try:
+                    self.synonym_rings = json.loads(syn_path.read_text(encoding="utf-8"))
+                    self._synonym_tokens_cache.clear()
+                    for k, syn_list in self.synonym_rings.items():
+                        tokens_set: set[str] = set()
+                        for syn in syn_list:
+                            tokens_set.update(re.findall(r'[a-zà-ỹ0-9_/-]{2,}', syn.lower()))
+                        self._synonym_tokens_cache[k.lower()] = tokens_set
+                except Exception as e:
+                    logger.warning("Failed to hot-reload %s: %s", syn_path, e)
+
+        # Check drug-disease cooccurrence
+        if coocc_path.exists():
+            mtime = coocc_path.stat().st_mtime
+            if force or self._mtimes.get(coocc_path) != mtime:
+                self._mtimes[coocc_path] = mtime
+                try:
+                    self.cooccurrence_map = json.loads(coocc_path.read_text(encoding="utf-8"))
+                except Exception as e:
+                    logger.warning("Failed to hot-reload %s: %s", coocc_path, e)
+
+_CONFIG_MGR = DynamicConfigManager()
+_DRUG_DISEASE_COOCCURRENCE = _CONFIG_MGR.cooccurrence_map
+_SYNONYM_RINGS = _CONFIG_MGR.synonym_rings
+
+
+def _expand_tokens_with_synonyms(tokens: set[str], text_lower: str) -> set[str]:
+    _CONFIG_MGR.reload_if_needed()
+    expanded = set(tokens)
+    if not _CONFIG_MGR._synonym_tokens_cache:
+        return expanded
+    for k, cached_tokens in _CONFIG_MGR._synonym_tokens_cache.items():
+        if k in text_lower or k in tokens:
+            expanded.update(cached_tokens)
+    return expanded
+
+
+def _get_boosted_prefixes(other_entities: list[dict] | None) -> set[str]:
+    _CONFIG_MGR.reload_if_needed()
+    if not other_entities or not _CONFIG_MGR.cooccurrence_map:
+        return set()
+    boosted: set[str] = set()
+    for ent in other_entities:
+        ent_type = ent.get("type", "")
+        if ent_type in ("THUỐC", "TRIỆU_CHỨNG", "CHẨN_ĐOÁN"):
+            text_lower = str(ent.get("text", "")).lower()
+            for kw, prefixes in _CONFIG_MGR.cooccurrence_map.items():
+                if kw in text_lower:
+                    boosted.update(prefixes)
+    return boosted
+
 
 
 def _restrict_chapter(codes, entity_text):

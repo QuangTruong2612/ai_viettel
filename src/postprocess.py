@@ -335,6 +335,34 @@ def _try_recover_typo(
 # ---------------------------------------------------------------------- #
 
 
+def _is_semantic_overlap(text_a: str, text_b: str) -> bool:
+    """Check if two strings have exact match, substring containment, or high Jaccard overlap (Upgrade 1)."""
+    a = text_a.strip().lower()
+    b = text_b.strip().lower()
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    # Check for conflicting numbers, letters, or antonyms (type 1 vs type 2, trái vs phải)
+    nums_a = set(re.findall(r'\b\d+\b', a))
+    nums_b = set(re.findall(r'\b\d+\b', b))
+    if nums_a and nums_b and nums_a != nums_b:
+        return False
+    antonyms = [("trái", "phải"), ("cấp", "mạn"), ("cấp", "mãn"), ("trên", "dưới"), ("trong", "ngoài"), ("tăng", "giảm"), ("cao", "thấp")]
+    for w1, w2 in antonyms:
+        if (re.search(r'\b' + re.escape(w1) + r'\b', a) and re.search(r'\b' + re.escape(w2) + r'\b', b)) or \
+           (re.search(r'\b' + re.escape(w2) + r'\b', a) and re.search(r'\b' + re.escape(w1) + r'\b', b)):
+            return False
+    tokens_a = set(re.findall(r'[a-zà-ỹ0-9_/-]+', a)) - {"bệnh", "chứng", "tình", "trạng", "bị", "có", "do", "và", "của"}
+    tokens_b = set(re.findall(r'[a-zà-ỹ0-9_/-]+', b)) - {"bệnh", "chứng", "tình", "trạng", "bị", "có", "do", "và", "của"}
+    if not tokens_a or not tokens_b:
+        return False
+    if tokens_a.issubset(tokens_b) or tokens_b.issubset(tokens_a):
+        return True
+    jaccard = len(tokens_a & tokens_b) / max(len(tokens_a | tokens_b), 1)
+    return jaccard >= 0.80
+
+
 def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Bỏ trùng entities dựa trên (text, type, position overlap) - R10 STRICT + R22 OVERLAP (2026-07-10).
 
@@ -394,12 +422,18 @@ def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         for idx, existing in enumerate(out):
             if existing.get("type", "") != etype:
                 continue
-            if str(existing.get("text", "")).strip().lower() != text.lower():
-                continue
+            ex_text = str(existing.get("text", "")).strip()
             ex_pos = existing.get("position", [0, 0])
             if not (isinstance(ex_pos, list) and len(ex_pos) == 2):
                 continue
             e_start, e_end = int(ex_pos[0]), int(ex_pos[1])
+
+            is_exact_text = (ex_text.lower() == text.lower())
+            is_pos_overlap = (max(start, e_start) < min(end, e_end))
+
+            if not is_exact_text:
+                if not is_pos_overlap or not _is_semantic_overlap(ex_text, text):
+                    continue
 
             # Same exact span → drop current (R22)
             if start == e_start and end == e_end:
@@ -411,7 +445,7 @@ def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 break
 
             # OVERLAP check: max(start, e_start) < min(end, e_end) → intersect
-            if max(start, e_start) < min(end, e_end):
+            if is_pos_overlap:
                 ex_len = e_end - e_start
                 cur_len = end - start
                 if ex_len >= cur_len:
@@ -783,11 +817,14 @@ def _drop_substring_entities(entities: list[dict]) -> list[dict]:
             text_j = str(ent_j.get("text", "")).strip()
             if not text_j or len(text_j) >= len(text_i):
                 continue
-            # text_j ngắn hơn text_i: check substring
-            if text_j in text_i:
+            # text_j ngắn hơn text_i: check substring OR semantic overlap when positions intersect
+            pos_i = ent_i.get("position", [0, 0])
+            pos_j = ent_j.get("position", [0, 0])
+            pos_overlap = (isinstance(pos_i, list) and isinstance(pos_j, list) and len(pos_i) == 2 and len(pos_j) == 2 and max(pos_i[0], pos_j[0]) < min(pos_i[1], pos_j[1]))
+            if text_j in text_i or (pos_overlap and _is_semantic_overlap(text_j, text_i)):
                 drop_indices.add(j)
                 logger.debug(
-                    "Drop substring entity '%s' (subset of '%s')",
+                    "Drop substring/semantic entity '%s' (subset of '%s')",
                     text_j, text_i,
                 )
 
@@ -1554,9 +1591,24 @@ def assemble_record(
         record = _emit_entity_record(
             ent, input_text, validated, retriever, icd_retriever,
             seen_test_names, seen_entities,
+            skip_attach=True,
         )
         if record is not None:
             final.append(record)
+
+    # Phase 2: Parallel candidate attachment across CPU/Thread workers (Upgrade F)
+    if len(final) > 1 and (retriever is not None or icd_retriever is not None):
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(final))) as pool:
+            futures = [
+                pool.submit(_attach_candidates, rec, rec["text"], rec["type"], rec, validated, retriever, icd_retriever)
+                for rec in final if rec["type"] in ("THUỐC", "CHẨN_ĐOÁN", "TRIỆU_CHỨNG")
+            ]
+            concurrent.futures.wait(futures)
+    elif len(final) == 1:
+        rec = final[0]
+        if rec["type"] in ("THUỐC", "CHẨN_ĐOÁN", "TRIỆU_CHỨNG"):
+            _attach_candidates(rec, rec["text"], rec["type"], rec, validated, retriever, icd_retriever)
 
     final.sort(key=lambda e: e["position"][0])
     return final
@@ -1940,7 +1992,7 @@ def _attach_candidates(
                 record["candidates"] = list(codes) if codes else []
             except Exception as exc:
                 logger.warning("RxNorm lookup fail for '%s': %s", text, exc)
-    elif etype == "CHẨN_ĐOÁN" and icd_retriever is not None:
+    elif etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG") and icd_retriever is not None:
         # ICD lookup cần other_entities context (drugs/symptoms nearby)
         other_ents = [
             e for e in validated
@@ -1950,7 +2002,7 @@ def _attach_candidates(
             codes = icd_retriever.lookup(text, other_entities=other_ents)
             record["candidates"] = list(codes) if codes else []
         except Exception as exc:
-            logger.warning("ICD lookup fail for '%s': %s", text, exc)
+            logger.warning("ICD lookup fail for '%s' (%s): %s", text, etype, exc)
 
 
 def _emit_entity_record(
@@ -1961,6 +2013,7 @@ def _emit_entity_record(
     icd_retriever: Optional[ICDRetriever],
     seen_test_names: set[str],
     seen_entities: list[tuple[str, str, list[int]]],
+    skip_attach: bool = False,
 ) -> dict[str, Any] | None:
     """Process 1 entity: clean, dedup, build record, attach candidates.
 
@@ -2019,10 +2072,11 @@ def _emit_entity_record(
 
     # Build record + attach candidates
     record = _build_entity_record(text, etype, pos, ent)
-    _attach_candidates(
-        record, text, etype, ent, validated,
-        retriever, icd_retriever,
-    )
+    if not skip_attach:
+        _attach_candidates(
+            record, text, etype, ent, validated,
+            retriever, icd_retriever,
+        )
     return record
 
 

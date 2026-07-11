@@ -690,21 +690,21 @@ class RxNormRetriever:
     # ------------------------------------------------------------------ #
 
     def lookup(self, drug_text: str) -> list[str]:
-        """Tra RxNorm cho chuỗi thuốc VN/EN → list [rxcui] (0 hoặc 1 code, HIGH precision).
-
-        2026-07 fix theo Kaggle eval:
-        - Hybrid threshold nâng 0.7→0.78 (tránh candidates noise)
-        - Top_k=1 đã đúng → đảm bảo "1 mã thuốc" semantic, KHÔNG list nhiều
-        - Nếu confidence thấp → return [], KHÔNG đoán sai
-
-        2026-07 fix: Thêm L4 fallback — nếu L1 ingredient-only exact match fail
-        (vd "atenolol" có trong data nhưng L5 lookup miss) → thử fuzzy match trên
-        name field với threshold thấp hơn (75) để bắt các trường hợp drug name
-        ngắn gọn không match được qua L1.
-        """
         if not drug_text:
             return []
+        if not hasattr(self, '_cache'):
+            self._cache = {}
+        cache_key = drug_text.strip().lower()
+        if cache_key in self._cache:
+            return list(self._cache[cache_key])
+        result = self._lookup_uncached(drug_text)
+        if len(self._cache) > 4096:
+            self._cache.clear()
+        self._cache[cache_key] = result
+        return list(result)
 
+    def _lookup_uncached(self, drug_text: str) -> list[str]:
+        """Tra RxNorm cho chuỗi thuốc VN/EN → list [rxcui] (0 hoặc 1 code, HIGH precision)."""
         drug_text = drug_text.strip()
 
         # Pre-step: Translate brand → generic (mới 2026-07).
@@ -740,7 +740,19 @@ class RxNormRetriever:
                 "RxNorm L4 loose fuzzy fallback matched '%s' → %s",
                 drug_text, result,
             )
-            return result[:1]
+        # L6: Multi-Hop Compound Drug Splitting (Upgrade G)
+        if re.search(r'\s+[\/+\-]\s+|\s+và\s+', drug_text, re.IGNORECASE):
+            parts = [p.strip() for p in re.split(r'\s+[\/+\-]\s+|\s+và\s+', drug_text, flags=re.IGNORECASE) if len(p.strip()) >= 3]
+            if len(parts) >= 2 and len(parts) <= 4:
+                logger.debug("Multi-hop compound drug splitting '%s' -> %s", drug_text, parts)
+                combined: list[str] = []
+                for part in parts:
+                    sub_res = self.lookup(part)
+                    for code in sub_res:
+                        if code not in combined:
+                            combined.append(code)
+                if combined:
+                    return combined[:3]
 
         return []  # confidence thấp → empty
 

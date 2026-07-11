@@ -236,7 +236,14 @@ def _call_with_retry(
             )
             if attempt >= max_retries:
                 break
-            time.sleep(2)  # chờ 2s trước khi retry cùng prompt
+            time.sleep(1)
+            # Upgrade D: Self-correction loop with entity-preserving error prompt
+            if last_raw and len(last_raw.strip()) > 5:
+                msgs.append({"role": "assistant", "content": last_raw[:1500]})
+                msgs.append({
+                    "role": "user",
+                    "content": f"Lỗi cú pháp JSON ({exc}). Hãy BẢO TÒN ĐẦY ĐỦ tất cả các thực thể y khoa (bệnh, thuốc, triệu chứng, xét nghiệm) bạn vừa tìm thấy ở trên và CHỈ xuất lại dưới dạng mảng JSON hợp lệ theo đúng schema (không giải thích thêm, không trả về [] nếu đã tìm thấy thực thể):"
+                })
     raise RuntimeError(f"LLM fail after {max_retries + 1} attempts: {last_err}")
 
 
@@ -327,17 +334,34 @@ def process_record(
     #   user_prompt > 5000 chars → cap 15 (input vừa)
     #   user_prompt <= 5000 chars → cap 20 (input ngắn, sweet spot)
     user_prompt_len = len(input_text)
+    # Upgrade H: Domain-Adaptive Few-Shot Selection based on Keyword/Domain Overlap
+    if few_shot and len(few_shot) > 4:
+        input_tokens = set(re.findall(r'[a-zà-ỹ0-9_/-]{3,}', input_text.lower()))
+        def _score_few_shot_item(item: dict[str, str]) -> int:
+            content = item.get("content", "").lower()
+            item_tokens = set(re.findall(r'[a-zà-ỹ0-9_/-]{3,}', content))
+            return len(input_tokens & item_tokens)
+        
+        paired_few_shot = [few_shot[i:i+2] for i in range(0, len(few_shot), 2) if i+1 < len(few_shot)]
+        if paired_few_shot:
+            paired_few_shot.sort(key=lambda pair: -_score_few_shot_item(pair[0]))
+            sorted_few_shot = [msg for pair in paired_few_shot for msg in pair]
+        else:
+            sorted_few_shot = sorted(few_shot, key=lambda item: -_score_few_shot_item(item))
+    else:
+        sorted_few_shot = few_shot
+
     if user_prompt_len > 8000:
-        adaptive_few_shot = few_shot[:12]
-        logger.debug("[%d] Adaptive: keep 12 few-shot (input len=%d > 8000)",
+        adaptive_few_shot = sorted_few_shot[:12]
+        logger.debug("[%d] Adaptive: keep 6 pairs (12 msgs) domain-ranked few-shot (input len=%d > 8000)",
                       rec_id, user_prompt_len)
     elif user_prompt_len > 5000:
-        adaptive_few_shot = few_shot[:15]
-        logger.debug("[%d] Adaptive: keep 15 few-shot (input len=%d > 5000)",
+        adaptive_few_shot = sorted_few_shot[:14]
+        logger.debug("[%d] Adaptive: keep 7 pairs (14 msgs) domain-ranked few-shot (input len=%d > 5000)",
                       rec_id, user_prompt_len)
     else:
-        adaptive_few_shot = few_shot[:20]
-        logger.debug("[%d] Adaptive: keep 20 few-shot (input len=%d <= 5000, sweet spot)",
+        adaptive_few_shot = sorted_few_shot[:20]
+        logger.debug("[%d] Adaptive: keep 10 pairs (20 msgs) domain-ranked few-shot (input len=%d <= 5000, sweet spot)",
                       rec_id, user_prompt_len)
 
     # Fix #4: Log few-shot examples used (debug "which examples drove this output")
@@ -604,8 +628,7 @@ def main(argv: list[str] | None = None) -> int:
         # Ít nhất 1 example để có diversity, nhiều nhất theo budget
         auto_few_shot = max(0, min(auto_few_shot, args.max_few_shot))
 
-    selected_examples = select_dynamic_few_shot(all_examples, input_text, auto_few_shot)
-    few_shot = format_few_shot_messages(selected_examples)
+    few_shot = format_few_shot_messages(all_examples)
     # Dùng real token estimate cho log
     sys_tokens_for_log = sys_tokens_real
     logger.info(
