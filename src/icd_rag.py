@@ -1440,19 +1440,21 @@ class ICD10VectorSearch:
 
                 for row in data:
                     if is_byt:
-                        code = str(row.get("Mã", "")).strip()
-                        name_vi = str(row.get("Tên bệnh", "")).strip()
+                        code = str(row.get("Mã", row.get("code", ""))).strip()
+                        name_vi = str(row.get("Tên bệnh", row.get("desc_vi", row.get("name", "")))).strip()
                         nhom = str(row.get("Nhóm bệnh", "")).strip()
                         mo_ta = str(row.get("Mô tả", "")).strip()
                     else:
                         # ICD10_Data.json cũ
-                        code = str(row.get("Mã bệnh", "")).strip()
-                        name_vi = str(row.get("Tên bệnh gốc", "")).strip()
+                        code = str(row.get("Mã bệnh", row.get("code", ""))).strip()
+                        name_vi = str(row.get("Tên bệnh gốc", row.get("desc_vi", row.get("name", "")))).strip()
                         nhom = str(row.get("Tên nhóm", "")).strip()
                         mo_ta = ""
 
-                    if not (code and name_vi):
+                    if not code:
                         continue
+                    if not name_vi:
+                        name_vi = mo_ta or nhom or code
                     # Concat context để embedding có thêm thông tin phân biệt
                     ctx_parts = [name_vi]
                     if nhom and nhom != name_vi:
@@ -1481,10 +1483,11 @@ class ICD10VectorSearch:
                     code = str(row.get("code", "")).strip()
                     desc_vi = str(row.get("desc_vi", "")).strip()
                     desc_en = str(row.get("desc_en", "")).strip()
+                    name_fallback = str(row.get("name", row.get("desc", row.get("Tên bệnh", "")))).strip()
 
                     if not code:
                         continue
-                    # Prefer desc_vi cho embedding (VN queries); fallback desc_en
+                    # Prefer desc_vi cho embedding (VN queries); fallback desc_en / name
                     # Nếu có cả 2 thì embed cả 2 để hybrid VN-EN match
                     if desc_vi and desc_en and desc_vi != desc_en:
                         desc = f"{desc_vi} | {desc_en}"
@@ -1492,8 +1495,10 @@ class ICD10VectorSearch:
                         desc = desc_vi
                     elif desc_en:
                         desc = desc_en
+                    elif name_fallback:
+                        desc = name_fallback
                     else:
-                        continue
+                        desc = code
                     self.codes.append(code)
                     self.descs_raw.append(desc)
                     self.chapters.append("")
@@ -1872,8 +1877,10 @@ class ICD10BM25Index:
                             desc_vi = str(row.get("Tên bệnh gốc", "")).strip()
                             ten_nhom = str(row.get("Tên nhóm", "")).strip()
                             ten_chuong = str(row.get("Tên chương", "")).strip()
-                        if not (code and desc_vi):
+                        if not code:
                             continue
+                        if not desc_vi:
+                            desc_vi = code
                         doc_text = self._build_doc_text(desc_vi, code, ten_nhom, ten_chuong)
                         self.codes.append(code)
                         tokenized.append(_bm25_tokenize(doc_text))
@@ -1895,9 +1902,9 @@ class ICD10BM25Index:
                         code = str(row.get("code", "")).strip()
                         desc_en = str(row.get("desc_en", "")).strip()
                         desc_vi = str(row.get("desc_vi", "")).strip()
-                        if not (code and (desc_en or desc_vi)):
+                        if not code:
                             continue
-                        doc_text = self._build_doc_text(desc_vi or desc_en, code)
+                        doc_text = self._build_doc_text(desc_vi or desc_en or code, code)
                         self.codes.append(code)
                         tokenized.append(_bm25_tokenize(doc_text))
 
@@ -2270,16 +2277,19 @@ def build_from_seed(path: Path, out_index: Optional[Path] = None) -> ICDIndex:
 
             for row in data:
                 if is_byt_format:
-                    code = str(row.get("Mã", "")).strip()
-                    name = str(row.get("Tên bệnh", "")).strip()
+                    code = str(row.get("Mã", row.get("code", ""))).strip()
+                    name = str(row.get("Tên bệnh", row.get("desc_vi", row.get("name", "")))).strip()
                 else:
-                    code = str(row.get("Mã bệnh", "")).strip()
-                    name = str(row.get("Tên bệnh gốc", "")).strip()
-                if code and name:
-                    idx.add(code, name)
-                    name_clean = _strip_parens(name)
-                    if name_clean and name_clean != name and name_clean.lower() not in idx.exact:
-                        idx.exact.setdefault(name_clean.lower(), []).append(code)
+                    code = str(row.get("Mã bệnh", row.get("code", ""))).strip()
+                    name = str(row.get("Tên bệnh gốc", row.get("desc_vi", row.get("name", "")))).strip()
+                if not code:
+                    continue
+                if not name:
+                    name = code
+                idx.add(code, name)
+                name_clean = _strip_parens(name)
+                if name_clean and name_clean != name and name_clean.lower() not in idx.exact:
+                    idx.exact.setdefault(name_clean.lower(), []).append(code)
         except Exception as exc:
             logger.error("build_from_seed: lỗi đọc %s: %s", path, exc)
     else:
@@ -2294,13 +2304,15 @@ def build_from_seed(path: Path, out_index: Optional[Path] = None) -> ICDIndex:
                 except json.JSONDecodeError:
                     continue
                 code = str(row.get("code", "")).strip()
-                # Ưu tiên desc_vi cho exact match (VN queries); fallback desc_en
                 name = str(row.get("desc_vi", row.get("desc_en", row.get("name", "")))).strip()
-                if code and name:
-                    idx.add(code, name)
-                    name_clean = _strip_parens(name)
-                    if name_clean and name_clean != name and name_clean.lower() not in idx.exact:
-                        idx.exact.setdefault(name_clean.lower(), []).append(code)
+                if not code:
+                    continue
+                if not name:
+                    name = code
+                idx.add(code, name)
+                name_clean = _strip_parens(name)
+                if name_clean and name_clean != name and name_clean.lower() not in idx.exact:
+                    idx.exact.setdefault(name_clean.lower(), []).append(code)
 
     if out_index:
         out_index.parent.mkdir(parents=True, exist_ok=True)
