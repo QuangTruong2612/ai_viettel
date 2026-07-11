@@ -1104,10 +1104,10 @@ _CANONICAL_KEEP_PREFIX = {
 }
 
 # Verb prefix cần STRIP khỏi TÊN_XÉT_NGHIỆM (DẠNG A - verb NGOÀI tên)
-# KHÔNG strip "siêu âm", "nội soi", "monitor", "điện tâm đồ" (compound names)
+# KHÔNG strip "siêu âm", "nội soi", "monitor", "điện tâm đồ", "phân tích" (compound names)
 _TEST_VERB_PREFIX_RE = re.compile(
-    r"^(chụp\s+|phân\s+tích\s+|đo\s+|làm\s+|thực\s+hiện\s+|tiến\s+hành\s+|"
-    r"đã\s+(?:tiến\s+hành|làm|thực\s+hiện|chụp|đo|phân\s+tích)\s+)\s*",
+    r"^(chụp\s+|đo\s+|làm\s+|thực\s+hiện\s+|tiến\s+hành\s+|"
+    r"đã\s+(?:tiến\s+hành|làm|thực\s+hiện|chụp|đo)\s+)\s*",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -1327,7 +1327,7 @@ def _retype_entity(text: str, etype: str) -> str:
 # Match các test name phổ biến với pattern: chụp X, X-quang, siêu âm, ECG, v.v.
 # Pattern này flexible hơn list cứng - cover cả những test name mới.
 _TEST_NAME_PREFIX_PATTERN = re.compile(
-    r"^(?:chụp|phân\s+tích|đo|làm|thực\s+hiện|tiến\s+hành)?\s*"
+    r"^(?:chụp|đo|làm|thực\s+hiện|tiến\s+hành)?\s*"
     r"(?:"
     r"x[-\s]?quang(?:\s+\w+)?|"  # x-quang, x quang, x-quang ngực
     r"siêu\s+âm(?:\s+\w+(?:\s+\w+)?)?|"  # siêu âm, siêu âm tim, siêu âm bụng
