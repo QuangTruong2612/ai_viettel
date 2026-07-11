@@ -724,14 +724,15 @@ def main(argv: list[str] | None = None) -> int:
     all_examples = load_few_shot()
 
     # Estimate budget (target_ctx = Ollama Context Length, do user truyền)
-    # Dùng chars/2 cho VN text (chars/2.5 underestimate khiến budget âm → few_shot=0)
-    sys_tokens_real = int(len(SYSTEM_PROMPT) / 2)
-    max_output_tokens = llm.config.max_tokens  # 6144 sau khi tăng
+    # Dùng chars/3 cho VN text (Qwen tokenizer rất hiệu quả với tiếng Việt, ~3-4 chars/token)
+    sys_tokens_real = int(len(SYSTEM_PROMPT) / 3)
+    # Không reserve 8192 token cho output vì NER JSON hiếm khi vượt quá 2000 tokens.
+    max_output_tokens = min(llm.config.max_tokens, 2048)
     reserve_for_safety = 512  # buffer cho input + few-shot overhead
     budget_for_input = args.target_ctx - max_output_tokens - reserve_for_safety
     budget_for_sys_fewshot = budget_for_input
     remaining_for_fewshot = budget_for_sys_fewshot - sys_tokens_real
-    # Mỗi few-shot (user + assistant) ≈ 600 chars input mỗi (~300 tokens với chars/2)
+    # Mỗi few-shot (user + assistant) ≈ 600 chars input mỗi (~200 tokens với chars/3)
     if remaining_for_fewshot < 0:
         # Budget âm: SYSTEM_PROMPT quá dài so với target_ctx.
         # Ép dùng TỐI THIỂU 1 few-shot để có pattern (dù thiếu budget).
@@ -741,9 +742,9 @@ def main(argv: list[str] | None = None) -> int:
             sys_tokens_real, budget_for_input,
         )
     else:
-        # Each example ~ 300 real tokens (chars/2)
+        # Each example ~ 200 real tokens (chars/3)
         auto_few_shot = max(
-            0, min(remaining_for_fewshot // 300, len(all_examples), args.max_few_shot)
+            0, min(remaining_for_fewshot // 200, len(all_examples), args.max_few_shot)
         )
         # Ít nhất 1 example để có diversity, nhiều nhất theo budget
         auto_few_shot = max(0, min(auto_few_shot, args.max_few_shot))
