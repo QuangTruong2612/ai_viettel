@@ -252,8 +252,8 @@ def _call_with_retry(
 # ---------------------------------------------------------------------- #
 
 
-def _split_into_sections(text: str, max_chunk_len: int = 1400) -> list[tuple[str, int]]:
-    """Tách bài án dài thành các chunks theo đoạn (paragraphs) giữ nguyên absolute offset.
+def _split_into_sections(text: str, max_chunk_len: int = 1400, overlap_len: int = 300) -> list[tuple[str, int]]:
+    """Tách bài án dài thành các chunks theo sliding window có vùng gối đầu (overlap) và giữ nguyên absolute offset.
 
     Trả về danh sách tuple: (chunk_text, chunk_offset_in_original_text).
     Nếu bài án ngắn (<= max_chunk_len), trả về [(text, 0)].
@@ -261,7 +261,26 @@ def _split_into_sections(text: str, max_chunk_len: int = 1400) -> list[tuple[str
     if len(text) <= max_chunk_len:
         return [(text, 0)]
 
-    lines = text.splitlines(keepends=True)
+    raw_lines = text.splitlines(keepends=True)
+    lines: list[str] = []
+    for rl in raw_lines:
+        if len(rl) <= max_chunk_len:
+            lines.append(rl)
+        else:
+            # Nếu 1 dòng quá dài (> max_chunk_len), tách tiếp theo dấu câu (. ! ? ;) để tránh tràn chunk
+            parts = re.split(r"(?<=[.!?;])\s+", rl)
+            cur = ""
+            for p in parts:
+                if len(cur) + len(p) + 1 > max_chunk_len and cur:
+                    lines.append(cur + " ")
+                    cur = p
+                else:
+                    cur = (cur + " " + p) if cur else p
+            if cur:
+                if rl.endswith("\n") and not cur.endswith("\n"):
+                    cur += "\n"
+                lines.append(cur)
+
     chunks: list[tuple[str, int]] = []
     current_lines: list[str] = []
     current_len = 0
@@ -278,22 +297,37 @@ def _split_into_sections(text: str, max_chunk_len: int = 1400) -> list[tuple[str
         ):
             is_header = True
 
-        if current_lines and (current_len + line_len > max_chunk_len or is_header):
+        if current_lines and current_len >= 120 and (current_len + line_len > max_chunk_len or is_header):
             chunk_str = "".join(current_lines)
             chunks.append((chunk_str, current_offset))
-            current_offset += current_len
-            current_lines = [line]
-            current_len = line_len
+
+            # Tạo vùng gối đầu (overlap window) ~overlap_len chars từ cuối current_lines
+            overlap_lines: list[str] = []
+            ov_len = 0
+            for prev_line in reversed(current_lines):
+                if ov_len + len(prev_line) > overlap_len and overlap_lines:
+                    break
+                overlap_lines.insert(0, prev_line)
+                ov_len += len(prev_line)
+
+            # Cập nhật offset mới: offset của chunk vừa rồi + (current_len - ov_len)
+            current_offset += (current_len - ov_len)
+            current_lines = overlap_lines + [line]
+            current_len = ov_len + line_len
         else:
             current_lines.append(line)
             current_len += line_len
 
     if current_lines:
         chunk_str = "".join(current_lines)
-        if chunks and len(chunk_str) < 250:
-            # Nếu chunk cuối quá ngắn (< 250 chars), gộp luôn vào chunk liền trước
+        if chunks and len(chunk_str) < 280:
+            # Nếu chunk cuối quá ngắn (< 280 chars), gộp luôn vào chunk liền trước và giữ nguyên offset
             prev_str, prev_offset = chunks.pop()
-            chunks.append((prev_str + chunk_str, prev_offset))
+            tail_len = (prev_offset + len(prev_str)) - current_offset
+            if 0 <= tail_len < len(chunk_str):
+                chunks.append((prev_str + chunk_str[tail_len:], prev_offset))
+            else:
+                chunks.append((prev_str + "\n" + chunk_str, prev_offset))
         else:
             chunks.append((chunk_str, current_offset))
 

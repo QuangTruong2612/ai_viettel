@@ -210,16 +210,14 @@ def _repair_json_text(text: str) -> str | None:
 
 
 def _extract_partial_objects(text: str) -> list[Any]:
-    """Extract từng {} object parse được từ text bị truncate.
+    """Extract từng {} object parse được từ text bị truncate hoặc có lỗi cú pháp nhỏ.
 
-    Dùng regex để match các complete JSON object { ... } trong text.
-    Thử parse từng cái — bỏ qua cái lỗi.
+    Dùng regex/state-machine để match các complete/partial JSON object { ... } trong text.
+    Tự động sửa trailing comma, unescaped newlines và đóng bracket nếu bị truncate giữa chừng.
     """
     import re
 
-    # Match các {...} objects (không nested quá sâu)
     objects: list[Any] = []
-    # Greedy match balanced braces
     i = 0
     while i < len(text):
         if text[i] == "{":
@@ -244,16 +242,37 @@ def _extract_partial_objects(text: str) -> list[Any]:
                     elif ch == "}":
                         depth -= 1
                 j += 1
-            if depth == 0:
-                candidate = text[i:j]
-                try:
-                    obj = json.loads(candidate)
+
+            candidate = text[i:j]
+            if depth > 0:
+                # Truncated object ở cuối text -> thử tự động đóng quotes/brackets
+                if in_str:
+                    candidate += '"'
+                candidate += "}" * depth
+
+            # Thử parse
+            try:
+                obj = json.loads(candidate)
+                if isinstance(obj, dict) and "text" in obj:
                     objects.append(obj)
+            except json.JSONDecodeError:
+                # Sửa trailing commas và unescaped newlines
+                clean_cand = re.sub(r",(\s*[\]}])", r"\1", candidate)
+                clean_cand = re.sub(r"\n", r"\\n", clean_cand)
+                try:
+                    obj = json.loads(clean_cand)
+                    if isinstance(obj, dict) and "text" in obj:
+                        objects.append(obj)
                 except json.JSONDecodeError:
-                    pass
+                    # Regex fallback cho dict {"text": "...", "type": "..."}
+                    m = re.search(r'"text"\s*:\s*"([^"]+)"\s*,\s*"type"\s*:\s*"([^"]+)"', candidate)
+                    if m:
+                        objects.append({"text": m.group(1).strip(), "type": m.group(2).strip()})
+
+            if depth == 0:
                 i = j
             else:
-                i += 1
+                break
         else:
             i += 1
     return objects

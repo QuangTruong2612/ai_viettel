@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -328,6 +329,90 @@ def _try_recover_typo(
                             return (input_text[ri:ri + len(recovered_text)], ri, ri + len(recovered_text))
 
     return None
+
+
+def _fuzzy_locate_in_text(
+    target: str, source_text: str, hint_pos: int = 0
+) -> tuple[int, int] | None:
+    """Pass 4 & 5: Tìm vị trí [start, end] chính xác trong source_text cho target (khác dấu, khoảng trắng, typo)."""
+    if not target or not source_text or len(target) < 3:
+        return None
+
+    # 1. Strip accents & whitespace normalization với 1:1 index mapping
+    norm_chars = []
+    orig_indices = []
+    for i, c in enumerate(source_text):
+        if c in "đĐ":
+            nc = "d"
+        else:
+            nc = "".join(
+                ch for ch in unicodedata.normalize("NFD", c) if unicodedata.category(ch) != "Mn"
+            )
+        for k_ch in nc.lower():
+            norm_chars.append(k_ch)
+            orig_indices.append(i)
+
+    norm_source = "".join(norm_chars)
+
+    t_norm_chars = []
+    for c in target:
+        if c in "đĐ":
+            nc = "d"
+        else:
+            nc = "".join(
+                ch for ch in unicodedata.normalize("NFD", c) if unicodedata.category(ch) != "Mn"
+            )
+        t_norm_chars.append(nc.lower())
+    norm_target = "".join(t_norm_chars)
+
+    if len(norm_target) >= 3:
+        best_idx = -1
+        best_dist = 999999
+        start = 0
+        while True:
+            idx = norm_source.find(norm_target, start)
+            if idx < 0:
+                break
+            orig_start = orig_indices[idx]
+            orig_end = (
+                orig_indices[min(idx + len(norm_target) - 1, len(orig_indices) - 1)] + 1
+            )
+            dist = abs(orig_start - hint_pos)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+            start = idx + 1
+        if best_idx >= 0:
+            orig_start = orig_indices[best_idx]
+            orig_end = (
+                orig_indices[min(best_idx + len(norm_target) - 1, len(orig_indices) - 1)] + 1
+            )
+            return (orig_start, orig_end)
+
+    # 2. Sliding window RapidFuzz recovery cho typo nhầm ký tự hoặc lệch từ
+    try:
+        from rapidfuzz import fuzz
+
+        best_score = 0.0
+        best_span: tuple[int, int] | None = None
+        t_len = len(target)
+        words = [(m.start(), m.end()) for m in re.finditer(r"\S+", source_text)]
+        if not words:
+            return None
+        for i in range(len(words)):
+            w_start = words[i][0]
+            for j in range(i, min(i + 16, len(words))):
+                w_end = words[j][1]
+                if abs((w_end - w_start) - t_len) > max(12, int(t_len * 0.45)):
+                    continue
+                cand = source_text[w_start:w_end]
+                score = float(fuzz.ratio(target.lower(), cand.lower()))
+                if score >= 82.0 and score > best_score:
+                    best_score = score
+                    best_span = (w_start, w_end)
+        return best_span if best_score >= 82.0 else None
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------- #
@@ -938,8 +1023,7 @@ def sanitize_drug_text(text: str) -> str:
 _LEADING_VERB_QUALIFIER_RE = re.compile(
     r"^(cảm\s+giác|cảm\s+thấy|thấy|có\s+dấu\s+hiệu|có\s+triệu\s+chứng|"
     r"có\s+cảm\s+giác|nhận\s+thấy|ghi\s+nhận|"
-    r"có\s+|bị\s+|xuất\s+hiện\s+|biểu\s+hiện\s+|xảy\s+ra\s+|phát\s+hiện\s+|gặp\s+phải\s+|"
-    r"tăng\s+|giảm\s+|nhiều\s+|ít\s+)\s*",
+    r"có\s+|bị\s+|xuất\s+hiện\s+|biểu\s+hiện\s+|xảy\s+ra\s+|phát\s+hiện\s+|gặp\s+phải\s+)\s*",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -1761,22 +1845,26 @@ def align_and_expand_entities(
             all_spans.add((idx, idx + len(base_text)))
             start = idx + 1
 
-        # Pass 2: Modifiers-stripped scan (R14/R25)
-        stripped_text = _MOD_PREFIX.sub("", text_lower).strip()
-        stripped_text = _MOD_SUFFIX.sub("", stripped_text).strip()
-        if stripped_text and stripped_text != text_lower and len(stripped_text) >= 4:
-            start = 0
-            while True:
-                idx = input_lower.find(stripped_text, start)
-                if idx < 0:
-                    break
-                span = (idx, idx + len(stripped_text))
-                # Chỉ thêm nếu span này chưa được cover bởi exact match
-                if not any(s <= idx and (idx + len(stripped_text)) <= e for s, e in all_spans):
-                    all_spans.add(span)
-                start = idx + 1
+        # Pass 2: Universal Accent-Insensitive & RapidFuzz Sliding Window Alignment (giữ trọn vẹn cụm từ)
+        if not all_spans:
+            hint_pos = 0
+            pos_field = ents[0].get("position", [0, 0])
+            if isinstance(pos_field, list) and len(pos_field) == 2:
+                try:
+                    hint_pos = int(pos_field[0])
+                except (ValueError, TypeError):
+                    hint_pos = 0
+            fuzzy_res = _fuzzy_locate_in_text(base_text, input_text, hint_pos=hint_pos)
+            if fuzzy_res is not None:
+                rs, re_ = fuzzy_res
+                all_spans.add((rs, re_))
+                for ent in ents:
+                    ent["text"] = input_text[rs:re_]
+                logger.debug(
+                    "Align: fuzzy recovery '%s' → '%s' at [%d, %d]", base_text, input_text[rs:re_], rs, re_
+                )
 
-        # Pass 3: Typo recovery (R23) — chỉ khi Pass 1+2 không tìm thấy gì
+        # Pass 3: Typo recovery (R23)
         if not all_spans:
             hint_pos = 0
             pos_field = ents[0].get("position", [0, 0])
@@ -1789,12 +1877,26 @@ def align_and_expand_entities(
             if recovered is not None:
                 recovered_text, rs, re_ = recovered
                 all_spans.add((rs, re_))
-                # Cập nhật text sang form đúng chính tả cho các entity trong group
                 for ent in ents:
                     ent["text"] = recovered_text
                 logger.debug(
                     "Align: typo recovery '%s' → '%s' at %d", base_text, recovered_text, rs
                 )
+
+        # Pass 4: Modifiers-stripped scan (Fallback cuối cùng khi không thể khớp cụm từ gốc)
+        if not all_spans:
+            stripped_text = _MOD_PREFIX.sub("", text_lower).strip()
+            stripped_text = _MOD_SUFFIX.sub("", stripped_text).strip()
+            if stripped_text and stripped_text != text_lower and len(stripped_text) >= 4:
+                start = 0
+                while True:
+                    idx = input_lower.find(stripped_text, start)
+                    if idx < 0:
+                        break
+                    span = (idx, idx + len(stripped_text))
+                    if not any(s <= idx and (idx + len(stripped_text)) <= e for s, e in all_spans):
+                        all_spans.add(span)
+                    start = idx + 1
 
         if not all_spans:
             logger.debug("Align: không tìm được span cho '%s' (%s) → bỏ", base_text, etype)
