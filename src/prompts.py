@@ -133,9 +133,9 @@ You are an expert Vietnamese Clinical NER Specialist with 20+ years of experienc
 - ❌ `"Mạch 80 lần/phút"` gộp thành 1 KQ → SAI
 - ❌ Bỏ sót vital signs vì không thấy tên rõ → SAI (vd "VS98.3" → DROP, nhưng "Mạch 80" → EXTRACT)
 
-**EXCEPTION - Vital signs dump KHÔNG TÁCH được**:
-- `"VS98.3 12987 56 18 99RA"` → DROP hoàn toàn (không đủ context để biết số nào ứng với tên nào)
-- `"HA 130/80 M 90 T 37"` (nhiều vital trên 1 dòng không có format rõ) → có thể tách thành nhiều cặp nếu nhận diện được từng tên
+**EXCEPTION - Vital signs dump (Sinh hiệu lâm sàng)**:
+- `"VS98.3 12987 56 18 99RA"` → TRÍCH XUẤT vào `KẾT_QUẢ_XÉT_NGHIỆM` (vì đây là chuỗi số đo khám lâm sàng ghi gộp)
+- `"HA 130/80 M 90 T 37"` (nhiều vital trên 1 dòng) → có thể tách thành nhiều cặp nếu nhận diện được từng tên hoặc giữ nguyên làm `KẾT_QUẢ_XÉT_NGHIỆM`
 </vital_signs_split>
 
 <test_name_canonical>
@@ -315,9 +315,9 @@ Học cách SUY LUẬN thay vì memorize:
 <strict_negative_rules>
 ## 2. CÁC LỆNH CẤM BẤT KHẢ XÂM PHẠM (STRICT NEGATIVE RULES - CHỐNG TÀO LAO)
 
-⛔ **CẤM 1: CẤM trích xuất Sinh hiệu gộp / Số đo rác (Vital Signs Dump)**
-- Tuyệt đối KHÔNG trích xuất các chuỗi sinh hiệu viết tắt hoặc gộp số liệu dạng `VS98.3 12987 56 18 99RA`, `VS 98.3...`, `12987`, hay các chuỗi toàn con số/mã hiệu khám lâm sàng không có tên chỉ số làm `TRIỆU_CHỨNG` hay `CHẨN_ĐOÁN`.
-- (Chỉ trích xuất khi có tên chỉ số rõ ràng: `HA 160/90 mmHg` → TÊN="HA", KQ="160/90 mmHg"; `SpO2 96%` → TÊN="SpO2", KQ="96%").
+✅ **QUY TẮC 1: Xử lý Sinh hiệu gộp khám lâm sàng (Vital Signs Dump)**
+- Nếu gặp chuỗi sinh hiệu gộp số liệu hoặc mã đo khám lâm sàng như `VS98.3 12987 56 18 99RA`, `VS 98.3...` ở phần Khám lâm sàng → BẮT BUỘC TRÍCH XUẤT vào loại `KẾT_QUẢ_XÉT_NGHIỆM`.
+- Nếu có tên chỉ số rõ ràng (`HA 160/90 mmHg`) → ưu tiên tách thành cặp: TÊN="HA" (`TÊN_XÉT_NGHIỆM`), KQ="160/90 mmHg" (`KẾT_QUẢ_XÉT_NGHIỆM`).
 
 ⛔ **CẤM 2: CẤM trích xuất Thời lượng / Mốc thời gian độc lập**
 - Tuyệt đối KHÔNG trích xuất các cụm từ chỉ có ý nghĩa thời gian hoặc diễn biến thời gian như `kéo dài 20 giây`, `khởi phát lúc 17 giờ`, `trong tuần qua`, `cách 10 ngày trước`, `10 năm`, `3 ngày`, `30 phút` làm `TRIỆU_CHỨNG` hay `CHẨN_ĐOÁN`. Thời gian không phải là triệu chứng bệnh!

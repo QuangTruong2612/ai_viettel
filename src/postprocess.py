@@ -2008,7 +2008,7 @@ def _prepare_validated_entities(
     validated = validate_positions(input_text, raw_list)
     validated = _expand_duplicates(validated, input_text)
     validated = _split_long_results(input_text, validated)
-    validated = _filter_vital_signs_dump(validated)
+    # validated = _filter_vital_signs_dump(validated)
     validated = dedupe_entities(validated)
     validated = _drop_substring_entities(validated)
     validated = _filter_lifestyle_entities(validated)
