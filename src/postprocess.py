@@ -2180,13 +2180,18 @@ def align_and_expand_entities(
 
         all_spans: set[tuple[int, int]] = set()
 
-        # Pass 1: Exact substring scan (case-insensitive)
+        # Pass 1: Exact substring scan (case-insensitive with Word Boundary check)
         start = 0
         while True:
             idx = input_lower.find(text_lower, start)
             if idx < 0:
                 break
-            all_spans.add((idx, idx + len(base_text)))
+            end_idx = idx + len(base_text)
+            # Kiểm tra word boundary để tránh "nôn" khớp bên trong "buồn nôn"
+            if (idx > 0 and input_text[idx - 1].isalnum()) or (end_idx < len(input_text) and input_text[end_idx].isalnum()):
+                start = idx + 1
+                continue
+            all_spans.add((idx, end_idx))
             start = idx + 1
 
         # Pass 2: Universal Accent-Insensitive & RapidFuzz Sliding Window Alignment (giữ trọn vẹn cụm từ)
@@ -2237,8 +2242,12 @@ def align_and_expand_entities(
                     idx = input_lower.find(stripped_text, start)
                     if idx < 0:
                         break
-                    span = (idx, idx + len(stripped_text))
-                    if not any(s <= idx and (idx + len(stripped_text)) <= e for s, e in all_spans):
+                    end_idx = idx + len(stripped_text)
+                    if (idx > 0 and input_text[idx - 1].isalnum()) or (end_idx < len(input_text) and input_text[end_idx].isalnum()):
+                        start = idx + 1
+                        continue
+                    span = (idx, end_idx)
+                    if not any(s <= idx and end_idx <= e for s, e in all_spans):
                         all_spans.add(span)
                     start = idx + 1
 
