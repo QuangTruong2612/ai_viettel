@@ -681,6 +681,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Chạy ở chế độ Single-Pass (extract + classify cùng 1 call) thay vì Two-Stage.",
     )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=_PROJECT_ROOT / "data",
+        help="Thư mục chứa data (few-shot examples, icd index)",
+    )
     parser.add_argument("--log-file", type=Path, default=Path("predictions.log"))
     args = parser.parse_args(argv)
 
@@ -758,10 +764,11 @@ def main(argv: list[str] | None = None) -> int:
     # Lưu ý: chars/4 heuristic underestimate ~60% cho VN. Dùng chars/2.5 (Qwen2.5 ratio)
     # để budget chính xác hơn.
     use_two_stage = not args.no_two_stage
-    s1_path = args.data_dir / "examples_stage1.jsonl"
+    data_dir = getattr(args, "data_dir", _PROJECT_ROOT / "data")
+    s1_path = data_dir / "examples_stage1.jsonl"
     if not s1_path.exists():
         s1_path = _PROJECT_ROOT / "data" / "examples_stage1.jsonl"
-    s2_path = args.data_dir / "examples_stage2.jsonl"
+    s2_path = data_dir / "examples_stage2.jsonl"
     if not s2_path.exists():
         s2_path = _PROJECT_ROOT / "data" / "examples_stage2.jsonl"
 
