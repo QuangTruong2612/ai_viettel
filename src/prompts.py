@@ -667,11 +667,12 @@ def build_stage1_user_prompt(input_text: str) -> str:
     """Build user prompt cho Stage 1 Mention Extraction."""
     return (
         "🎯 NHIỆM VỤ: Tìm và trích xuất TRỌN VẸN và KIỆT ĐỂ tất cả các cụm từ y khoa (medical concept spans) trong văn bản lâm sàng dưới đây kèm vị trí character offset [start, end].\n\n"
-        "🔥 4 QUY TẮC TRÍCH XUẤT LÂM SÀNG CỐT LÕI (BẮT BUỘC TUÂN THỦ TỪNG CHỮ):\n"
-        "1. TRIỆU CHỨNG LÕI NGẮN GỌN: CHỈ lấy core symptom (`đau ngực`, `khó thở`, `mệt mỏi`, `đánh trống ngực`, `sốt`). TUYỆT ĐỐI KHÔNG bốc thêm đuôi tự sự / hoàn cảnh phía sau (`nhiều khi gắng sức`, `khi leo cầu thang`, `lúc nhập viện`) hoặc tiền tố lời kể (`còn cảm giác`, `bệnh nhân thấy`).\n"
+        "🔥 5 QUY TẮC TRÍCH XUẤT LÂM SÀNG CỐT LÕI (BẮT BUỘC TUÂN THỦ TỪNG CHỮ):\n"
+        "1. TRIỆU CHỨNG LÕI NGẮN GỌN: CHỈ lấy core symptom (`đau ngực`, `khó thở`, `mệt mỏi`, `đánh trống ngực`, `sốt`). TUYỆT ĐỐI KHÔNG bốc thêm đuôi tự sự / hoàn cảnh phía sau (`nhiều khi gắng sức`, `khi leo cầu thang`, `lúc nhập viện`) hoặc tiền tố lời kể/qualifier (`còn cảm giác`, `xuất hiện`, `bệnh nhân thấy`, `ghi nhận`, `có dấu hiệu`).\n"
         "2. TÁCH CỤM TRIỆU CHỨNG VỊ TRÍ KÉP: Nếu có cả cảm giác và vị trí giải phẫu (`cảm giác thắt chặt ngực vùng trước tim`, `tình trạng đau thắt ngực sau xương ức`), PHẢI tách thành 2 spans riêng: (`cảm giác thắt chặt ngực` VÀ `thắt chặt ngực vùng trước tim`), KHÔNG gộp chung 1 dải.\n"
-        "3. THUỐC PHẢI ĐỦ ĐUÔI LIỀU LƯỢNG (`x N`): Khi có `aspirin 325mg x 1`, `paracetamol 500mg po bid`, PHẢI lấy trọn vẹn đến hết đuôi liều/tần suất (`aspirin 325mg x 1`), không được bỏ rơi chữ `x 1` phía sau.\n"
-        "4. QUÉT HẾT TỪNG LẦN LẶP LẠI: Nếu một triệu chứng hay thuốc xuất hiện 3-4 lần ở các câu khác nhau từ Tiền sử đến Cấp cứu đến Khám, PHẢI xuất đủ 3-4 lần với positions tương ứng!\n\n"
+        "3. CHUẨN HÓA TÊN XÉT NGHIỆM (BỎ ĐỘNG TỪ): Khi lấy TÊN_XÉT_NGHIỆM, TUYỆT ĐỐI KHÔNG lấy động từ chỉ định phía trước (`chụp`, `đo`, `làm`, `phân tích`, `thực hiện`). Ví dụ: `chụp X-quang ngực` -> CHỈ lấy `X-quang ngực`; `phân tích nước tiểu` -> CHỈ lấy `nước tiểu`; `đo điện tâm đồ` -> CHỈ lấy `điện tâm đồ`.\n"
+        "4. THUỐC PHẢI ĐỦ ĐUÔI LIỀU LƯỢNG (`x N`): Khi có `aspirin 325mg x 1`, `paracetamol 500mg po bid`, PHẢI lấy trọn vẹn đến hết đuôi liều/tần suất (`aspirin 325mg x 1`), không được bỏ rơi chữ `x 1` phía sau.\n"
+        "5. QUÉT HẾT TỪNG LẦN LẶP LẠI: Nếu một triệu chứng hay thuốc xuất hiện 3-4 lần ở các câu khác nhau từ Tiền sử đến Cấp cứu đến Khám, PHẢI xuất đủ 3-4 lần với positions tương ứng!\n\n"
         f"INPUT:\n{input_text}\n\n"
         "OUTPUT JSON ARRAY (chỉ trả về [{'text': '...', 'position': [start, end]}], không kèm lời giải thích):"
     )
