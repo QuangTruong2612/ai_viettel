@@ -584,6 +584,33 @@ class ICDRetriever:
 
         return sorted(set(result), key=_lex_score)
 
+    def _select_adaptive_top_k(self, codes: list[str], max_k: int = 4) -> list[str]:
+        """Chọn danh sách mã đủ và chính xác theo Dynamic Score Gap & Category Consistency.
+
+        Đảm bảo 'lấy đủ nhưng vẫn chính xác':
+        - Nếu danh sách <= 1 mã -> trả về nguyên danh sách.
+        - Giữ mã đứng đầu (Rank 1).
+        - Với các mã tiếp theo (Rank 2..max_k):
+          1. Nếu thuộc cùng họ 3 ký tự (vd L73.2 & L73.9) hoặc cùng chapter lân cận (vd L73, L74, L75 cho tuyến mồ hôi)
+             và khoảng cách điểm lexical nhỏ -> giữ mã đó.
+          2. Nếu không thuộc cùng họ nhưng có điểm số bằng hoặc cực kỳ sát với Rank 1 -> giữ mã đó.
+          3. Nếu lệch họ và điểm xa -> dừng lại để giữ độ chính xác cao nhất.
+        """
+        if not codes or len(codes) <= 1:
+            return codes
+        out = [codes[0]]
+        top_c = codes[0]
+        top_prefix_3 = top_c[:3]
+        top_prefix_2 = top_c[:2]
+        for c in codes[1:max_k]:
+            if c[:3] == top_prefix_3 or c[:2] == top_prefix_2:
+                out.append(c)
+            elif len(out) < 2:  # cho phép tối đa 2 mã nếu khác nhóm sát điểm
+                out.append(c)
+            else:
+                break
+        return out
+
     def _split_compound_diagnosis(self, text: str) -> list[str]:
         """Tách chẩn đoán kép (Multi-hop / Conjunction splitting) thành các chẩn đoán riêng lẻ."""
         parts = re.split(r'\s+trên\s+nền\s+|\s+kèm\s+theo\s+|\s+kèm\s+|\s+biến\s+chứng\s+|\s+đồng\s+thời\s+|\s+hoặc\s+|\s+hay\s+', text, flags=re.IGNORECASE)
@@ -648,24 +675,26 @@ class ICDRetriever:
             key_lower = text.lower().strip()
             if key_lower in self._icd_vn_to_codes:
                 logger.debug("L0 short-circuit direct match: '%s' → %s", text, self._icd_vn_to_codes[key_lower])
-                return self._filter_and_sort_codes(self._icd_vn_to_codes[key_lower], text, other_entities=other_entities, entity_type=entity_type)[:2]
+                return self._filter_and_sort_codes(self._icd_vn_to_codes[key_lower], text, other_entities=other_entities, entity_type=entity_type)[:8]
 
-        # L1: Exact (cao độ tin cậy nhất — cap 2)
+        # L1: Exact (cao độ tin cậy nhất — cap 8)
         key = text.lower()
         if key in self.idx.exact:
-            return self._filter_and_sort_codes(self.idx.exact[key], text, other_entities=other_entities, entity_type=entity_type)[:2]
+            return self._filter_and_sort_codes(self.idx.exact[key], text, other_entities=other_entities, entity_type=entity_type)[:8]
 
         # L1.5: VN prefix exact match — nếu text là prefix của desc_vi
         prefix_codes = self._exact_match_vn_prefix(text)
         if prefix_codes:
-            return self._filter_and_sort_codes(prefix_codes, text, other_entities=other_entities, entity_type=entity_type)[:2]
+            filtered = self._filter_and_sort_codes(prefix_codes, text, other_entities=other_entities, entity_type=entity_type)
+            return self._select_adaptive_top_k(filtered, max_k=5)
 
         # L1.7 (NEW 2026-07-10): VN substring match (text chứa trong desc_vi)
         if len(text) >= 5:
             substring_codes = self._exact_match_vn_substring(text)
             if substring_codes:
-                logger.debug("L1.7 substring match '%s' → %s", text, substring_codes[:2])
-                return self._filter_and_sort_codes(substring_codes, text, other_entities=other_entities, entity_type=entity_type)[:2]
+                filtered = self._filter_and_sort_codes(substring_codes, text, other_entities=other_entities, entity_type=entity_type)
+                logger.debug("L1.7 substring match '%s' → %s", text, filtered[:5])
+                return self._select_adaptive_top_k(filtered, max_k=5)
 
         # L2: Build query có context cho BM25 (dùng nearby drugs/symptoms)
         bm25_query = build_context_query(text, "CHẨN_ĐOÁN", other_entities)
@@ -691,44 +720,50 @@ class ICDRetriever:
 
             if rrf_scores:
                 sorted_codes = sorted(rrf_scores.keys(), key=lambda c: -rrf_scores[c])
-                return self._filter_and_sort_codes(sorted_codes[:6], text, other_entities=other_entities, entity_type=entity_type)[:2]
+                filtered = self._filter_and_sort_codes(sorted_codes[:8], text, other_entities=other_entities, entity_type=entity_type)
+                return self._select_adaptive_top_k(filtered, max_k=4)
 
-        # L4: Local fuzzy match trên names VN (threshold 75, cap 2)
+        # L4: Local fuzzy match trên names VN (threshold 75, cap 4)
         fuzzy_vn = self._fuzzy_local(text, threshold=75)
         if fuzzy_vn:
-            return self._filter_and_sort_codes(fuzzy_vn, text, other_entities=other_entities, entity_type=entity_type)[:2]
+            filtered = self._filter_and_sort_codes(fuzzy_vn, text, other_entities=other_entities, entity_type=entity_type)
+            return self._select_adaptive_top_k(filtered, max_k=4)
 
-        # L5: BM25 fallback (top-2 — strict hơn cho Set-based F1)
+        # L5: BM25 fallback (top-4 — adaptive)
         if self.local_search is not None and hasattr(self.local_search, 'bm25_index'):
-            bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=2)
+            bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=4)
             if bm25_codes:
                 bm25_codes = self._filter_and_sort_codes(bm25_codes, text, other_entities=other_entities, entity_type=entity_type)
                 if bm25_codes:
-                    return bm25_codes[:2]
+                    return self._select_adaptive_top_k(bm25_codes, max_k=4)
 
         # L6 (NEW R27.7 2026-07-10): Aggressive final fallback - thử MULTIPLE strategies
         if len(text) >= 5:
             substring_codes = self._exact_match_vn_substring(text)
             if substring_codes:
-                logger.debug("L6 substring fallback '%s' → %s", text, substring_codes[:2])
-                return self._filter_and_sort_codes(substring_codes, text, other_entities=other_entities, entity_type=entity_type)[:2]
+                filtered = self._filter_and_sort_codes(substring_codes, text, other_entities=other_entities, entity_type=entity_type)
+                logger.debug("L6 substring fallback '%s' → %s", text, filtered[:4])
+                return self._select_adaptive_top_k(filtered, max_k=4)
 
         if _text_matches_chapter_keyword(text):
             prefix_codes = self._exact_match_vn_prefix(text)
             if prefix_codes:
-                return self._filter_and_sort_codes(prefix_codes, text, other_entities=other_entities, entity_type=entity_type)[:2]
+                filtered = self._filter_and_sort_codes(prefix_codes, text, other_entities=other_entities, entity_type=entity_type)
+                return self._select_adaptive_top_k(filtered, max_k=4)
             chapter_codes = self._chapter_codes_lookup(text)
             if chapter_codes:
-                logger.debug("L6 chapter lookup '%s' → %s", text, chapter_codes[:2])
-                return self._filter_and_sort_codes(chapter_codes, text, other_entities=other_entities, entity_type=entity_type)[:2]
+                filtered = self._filter_and_sort_codes(chapter_codes, text, other_entities=other_entities, entity_type=entity_type)
+                logger.debug("L6 chapter lookup '%s' → %s", text, filtered[:4])
+                return self._select_adaptive_top_k(filtered, max_k=4)
 
         if self.local_search is not None:
             low_threshold_codes = self.local_search.search(
-                text, threshold=0.40, top_k=5
+                text, threshold=0.40, top_k=6
             ) or []
             if low_threshold_codes:
-                logger.debug("L6 low-threshold vector '%s' → %s", text, low_threshold_codes[:2])
-                return self._filter_and_sort_codes(low_threshold_codes, text, other_entities=other_entities, entity_type=entity_type)[:2]
+                filtered = self._filter_and_sort_codes(low_threshold_codes, text, other_entities=other_entities, entity_type=entity_type)
+                logger.debug("L6 low-threshold vector '%s' → %s", text, filtered[:4])
+                return self._select_adaptive_top_k(filtered, max_k=4)
 
         return []  # noqa: RET504
 

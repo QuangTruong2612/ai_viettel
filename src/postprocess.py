@@ -1698,12 +1698,12 @@ def assemble_record(
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(final))) as pool:
             futures = [
                 pool.submit(_attach_candidates, rec, rec["text"], rec["type"], rec, validated, retriever, icd_retriever)
-                for rec in final if rec["type"] in ("THUỐC", "CHẨN_ĐOÁN", "TRIỆU_CHỨNG")
+                for rec in final if rec["type"] in ("THUỐC", "CHẨN_ĐOÁN")
             ]
             concurrent.futures.wait(futures)
     elif len(final) == 1:
         rec = final[0]
-        if rec["type"] in ("THUỐC", "CHẨN_ĐOÁN", "TRIỆU_CHỨNG"):
+        if rec["type"] in ("THUỐC", "CHẨN_ĐOÁN"):
             _attach_candidates(rec, rec["text"], rec["type"], rec, validated, retriever, icd_retriever)
 
     final.sort(key=lambda e: e["position"][0])
@@ -2106,9 +2106,8 @@ def _attach_candidates(
                 record["candidates"] = list(codes) if codes else []
             except Exception as exc:
                 logger.warning("RxNorm lookup fail for '%s': %s", text, exc)
-    elif etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG") and icd_retriever is not None:
+    elif etype == "CHẨN_ĐOÁN" and icd_retriever is not None:
         # ICD lookup cần other_entities context (drugs/symptoms nearby)
-        # entity_type được truyền để TRIỆU_CHỨNG không bị lệch sang bệnh lý/cơ xương
         other_ents = [
             e for e in validated
             if e.get("text", "").strip() and e is not ent

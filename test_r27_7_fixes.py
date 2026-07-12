@@ -211,27 +211,7 @@ def test_6_icd_short_circuit():
     return passed
 
 
-if __name__ == "__main__":
-    print("=" * 60)
-    print("TEST POSTPROCESS FIXES (R27.7)")
-    print("=" * 60)
 
-    results = []
-    results.append(test_1_split_dien_tam_do())
-    results.append(test_2_split_chup_x_quang())
-    results.append(test_3_split_phan_tich_nuoc_tieu())
-    results.append(test_4_vital_signs_dump_drop_kq_xn())
-    results.append(test_5_clean_entity_trailing_duration())
-    results.append(test_5b_kq_xn_type_after_split())
-    results.append(test_6_icd_short_circuit())
-    results.append(test_7_drop_noise_khi_chuyen())
-    results.append(test_8_vs98_keep_as_kq_xn())
-
-    print("=" * 60)
-    passed = sum(results)
-    total = len(results)
-    print(f"RESULTS: {passed}/{total} tests passed")
-    print("=" * 60)
 
 
 def test_7_drop_noise_khi_chuyen():
@@ -271,3 +251,26 @@ def test_8_vs98_keep_as_kq_xn():
         return True
     print(f"❌ FAIL: 'VS98.3 12987...' bị drop, len(result)={len(result)}")
     return False
+
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("TEST POSTPROCESS FIXES (R27.7)")
+    print("=" * 60)
+
+    results = []
+    results.append(test_1_split_dien_tam_do())
+    results.append(test_2_split_chup_x_quang())
+    results.append(test_3_split_phan_tich_nuoc_tieu())
+    results.append(test_4_vital_signs_dump_drop_kq_xn())
+    results.append(test_5_clean_entity_trailing_duration())
+    results.append(test_5b_kq_xn_type_after_split())
+    results.append(test_6_icd_short_circuit())
+    results.append(test_7_drop_noise_khi_chuyen())
+    results.append(test_8_vs98_keep_as_kq_xn())
+
+    print("=" * 60)
+    passed = sum(results)
+    total = len(results)
+    print(f"RESULTS: {passed}/{total} tests passed")
+    print("=" * 60)
