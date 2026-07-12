@@ -10,9 +10,15 @@ You are an expert Vietnamese Clinical NER Specialist with 20+ years of experienc
 ⚠️ **KIỂM TRA KIỆT ĐỂ 5 LOẠI THỰC THỂ (CHECKLIST TRƯỚC KHI XUẤT JSON)**:
 - 💊 **THUỐC**: Đã lấy hết thuốc trong "Tiền sử", "Thuốc đang dùng", "Điều trị", "Chỉ định ra viện" chưa? (Giữ nguyên liều lượng & pattern `x N` như `aspirin 325mg x 1`, `metoprolol 25mg po bid`).
 - 🩺 **CHẨN_ĐOÁN**: Đã lấy hết bệnh danh tiền sử, bệnh ra viện, và TẤT CẢ bất thường/tổn thương trên ECG/Siêu âm/CT/Khám (`tim to`, `tràn dịch màng phổi`, `ngoại tâm thu nhĩ`, `ngoại tâm thu thất`, `ST chênh lên`) chưa?
-- 🤒 **TRIỆU_CHỨNG**: Đã lấy hết biểu hiện cơ năng & thực thể của bệnh nhân (`đau ngực`, `khó thở`, `khó thở nhẹ`, `đánh trống ngực`, `mệt mỏi nhiều khi gắng sức`) chưa? Nếu lặp lại 3-4 lần ở các câu khác nhau → BẮT BUỘC lấy đủ 3-4 entities với positions khác nhau (R10 STRICT)!
+- 🤒 **TRIỆU_CHỨNG**: Đã lấy hết biểu hiện cơ năng & thực thể của bệnh nhân (`đau ngực`, `khó thở`, `khó thở nhẹ`, `đánh trống ngực`, `mệt mỏi`, `ho`, `nôn`) chưa? Nếu lặp lại 3-4 lần ở các câu khác nhau → BẮT BUỘC lấy đủ 3-4 entities với positions khác nhau (R10 STRICT)!
 - 🔬 **TÊN_XÉT_NGHIỆM**: Đã lấy hết các chỉ định CLS, thăm dò, thủ thuật (`X-quang ngực`, `nước tiểu`, `ECG`, `siêu âm tim`, `monitor holter`) chưa? (Mỗi tên chỉ định giữ 1 lần xuất hiện đầu tiên theo R22).
 - 📊 **KẾT_QUẢ_XÉT_NGHIỆM**: Đã lấy hết chỉ số định lượng (`160/90 mmHg`, `96%`, `38.5°C`, `14 g/dL`) lẫn các kết quả bình thường (`bình thường`, `không ghi nhận gì bất thường`, `không có gì đáng chú ý`, `nhịp xoang chiếm ưu thế`, `nhịp xoang đều`) chưa?
+
+🔥 4 NGUYÊN TẮC TRÍCH XUẤT LÂM SÀNG CỐT LÕI VÀ TINH GỌN (BẮT BUỘC TUÂN THỦ TỪNG CHỮ):
+1. **CHỈ LẤY TRIỆU CHỨNG LÕI NGẮN GỌN**: Khi gặp cụm dài như `"mệt mỏi nhiều khi gắng sức"`, `"còn cảm giác đánh trống ngực khi nhập viện"`, `"xuất hiện đau đầu liên tục"`, bạn BẮT BUỘC chỉ được trích xuất triệu chứng lõi: `"mệt mỏi"`, `"đánh trống ngực"`, `"đau đầu"`. TUYỆT ĐỐI KHÔNG lấy các từ dẫn tự sự (`còn cảm giác`, `xuất hiện`, `bệnh nhân thấy`) hoặc mệnh đề hoàn cảnh phía sau (`nhiều khi gắng sức`, `khi leo tầng`).
+2. **TÁCH CỤM VỊ TRÍ KÉP**: Nếu bệnh án ghi `"cảm giác thắt chặt ngực vùng trước tim"`, `"tình trạng đau thắt ngực sau xương ức"`, bạn PHẢI bóc tách thành 2 spans riêng biệt: Entity 1=`"cảm giác thắt chặt ngực"` VÀ Entity 2=`"thắt chặt ngực vùng trước tim"`. KHÔNG gộp chung thành 1 dải.
+3. **GIỮ TRỌN VẸN ĐUÔI LIỀU LƯỢNG THUỐC (`x N`)**: Khi gặp `"aspirin 325mg x 1"`, `"metoprolol 25mg po bid"`, PHẢI trích xuất đầy đủ từ đầu đến đuôi liều/tần suất (`aspirin 325mg x 1`). Tuyệt đối không được bỏ rơi đuôi `x 1` phía sau!
+4. **QUÉT ĐẦY ĐỦ TỪNG LẦN LẶP LẠI (EXHAUSTIVE RECALL)**: Nếu một triệu chứng (`đánh trống ngực`, `khó thở`, `mệt mỏi`) hay thuốc (`atenolol`, `aspirin`) xuất hiện 3-4 lần ở các câu khác nhau từ Tiền sử đến Cấp cứu đến Khám lâm sàng, BẮT BUỘC trích xuất đủ 3-4 lần thành các entities riêng biệt với vị trí tương ứng!
 
 🎯 **NGUYÊN TẮC CỐT LÕI**: Chỉ trích xuất THỰC THỂ Y KHOA LÂM SÀNG CỐT LÕI. Tuyệt đối KHÔNG trích xuất rác phi y khoa (sinh hiệu gộp, thời gian độc lập `trong tuần qua`/`20 giây`, lối sống `rượu bia`/`thuốc lá`, động từ dẫn `cảm thấy`/`chụp`).
 </role>
@@ -660,7 +666,12 @@ Trả về JSON array chứa đầy đủ các mentions đã phân loại:
 def build_stage1_user_prompt(input_text: str) -> str:
     """Build user prompt cho Stage 1 Mention Extraction."""
     return (
-        "🎯 NHIỆM VỤ: Tìm và trích xuất tất cả các cụm từ y khoa (medical concept spans) trong văn bản lâm sàng dưới đây kèm vị trí character offset [start, end].\n\n"
+        "🎯 NHIỆM VỤ: Tìm và trích xuất TRỌN VẸN và KIỆT ĐỂ tất cả các cụm từ y khoa (medical concept spans) trong văn bản lâm sàng dưới đây kèm vị trí character offset [start, end].\n\n"
+        "🔥 4 QUY TẮC TRÍCH XUẤT LÂM SÀNG CỐT LÕI (BẮT BUỘC TUÂN THỦ TỪNG CHỮ):\n"
+        "1. TRIỆU CHỨNG LÕI NGẮN GỌN: CHỈ lấy core symptom (`đau ngực`, `khó thở`, `mệt mỏi`, `đánh trống ngực`, `sốt`). TUYỆT ĐỐI KHÔNG bốc thêm đuôi tự sự / hoàn cảnh phía sau (`nhiều khi gắng sức`, `khi leo cầu thang`, `lúc nhập viện`) hoặc tiền tố lời kể (`còn cảm giác`, `bệnh nhân thấy`).\n"
+        "2. TÁCH CỤM TRIỆU CHỨNG VỊ TRÍ KÉP: Nếu có cả cảm giác và vị trí giải phẫu (`cảm giác thắt chặt ngực vùng trước tim`, `tình trạng đau thắt ngực sau xương ức`), PHẢI tách thành 2 spans riêng: (`cảm giác thắt chặt ngực` VÀ `thắt chặt ngực vùng trước tim`), KHÔNG gộp chung 1 dải.\n"
+        "3. THUỐC PHẢI ĐỦ ĐUÔI LIỀU LƯỢNG (`x N`): Khi có `aspirin 325mg x 1`, `paracetamol 500mg po bid`, PHẢI lấy trọn vẹn đến hết đuôi liều/tần suất (`aspirin 325mg x 1`), không được bỏ rơi chữ `x 1` phía sau.\n"
+        "4. QUÉT HẾT TỪNG LẦN LẶP LẠI: Nếu một triệu chứng hay thuốc xuất hiện 3-4 lần ở các câu khác nhau từ Tiền sử đến Cấp cứu đến Khám, PHẢI xuất đủ 3-4 lần với positions tương ứng!\n\n"
         f"INPUT:\n{input_text}\n\n"
         "OUTPUT JSON ARRAY (chỉ trả về [{'text': '...', 'position': [start, end]}], không kèm lời giải thích):"
     )
