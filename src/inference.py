@@ -260,7 +260,7 @@ def _call_with_retry(
 # ---------------------------------------------------------------------- #
 
 
-def _split_into_sections(text: str, max_chunk_len: int = 1400, overlap_len: int = 300) -> list[tuple[str, int]]:
+def _split_into_sections(text: str, max_chunk_len: int = 750, overlap_len: int = 200) -> list[tuple[str, int]]:
     """Tách bài án dài thành các chunks theo sliding window có vùng gối đầu (overlap) và giữ nguyên absolute offset.
 
     Trả về danh sách tuple: (chunk_text, chunk_offset_in_original_text).
@@ -446,9 +446,9 @@ def process_record(
             len(highlighted_input) - len(cleaned_input),
         )
 
-    # Section-Based Chunking: nếu bài án dài (> 1400 chars), tách thành các chunks theo đoạn
+    # Section-Based Chunking: nếu bài án dài (> 750 chars), tách thành các chunks theo đoạn
     # để LLM càn quét kiệt để từng đoạn nhỏ, triệt tiêu hiện tượng mỏi (fatigue) bỏ sót entities ở cuối.
-    chunks = _split_into_sections(highlighted_input, max_chunk_len=1400)
+    chunks = _split_into_sections(highlighted_input, max_chunk_len=750, overlap_len=200)
     if len(chunks) > 1:
         logger.info(
             "[%d] Section-Based Chunking: Input %d chars → tách %d chunks để NER kiệt để",

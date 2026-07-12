@@ -1397,6 +1397,10 @@ _DROP_NOISE_PATTERNS = [
     re.compile(r"^sau\s+đó.*$", re.IGNORECASE | re.UNICODE),
     re.compile(r"^xỉu\s+trước$", re.IGNORECASE | re.UNICODE),
     re.compile(r"^ngất\s+xỉu\s*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^uống\s+hôm\s+nay$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^hôm\s+nay$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^trong\s+(?:ngày|tuần\s+qua|tuần|tháng|năm)$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^(?:uống|dùng)\s+(?:trước|sau|khi|trong)\s+.*$", re.IGNORECASE | re.UNICODE),
 ]
 
 # Pure duration (R28.2) - standalone time expression should not be entity
@@ -1506,6 +1510,19 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
             ).strip()
             if stripped_paren and stripped_paren != text_new:
                 text_new = stripped_paren
+
+        # Strip "Tăng" / "Giảm" prefixes when they precede basic symptoms (CẤM 3)
+        if text_new.lower().startswith(("tăng ", "giảm ")) and any(k in text_new.lower() for k in ("đánh trống ngực", "khó thở", "đau ngực", "nhịp tim")):
+            text_new = re.sub(r"^(?:tăng|giảm)\s+", "", text_new, flags=re.IGNORECASE).strip()
+
+        # Fix stutter/repeat phrases (e.g., "Khó thở nhẹ khó thở" -> "Khó thở nhẹ")
+        parts = text_new.split()
+        if len(parts) >= 4:
+            parts_lower = [p.lower() for p in parts]
+            if parts_lower[:2] == parts_lower[-2:]:
+                text_new = " ".join(parts[:-2])
+            elif len(parts) % 2 == 0 and parts_lower[:len(parts)//2] == parts_lower[len(parts)//2:]:
+                text_new = " ".join(parts[:len(parts)//2])
 
         if text_new != text and len(text_new) >= 3:
             logger.debug("Clean: strip leading/trailing '%s' → '%s'", text, text_new)
