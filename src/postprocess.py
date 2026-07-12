@@ -384,20 +384,24 @@ def _validate_stage1_mentions(input_text: str, mentions: list[dict[str, Any]]) -
         if 0 <= pos[0] < pos[1] <= len(input_text):
             actual_text = input_text[pos[0]:pos[1]]
             if actual_text.lower() == text.lower():
-                span = (pos[0], pos[1])
-                if span not in seen_spans:
-                    seen_spans.add(span)
-                    valid.append({"text": actual_text, "position": [pos[0], pos[1]]})
+                # span = (pos[0], pos[1])
+                # [DEACTIVATED TEMPORARILY] Xử lý gộp trùng lặp comment lại sau này sử dụng
+                # if span not in seen_spans:
+                #     seen_spans.add(span)
+                #     valid.append({"text": actual_text, "position": [pos[0], pos[1]]})
+                valid.append({"text": actual_text, "position": [pos[0], pos[1]]})
                 continue
 
         # 5. Fuzzy / closest recovery
         recovered = _try_recover_position(input_text, text, hint_pos)
         if recovered is not None:
             rpos = recovered["position"]
-            span = (rpos[0], rpos[1])
-            if span not in seen_spans:
-                seen_spans.add(span)
-                valid.append(recovered)
+            # span = (rpos[0], rpos[1])
+            # [DEACTIVATED TEMPORARILY] Xử lý gộp trùng lặp comment lại sau này sử dụng
+            # if span not in seen_spans:
+            #     seen_spans.add(span)
+            #     valid.append(recovered)
+            valid.append(recovered)
             continue
 
     return _boost_and_split_stage1_mentions(input_text, valid)
@@ -793,60 +797,46 @@ def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         if start < 0 or end <= start:
             continue
 
-        # Check overlap với existing entities cùng text+type
-        is_duplicate = False
-        to_remove: list[int] = []
-        for idx, existing in enumerate(out):
-            if existing.get("type", "") != etype:
-                continue
-            ex_text = str(existing.get("text", "")).strip()
-            ex_pos = existing.get("position", [0, 0])
-            if not (isinstance(ex_pos, list) and len(ex_pos) == 2):
-                continue
-            e_start, e_end = int(ex_pos[0]), int(ex_pos[1])
-
-            is_exact_text = (ex_text.lower() == text.lower())
-            is_pos_overlap = (max(start, e_start) < min(end, e_end))
-
-            if not is_exact_text:
-                if not is_pos_overlap or not _is_semantic_overlap(ex_text, text):
-                    continue
-
-            # Same exact span → drop current (R22)
-            if start == e_start and end == e_end:
-                is_duplicate = True
-                logger.debug(
-                    "R22 dedup: drop duplicate exact (text=%r, type=%r, pos=[%d,%d])",
-                    text, etype, start, end,
-                )
-                break
-
-            # OVERLAP check: max(start, e_start) < min(end, e_end) → intersect
-            if is_pos_overlap:
-                ex_len = e_end - e_start
-                cur_len = end - start
-                if ex_len >= cur_len:
-                    # Existing span dài hơn hoặc bằng → drop current
-                    is_duplicate = True
-                    logger.debug(
-                        "R10 overlap dedup: drop '%s' [%d,%d] (existing [%d,%d] longer/equal)",
-                        text, start, end, e_start, e_end,
-                    )
-                    break
-                else:
-                    # Current span dài hơn → remove existing, add current
-                    to_remove.append(idx)
-                    logger.debug(
-                        "R10 overlap dedup: replace '%s' [%d,%d] with longer [%d,%d]",
-                        text, e_start, e_end, start, end,
-                    )
-
-        # Remove existing entities that current overlaps AND is longer
-        for idx in reversed(to_remove):
-            out.pop(idx)
-
-        if not is_duplicate:
-            out.append(ent)
+        # [DEACTIVATED TEMPORARILY] Xử lý gộp trùng lặp comment lại sau này sử dụng
+        # is_duplicate = False
+        # to_remove: list[int] = []
+        # for idx, existing in enumerate(out):
+        #     if existing.get("type", "") != etype:
+        #         continue
+        #     ex_text = str(existing.get("text", "")).strip()
+        #     ex_pos = existing.get("position", [0, 0])
+        #     if not (isinstance(ex_pos, list) and len(ex_pos) == 2):
+        #         continue
+        #     e_start, e_end = int(ex_pos[0]), int(ex_pos[1])
+        #
+        #     is_exact_text = (ex_text.lower() == text.lower())
+        #     is_pos_overlap = (max(start, e_start) < min(end, e_end))
+        #
+        #     if not is_exact_text:
+        #         if not is_pos_overlap or not _is_semantic_overlap(ex_text, text):
+        #             continue
+        #
+        #     # Same exact span → drop current (R22)
+        #     if start == e_start and end == e_end:
+        #         is_duplicate = True
+        #         break
+        #
+        #     # OVERLAP check: max(start, e_start) < min(end, e_end) → intersect
+        #     if is_pos_overlap:
+        #         ex_len = e_end - e_start
+        #         cur_len = end - start
+        #         if ex_len >= cur_len:
+        #             is_duplicate = True
+        #             break
+        #         else:
+        #             to_remove.append(idx)
+        #
+        # for idx in reversed(to_remove):
+        #     out.pop(idx)
+        #
+        # if not is_duplicate:
+        #     out.append(ent)
+        out.append(ent)
 
     out.sort(key=lambda e: e["position"][0])
     return out
