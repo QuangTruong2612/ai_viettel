@@ -732,9 +732,10 @@ def _is_semantic_overlap(text_a: str, text_b: str) -> bool:
             return False
     tokens_a = set(re.findall(r'[a-zà-ỹ0-9_/-]+', a)) - {"bệnh", "chứng", "tình", "trạng", "bị", "có", "do", "và", "của"}
     tokens_b = set(re.findall(r'[a-zà-ỹ0-9_/-]+', b)) - {"bệnh", "chứng", "tình", "trạng", "bị", "có", "do", "và", "của"}
-    if not tokens_a or not tokens_b:
-        return False
     if tokens_a.issubset(tokens_b) or tokens_b.issubset(tokens_a):
+        diff = (tokens_b - tokens_a) if tokens_a.issubset(tokens_b) else (tokens_a - tokens_b)
+        if any(w in diff for w in ("vùng", "sau", "tại", "ở", "trước", "tim", "ức", "trái", "phải", "trên", "dưới", "sườn")):
+            return False
         return True
     jaccard = len(tokens_a & tokens_b) / max(len(tokens_a | tokens_b), 1)
     return jaccard >= 0.80

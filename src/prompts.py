@@ -63,9 +63,10 @@ You are an expert Vietnamese Clinical NER Specialist with 20+ years of experienc
 - VD: `"Điều trị: paracetamol 500mg uống khi sốt"` → THUỐC=`"paracetamol 500mg"` (drop "uống khi sốt" - admin instruction)
 
 **B. SECTION "Thuốc đang dùng" / "Thuốc trước khi nhập viện" / "Thuốc trước nhập viện"**:
-- → Extract MỌI drugs trong list, mỗi drug = 1 entity
-- Assertion: `isHistorical` (vì là thuốc TRƯỚC nhập viện)
-- VD: `"Thuốc đang dùng: amlodipine 10mg, metformin 500mg"` → 2 entities riêng
+- → Extract MỌI drugs (THUỐC) VÀ MỌI bệnh lý / chỉ định đi kèm (CHẨN_ĐOÁN) trong list.
+- Assertion: `isHistorical` cho cả thuốc và bệnh lý trong phần này.
+- VD: `"Thuốc đang dùng: amlodipine 10mg, metformin 500mg"` → 2 THUỐC (`isHistorical`)
+- VD: `"doxycycline cho viêm tuyến mồ hôi"` → 1 THUỐC=`"doxycycline"` (`isHistorical`) + 1 CHẨN_ĐOÁN=`"viêm tuyến mồ hôi"` (`isHistorical`)
 
 **C. SECTION "Chẩn đoán ra viện" / "Chẩn đoán xác định" / "Chẩn đoán cuối cùng"**:
 - → Extract MỌI CHẨN_ĐOÁN trong list (thường là chẩn đoán quan trọng nhất)
@@ -670,7 +671,7 @@ def build_stage1_user_prompt(input_text: str) -> str:
         "🔥 5 QUY TẮC TRÍCH XUẤT LÂM SÀNG CỐT LÕI (BẮT BUỘC TUÂN THỦ TỪNG CHỮ):\n"
         "1. TRIỆU CHỨNG LÕI NGẮN GỌN: CHỈ lấy core symptom (`đau ngực`, `khó thở`, `mệt mỏi`, `đánh trống ngực`, `sốt`). TUYỆT ĐỐI KHÔNG bốc thêm đuôi tự sự / hoàn cảnh phía sau (`nhiều khi gắng sức`, `khi leo cầu thang`, `lúc nhập viện`) hoặc tiền tố lời kể/qualifier (`còn cảm giác`, `xuất hiện`, `bệnh nhân thấy`, `ghi nhận`, `có dấu hiệu`).\n"
         "2. TÁCH CỤM TRIỆU CHỨNG VỊ TRÍ KÉP: Nếu có cả cảm giác và vị trí giải phẫu (`cảm giác thắt chặt ngực vùng trước tim`, `tình trạng đau thắt ngực sau xương ức`), PHẢI tách thành 2 spans riêng: (`cảm giác thắt chặt ngực` VÀ `thắt chặt ngực vùng trước tim`), KHÔNG gộp chung 1 dải.\n"
-        "3. CHUẨN HÓA TÊN XÉT NGHIỆM (BỎ ĐỘNG TỪ): Khi lấy TÊN_XÉT_NGHIỆM, TUYỆT ĐỐI KHÔNG lấy động từ chỉ định phía trước (`chụp`, `đo`, `làm`, `phân tích`, `thực hiện`). Ví dụ: `chụp X-quang ngực` -> CHỈ lấy `X-quang ngực`; `phân tích nước tiểu` -> CHỈ lấy `nước tiểu`; `đo điện tâm đồ` -> CHỈ lấy `điện tâm đồ`.\n"
+        "3. CHUẨN HÓA TÊN XÉT NGHIỆM (BỎ ĐỘNG TỪ CHỈ ĐỊNH): Khi lấy TÊN_XÉT_NGHIỆM, TUYỆT ĐỐI KHÔNG lấy động từ chỉ định phía trước (`chụp`, `đo`, `làm`, `thực hiện`, `tiến hành`). Ví dụ: `chụp X-quang ngực` -> CHỈ lấy `X-quang ngực`; `đo điện tâm đồ` -> CHỈ lấy `điện tâm đồ`. LƯU Ý: Các cụm danh từ xét nghiệm toàn phần như `phân tích nước tiểu`, `siêu âm tim`, `nội soi dạ dày` PHẢI GIỮ NGUYÊN TRỌN VẸN (`phân tích nước tiểu`).\n"
         "4. THUỐC PHẢI ĐỦ ĐUÔI LIỀU LƯỢNG (`x N`): Khi có `aspirin 325mg x 1`, `paracetamol 500mg po bid`, PHẢI lấy trọn vẹn đến hết đuôi liều/tần suất (`aspirin 325mg x 1`), không được bỏ rơi chữ `x 1` phía sau.\n"
         "5. QUÉT HẾT TỪNG LẦN LẶP LẠI: Nếu một triệu chứng hay thuốc xuất hiện 3-4 lần ở các câu khác nhau từ Tiền sử đến Cấp cứu đến Khám, PHẢI xuất đủ 3-4 lần với positions tương ứng!\n\n"
         f"INPUT:\n{input_text}\n\n"
