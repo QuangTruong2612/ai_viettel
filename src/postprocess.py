@@ -48,6 +48,30 @@ _INPUT_MAX_CHARS = 4000
 _TRUNCATION_MARKER = "\n\n[... Đã rút gọn phần giữa để vừa context window ...]\n\n"
 
 
+def _normalize_assertions_list(raw: Any) -> list[str]:
+    """Chuẩn hóa assertions từ LLM (xử lý an toàn khi LLM trả về dict, string hay non-list)."""
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        return [raw] if raw in {"isNegated", "isFamily", "isHistorical"} else []
+    if isinstance(raw, dict):
+        raw = list(raw.values()) + list(raw.keys())
+    if not isinstance(raw, (list, tuple, set)):
+        return []
+    out = set()
+    for item in raw:
+        if isinstance(item, str):
+            if item in {"isNegated", "isFamily", "isHistorical"}:
+                out.add(item)
+        elif isinstance(item, dict):
+            for k, v in item.items():
+                if isinstance(v, str) and v in {"isNegated", "isFamily", "isHistorical"}:
+                    out.add(v)
+                elif isinstance(k, str) and k in {"isNegated", "isFamily", "isHistorical"} and v:
+                    out.add(k)
+    return sorted(out)
+
+
 def preprocess_input_for_llm(
     input_text: str,
     max_chars: int = _INPUT_MAX_CHARS,
@@ -977,7 +1001,8 @@ def _filter_lifestyle_entities(entities: list[dict]) -> list[dict]:
             continue
 
         # 4. Chuẩn hóa assertions: TÊN_XÉT_NGHIỆM không bao giờ bị isNegated nếu kết quả bình thường
-        assertions = list(ent.get("assertions", []))
+        assertions = _normalize_assertions_list(ent.get("assertions", []))
+        ent["assertions"] = assertions
         if etype == "TÊN_XÉT_NGHIỆM" and "isNegated" in assertions:
             if not text.lower().startswith(("không ", "chưa ")):
                 assertions = [a for a in assertions if a != "isNegated"]
@@ -1646,7 +1671,7 @@ def _expand_duplicates(entities, input_text):
                 "text": text,
                 "type": ent.get("type", ""),
                 "position": pos,
-                "assertions": list(ent.get("assertions", [])),
+                "assertions": _normalize_assertions_list(ent.get("assertions", [])),
                 "candidates": [],
             }
             expanded.append(new_ent)
@@ -2061,6 +2086,28 @@ def _is_overlap_dup(
     return False, to_remove
 
 
+_NORMAL_FINDING_PATTERNS = re.compile(
+    r"""(?x)
+    ^nhịp\s+xoang(?:\s+(?:chiếm\s+ưu\s+thế|đều|bình\s+thường))?$ |
+    \bbình\s+thường\b |
+    \b(?:âm|dương)\s+tính\b |
+    ^(?:mri|ct|siêu\s+âm|x-quang|pcr|điện\s+tâm\s+đồ)(?::|\s).+ |
+    \bảo\s+giác\s+bình\s+thường\b |
+    \bkhông\s+ghi\s+nhận\s+(?:gì\s+)?(?:bất\s+thường|đáng\s+chú\s+ý)\b |
+    \bkhông\s+thấy\s+tình\s+trạng\b
+    """,
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _is_normal_finding_misclassified_as_diagnosis(text: str) -> bool:
+    """Kiểm tra nếu LLM gán nhầm kết quả xét nghiệm/sinh hiệu bình thường thành CHẨN_ĐOÁN."""
+    norm = text.lower().strip()
+    if any(disease_kw in norm for disease_kw in ("viêm gan", "covid", "hiv", "sốt xuất huyết", "cúm")):
+        return False
+    return bool(_NORMAL_FINDING_PATTERNS.search(norm))
+
+
 def _build_entity_record(
     text: str,
     etype: str,
@@ -2068,10 +2115,10 @@ def _build_entity_record(
     ent: dict[str, Any],
 ) -> dict[str, Any]:
     """Build 1 record dict với assertions cleaned."""
-    assertions = sorted({
-        a for a in ent.get("assertions", [])
-        if a in {"isNegated", "isFamily", "isHistorical"}
-    })
+    if etype == "CHẨN_ĐOÁN" and _is_normal_finding_misclassified_as_diagnosis(text):
+        logger.debug("Auto-correct misclassified finding '%s' from CHẨN_ĐOÁN to KẾT_QUẢ_XÉT_NGHIỆM", text)
+        etype = "KẾT_QUẢ_XÉT_NGHIỆM"
+    assertions = _normalize_assertions_list(ent.get("assertions", []))
     # R27.4: TÊN_XÉT_NGHIỆM không bao giờ isNegated nếu kết quả bình thường
     if etype == "TÊN_XÉT_NGHIỆM" and "isNegated" in assertions:
         if not text.lower().startswith(("không ", "chưa ")):
@@ -2098,6 +2145,11 @@ def _attach_candidates(
 
     Mutates `record["candidates"]` in-place.
     """
+    if etype == "CHẨN_ĐOÁN" or record.get("type") == "CHẨN_ĐOÁN":
+        if _is_normal_finding_misclassified_as_diagnosis(text):
+            record["type"] = "KẾT_QUẢ_XÉT_NGHIỆM"
+            record["candidates"] = []
+            return
     if etype == "THUỐC" and retriever is not None:
         drug_query = sanitize_drug_text(text)
         if drug_query:
@@ -2180,10 +2232,11 @@ def _emit_entity_record(
     # Auto-detect assertions from context if missing or incomplete
     detected = _detect_assertions_from_context(text, input_text, etype, cur_start)
     if detected:
-        existing = set(ent.get("assertions", []))
+        existing = set(_normalize_assertions_list(ent.get("assertions", [])))
         for d in detected:
             if d not in existing:
-                ent.setdefault("assertions", []).append(d)
+                existing.add(d)
+        ent["assertions"] = sorted(existing)
 
     # Build record + attach candidates
     record = _build_entity_record(text, etype, pos, ent)
@@ -2208,7 +2261,7 @@ def validate_output(payload: list[dict[str, Any]]) -> bool:
     for ent in payload:
         if isinstance(ent, dict):
             ent.setdefault("candidates", [])
-            ent.setdefault("assertions", [])
+            ent["assertions"] = _normalize_assertions_list(ent.get("assertions", []))
     try:
         from jsonschema import validate  # type: ignore
 
