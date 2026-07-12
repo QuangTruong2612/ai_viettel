@@ -900,16 +900,15 @@ def _drop_substring_entities(entities: list[dict]) -> list[dict]:
             if ent_j.get("type", "") != type_i:
                 continue
             text_j = str(ent_j.get("text", "")).strip()
-            if not text_j or len(text_j) >= len(text_i):
+            if not text_j or len(text_j) > len(text_i) or (len(text_j) == len(text_i) and j <= i):
                 continue
-            # text_j ngắn hơn text_i: CHỈ drop nếu 2 span có overlap vị trí (intersect) trên văn bản
-            # Tránh drop nhầm các entity độc lập ở vị trí khác chỉ vì trùng substring (vd "đánh trống ngực" vs "Tăng đánh trống ngực" ở 2 đoạn khác nhau)
+            # text_j ngắn hơn hoặc bằng text_i: CHỈ drop nếu 2 span có overlap hoặc kề sát vị trí trên văn bản (+5 chars cho chunk boundaries)
             pos_i = ent_i.get("position", [0, 0])
             pos_j = ent_j.get("position", [0, 0])
             pos_overlap = (
                 isinstance(pos_i, list) and isinstance(pos_j, list)
                 and len(pos_i) == 2 and len(pos_j) == 2
-                and max(pos_i[0], pos_j[0]) < min(pos_i[1], pos_j[1])
+                and max(pos_i[0], pos_j[0]) < min(pos_i[1], pos_j[1]) + 6
             )
             if pos_overlap and (text_j in text_i or _is_semantic_overlap(text_j, text_i)):
                 drop_indices.add(j)
@@ -1026,9 +1025,11 @@ def sanitize_drug_text(text: str) -> str:
 # Leading verb/qualifier cần STRIP khi ở đầu TRIỆU_CHỨNG/CHẨN_ĐOÁN
 # (giữ lại canonical names như "tăng huyết áp" qua whitelist)
 _LEADING_VERB_QUALIFIER_RE = re.compile(
-    r"^(cảm\s+giác|cảm\s+thấy|thấy|có\s+dấu\s+hiệu|có\s+triệu\s+chứng|"
-    r"có\s+cảm\s+giác|nhận\s+thấy|ghi\s+nhận|"
-    r"có\s+|bị\s+|xuất\s+hiện\s+|biểu\s+hiện\s+|xảy\s+ra\s+|phát\s+hiện\s+|gặp\s+phải\s+)\s*",
+    r"^(không\s+còn\s+cảm\s+giác|không\s+có\s+cảm\s+giác|còn\s+cảm\s+giác|không\s+còn\s+|không\s+có\s+|không\s+thấy\s+|"
+    r"còn\s+|tình\s+trạng\s+|cảm\s+giác\s+|cảm\s+thấy\s+|thấy\s+|có\s+dấu\s+hiệu\s+|có\s+triệu\s+chứng\s+|"
+    r"có\s+cảm\s+giác\s+|nhận\s+thấy\s+|ghi\s+nhận\s+|"
+    r"có\s+|bị\s+|xuất\s+hiện\s+|biểu\s+hiện\s+|xảy\s+ra\s+|phát\s+hiện\s+|gặp\s+phải\s+|"
+    r"tăng\s+|giảm\s+|nhiều\s+|ít\s+)\s*",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -1133,24 +1134,30 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
         if text_lower in _CANONICAL_KEEP_PREFIX:
             return text
 
+        # === BƯỚC 5: Sửa "dính chữ" (Missing space) trước khi strip qualifier ===
+        # Trường hợp thực tế: "cảm giáckhó chịu" → "cảm giác khó chịu", "tình trạngkhó thở" → "tình trạng khó thở"
+        # Bắt cụm từ chỉ định (giác, trạng, chứng, tình, hiện...) bị dính liền vào phụ âm tiếp theo (k, b, d, đ, m, l, s, t, v, x)
+        _MISSING_SPACE_RE = re.compile(
+            r"(giác|trạng|chứng|tình|hiện|xuất|phát|ghi|nhận|luồng|bệnh|dấu|biểu)"
+            r"([kbdđghklmnpqrstvx]{1,3}[aăâeêiôơouưAĂÂEÊIÔƠOUƯàáảãạăắằẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ])",
+            re.UNICODE | re.IGNORECASE
+        )
+        m = _MISSING_SPACE_RE.search(text)
+        if m:
+            fixed = text[:m.end(1)] + " " + text[m.end(1):]
+            logger.debug("Clean: fix missing space '%s' → '%s'", text, fixed)
+            text = fixed
+
         # Strip leading verb/qualifier (regex non-greedy)
         text_new = _LEADING_VERB_QUALIFIER_RE.sub("", text, count=1).strip()
 
         # === Strip trailing duration / time expression (comprehensive) ===
-        # Covers: "trong tuần qua", "trong 3 ngày qua", "kéo dài 30 phút",
-        #         "cách 10 ngày trước", "10 năm", "30 phút", etc.
         trailing_duration_patterns = [
-            # "trong X (time-unit) (qua|trước|sau)" with optional number
             r"\s+trong\s+\d*\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm)\s*(?:qua|trước|sau)?$",
-            # "cách X (time-unit) (trước|sau)"
             r"\s+cách\s+\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm)\s*(?:trước|sau)?$",
-            # "kéo dài X (time-unit)"
             r"\s+kéo\s+dài\s+\d*\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm)$",
-            # "khởi phát lúc X giờ"
             r"\s+khởi\s+phát\s+lúc\s+\d+\s*(?:giây|phút|giờ|ngày)?$",
-            # Standalone "X (time-unit)" at end
             r"\s+\d+\s+(?:giây|phút|giờ|ngày|tuần|tháng|năm)(?:\s+(?:qua|trước|sau))?$",
-            # "trong (tuần|ngày|tháng|năm) (qua|trước|sau)" without number
             r"\s+trong\s+(?:tuần|ngày|tháng|năm)\s+(?:qua|trước|sau)$",
         ]
         for pattern in trailing_duration_patterns:
@@ -2101,15 +2108,17 @@ def _attach_candidates(
                 logger.warning("RxNorm lookup fail for '%s': %s", text, exc)
     elif etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG") and icd_retriever is not None:
         # ICD lookup cần other_entities context (drugs/symptoms nearby)
+        # entity_type được truyền để TRIỆU_CHỨNG không bị lệch sang bệnh lý/cơ xương
         other_ents = [
             e for e in validated
             if e.get("text", "").strip() and e is not ent
         ]
         try:
-            codes = icd_retriever.lookup(text, other_entities=other_ents)
+            codes = icd_retriever.lookup(text, other_entities=other_ents, entity_type=etype)
             record["candidates"] = list(codes) if codes else []
         except Exception as exc:
             logger.warning("ICD lookup fail for '%s' (%s): %s", text, etype, exc)
+
 
 
 def _emit_entity_record(

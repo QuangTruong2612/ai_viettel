@@ -491,7 +491,7 @@ class ICDRetriever:
 
     # ------------------------------------------------------------------ #
 
-    def _filter_and_sort_codes(self, codes: list[str], text: str, other_entities: list[dict] | None = None) -> list[str]:
+    def _filter_and_sort_codes(self, codes: list[str], text: str, other_entities: list[dict] | None = None, entity_type: str = "") -> list[str]:
         if not codes:
             return []
         filtered = _filter_irrelevant_codes(list(codes), text, self.idx)
@@ -500,7 +500,7 @@ class ICDRetriever:
         restricted = _restrict_chapter(filtered, text)
         result = restricted if restricted else filtered
         
-        boosted_prefixes = _get_boosted_prefixes(other_entities)
+        boosted_prefixes = _get_boosted_prefixes(other_entities) if entity_type != "TRIỆU_CHỨNG" else set()
 
         # Smart sorting: ưu tiên các chương bệnh phổ biến cho người lớn (I, J, K, E, N, M, S, T, C, D, G, A, B, R)
         # đẩy O (thai sản), P (sơ sinh), V/W/X/Y (tác nhân bên ngoài), Z (tiền căn) xuống dưới nếu không rõ
@@ -508,6 +508,9 @@ class ICDRetriever:
             if not code:
                 return (99, code)
             ch = code[0].upper()
+            # Với TRIỆU_CHỨNG → ưu tiên chapter R (Signs & Symptoms) trước tất cả
+            if entity_type == "TRIỆU_CHỨNG" and ch == 'R':
+                return (0, code)
             if ch in ('I', 'J', 'K', 'E', 'N', 'M', 'C', 'D', 'G', 'A', 'B', 'R', 'S', 'T'):
                 return (1, code)
             if ch in ('L', 'H', 'F'):
@@ -569,6 +572,13 @@ class ICDRetriever:
                 if code.startswith('C') or (code.startswith('D') and code[1:3].isdigit() and int(code[1:3]) <= 48):
                     penalty -= 0.5
 
+            # Với TRIỆU_CHỨNG: ưu tiên R-chapter code hàng đầu, giảm penalty cho M/S/T
+            if entity_type == "TRIỆU_CHỨNG":
+                if code[0].upper() == 'R':
+                    penalty -= 1.5  # bonus mạnh cho chapter R (triệu chứng)
+                elif code[0].upper() in ('M', 'S', 'T', 'L'):
+                    penalty += 1.0  # penalty nhẹ cho musculo-skeletal/injury khi lookup triệu chứng
+
             idx = result.index(code) if code in result else 999
             return (penalty, 0 if code[0].upper() in ('I', 'J', 'K', 'E', 'N', 'M', 'C', 'D', 'G', 'A', 'B', 'R', 'S', 'T') else 1, idx)
 
@@ -589,6 +599,7 @@ class ICDRetriever:
         vn_text: str,
         context_query: str | None = None,
         other_entities: list[dict] | None = None,
+        entity_type: str = "",
     ) -> list[str]:
         """Tra ICD-10 cho 1 cụm chẩn đoán tiếng Việt (có tự động tách chẩn đoán kép)."""
         if not vn_text:
@@ -596,7 +607,7 @@ class ICDRetriever:
         if not hasattr(self, '_cache'):
             self._cache = {}
         other_key = tuple(sorted((str(e.get("text", "")).strip().lower(), str(e.get("type", ""))) for e in (other_entities or []))) if other_entities else ()
-        cache_key = (vn_text.strip().lower(), context_query, other_key)
+        cache_key = (vn_text.strip().lower(), context_query, other_key, entity_type)
         if cache_key in self._cache:
             return list(self._cache[cache_key])
 
@@ -605,13 +616,13 @@ class ICDRetriever:
             logger.debug("Multi-hop splitting '%s' → %s", vn_text, parts)
             out = []
             for p in parts:
-                codes = self._lookup_single(p, context_query, other_entities)
+                codes = self._lookup_single(p, context_query, other_entities, entity_type=entity_type)
                 for c in codes:
                     if c not in out:
                         out.append(c)
             result = out[:4]
         else:
-            result = self._lookup_single(vn_text, context_query, other_entities)
+            result = self._lookup_single(vn_text, context_query, other_entities, entity_type=entity_type)
 
         if len(self._cache) > 4096:
             self._cache.clear()
@@ -623,6 +634,7 @@ class ICDRetriever:
         vn_text: str,
         context_query: str | None = None,
         other_entities: list[dict] | None = None,
+        entity_type: str = "",
     ) -> list[str]:
         if not vn_text:
             return []
@@ -636,24 +648,24 @@ class ICDRetriever:
             key_lower = text.lower().strip()
             if key_lower in self._icd_vn_to_codes:
                 logger.debug("L0 short-circuit direct match: '%s' → %s", text, self._icd_vn_to_codes[key_lower])
-                return self._filter_and_sort_codes(self._icd_vn_to_codes[key_lower], text, other_entities=other_entities)[:2]
+                return self._filter_and_sort_codes(self._icd_vn_to_codes[key_lower], text, other_entities=other_entities, entity_type=entity_type)[:2]
 
         # L1: Exact (cao độ tin cậy nhất — cap 2)
         key = text.lower()
         if key in self.idx.exact:
-            return self._filter_and_sort_codes(self.idx.exact[key], text, other_entities=other_entities)[:2]
+            return self._filter_and_sort_codes(self.idx.exact[key], text, other_entities=other_entities, entity_type=entity_type)[:2]
 
         # L1.5: VN prefix exact match — nếu text là prefix của desc_vi
         prefix_codes = self._exact_match_vn_prefix(text)
         if prefix_codes:
-            return self._filter_and_sort_codes(prefix_codes, text, other_entities=other_entities)[:2]
+            return self._filter_and_sort_codes(prefix_codes, text, other_entities=other_entities, entity_type=entity_type)[:2]
 
         # L1.7 (NEW 2026-07-10): VN substring match (text chứa trong desc_vi)
         if len(text) >= 5:
             substring_codes = self._exact_match_vn_substring(text)
             if substring_codes:
                 logger.debug("L1.7 substring match '%s' → %s", text, substring_codes[:2])
-                return self._filter_and_sort_codes(substring_codes, text, other_entities=other_entities)[:2]
+                return self._filter_and_sort_codes(substring_codes, text, other_entities=other_entities, entity_type=entity_type)[:2]
 
         # L2: Build query có context cho BM25 (dùng nearby drugs/symptoms)
         bm25_query = build_context_query(text, "CHẨN_ĐOÁN", other_entities)
@@ -679,18 +691,18 @@ class ICDRetriever:
 
             if rrf_scores:
                 sorted_codes = sorted(rrf_scores.keys(), key=lambda c: -rrf_scores[c])
-                return self._filter_and_sort_codes(sorted_codes[:6], text, other_entities=other_entities)[:2]
+                return self._filter_and_sort_codes(sorted_codes[:6], text, other_entities=other_entities, entity_type=entity_type)[:2]
 
         # L4: Local fuzzy match trên names VN (threshold 75, cap 2)
         fuzzy_vn = self._fuzzy_local(text, threshold=75)
         if fuzzy_vn:
-            return self._filter_and_sort_codes(fuzzy_vn, text, other_entities=other_entities)[:2]
+            return self._filter_and_sort_codes(fuzzy_vn, text, other_entities=other_entities, entity_type=entity_type)[:2]
 
         # L5: BM25 fallback (top-2 — strict hơn cho Set-based F1)
         if self.local_search is not None and hasattr(self.local_search, 'bm25_index'):
             bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=2)
             if bm25_codes:
-                bm25_codes = self._filter_and_sort_codes(bm25_codes, text, other_entities=other_entities)
+                bm25_codes = self._filter_and_sort_codes(bm25_codes, text, other_entities=other_entities, entity_type=entity_type)
                 if bm25_codes:
                     return bm25_codes[:2]
 
@@ -699,16 +711,16 @@ class ICDRetriever:
             substring_codes = self._exact_match_vn_substring(text)
             if substring_codes:
                 logger.debug("L6 substring fallback '%s' → %s", text, substring_codes[:2])
-                return self._filter_and_sort_codes(substring_codes, text, other_entities=other_entities)[:2]
+                return self._filter_and_sort_codes(substring_codes, text, other_entities=other_entities, entity_type=entity_type)[:2]
 
         if _text_matches_chapter_keyword(text):
             prefix_codes = self._exact_match_vn_prefix(text)
             if prefix_codes:
-                return self._filter_and_sort_codes(prefix_codes, text, other_entities=other_entities)[:2]
+                return self._filter_and_sort_codes(prefix_codes, text, other_entities=other_entities, entity_type=entity_type)[:2]
             chapter_codes = self._chapter_codes_lookup(text)
             if chapter_codes:
                 logger.debug("L6 chapter lookup '%s' → %s", text, chapter_codes[:2])
-                return self._filter_and_sort_codes(chapter_codes, text, other_entities=other_entities)[:2]
+                return self._filter_and_sort_codes(chapter_codes, text, other_entities=other_entities, entity_type=entity_type)[:2]
 
         if self.local_search is not None:
             low_threshold_codes = self.local_search.search(
@@ -716,7 +728,7 @@ class ICDRetriever:
             ) or []
             if low_threshold_codes:
                 logger.debug("L6 low-threshold vector '%s' → %s", text, low_threshold_codes[:2])
-                return self._filter_and_sort_codes(low_threshold_codes, text, other_entities=other_entities)[:2]
+                return self._filter_and_sort_codes(low_threshold_codes, text, other_entities=other_entities, entity_type=entity_type)[:2]
 
         return []  # noqa: RET504
 
