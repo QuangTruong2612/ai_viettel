@@ -718,7 +718,7 @@ def _is_semantic_overlap(text_a: str, text_b: str) -> bool:
     b = text_b.strip().lower()
     if not a or not b:
         return False
-    if a == b or a in b or b in a:
+    if a == b:
         return True
     # Check for conflicting numbers, letters, or antonyms (type 1 vs type 2, trái vs phải)
     nums_a = set(re.findall(r'\b\d+\b', a))
@@ -732,9 +732,13 @@ def _is_semantic_overlap(text_a: str, text_b: str) -> bool:
             return False
     tokens_a = set(re.findall(r'[a-zà-ỹ0-9_/-]+', a)) - {"bệnh", "chứng", "tình", "trạng", "bị", "có", "do", "và", "của"}
     tokens_b = set(re.findall(r'[a-zà-ỹ0-9_/-]+', b)) - {"bệnh", "chứng", "tình", "trạng", "bị", "có", "do", "và", "của"}
-    if tokens_a.issubset(tokens_b) or tokens_b.issubset(tokens_a):
-        diff = (tokens_b - tokens_a) if tokens_a.issubset(tokens_b) else (tokens_a - tokens_b)
-        if any(w in diff for w in ("vùng", "sau", "tại", "ở", "trước", "tim", "ức", "trái", "phải", "trên", "dưới", "sườn")):
+    if a in b or b in a or tokens_a.issubset(tokens_b) or tokens_b.issubset(tokens_a):
+        diff = (tokens_b - tokens_a) if (tokens_a.issubset(tokens_b) or a in b) else (tokens_a - tokens_b)
+        # Nguyên tắc tổng quát (Zero-Hardcoding cơ quan giải phẫu):
+        # Nếu phần khác biệt (diff) chứa >= 2 từ khóa riêng biệt (hoặc cụm từ có độ dài đáng kể),
+        # chứng tỏ 2 dải có phạm vi định vị/hoàn cảnh khác nhau (vd: "cảm giác..." vs "...vùng trước tim", "...hố chậu phải").
+        degree_words = {"độ", "giai", "đoạn", "cấp", "mạn", "mãn", "nhẹ", "nặng", "vừa", "nhiều", "ít", "từng", "cơn", "i", "ii", "iii", "iv", "1", "2", "3", "4"}
+        if len(diff) >= 2 and not diff.issubset(degree_words):
             return False
         return True
     jaccard = len(tokens_a & tokens_b) / max(len(tokens_a | tokens_b), 1)
@@ -971,8 +975,14 @@ def _detect_assertions_from_context(
     section_id = _find_current_section(input_text, pos)
     is_in_tien_su = (section_id == "tien_su")
 
-    # isHistorical: CHỉ áp dụng nếu entity trong section "Tiền sử"
-    if is_in_tien_su:
+    # isHistorical: Áp dụng nếu entity trong section "Tiền sử" hoặc câu lân cận có từ khóa tiền sử/quá khứ rõ ràng
+    near_hist_raw = text_lower[max(0, pos - 100):min(len(text_lower), pos + len(entity_text) + 60)]
+    hist_triggers = (
+        "tiền sử", "cách đây", "từng bị", "từng điều trị", "đã từng", "bệnh cũ", "nhồi máu cũ",
+        "năm trước", "tháng trước", "tuần trước", "tại nhà", "trước nhập viện", "đang điều trị trước",
+        "tiền căn", "bệnh sử cũ", "thuốc đang dùng trước", "thuốc trước đây"
+    )
+    if is_in_tien_su or any(re.search(r'\b' + re.escape(h) + r'\b', near_hist_raw, re.UNICODE) for h in hist_triggers):
         found.append("isHistorical")
 
     # isFamily: sử dụng re.UNICODE và patterns đầy đủ cho tiếng Việt
@@ -1209,7 +1219,7 @@ def _drop_substring_entities(entities: list[dict]) -> list[dict]:
                 and len(pos_i) == 2 and len(pos_j) == 2
                 and max(pos_i[0], pos_j[0]) < min(pos_i[1], pos_j[1]) + 6
             )
-            if pos_overlap and (text_j in text_i or _is_semantic_overlap(text_j, text_i)):
+            if pos_overlap and _is_semantic_overlap(text_j, text_i):
                 drop_indices.add(j)
                 logger.debug(
                     "Drop substring/semantic entity '%s' (subset of '%s' at pos %s vs %s)",
@@ -2582,9 +2592,12 @@ def _emit_entity_record(
                 existing.add(d)
         ent["assertions"] = sorted(existing)
 
-    # Sanity check isHistorical: CHỈ giữ isHistorical nếu section thực sự là tien_su
+    # Sanity check isHistorical: Giữ isHistorical nếu section là tien_su hoặc câu lân cận có từ khóa tiền sử rõ ràng
     if "isHistorical" in ent.get("assertions", []):
-        if _find_current_section(input_text, cur_start) != "tien_su":
+        is_sec_hist = (_find_current_section(input_text, cur_start) == "tien_su")
+        near_hist_slice = input_text.lower()[max(0, cur_start - 100):min(len(input_text), cur_start + len(text) + 60)]
+        hist_trigs = ("tiền sử", "cách đây", "từng bị", "từng điều trị", "đã từng", "bệnh cũ", "nhồi máu cũ", "năm trước", "tháng trước", "tuần trước", "tại nhà", "trước nhập viện", "đang điều trị trước", "tiền căn", "bệnh sử cũ", "thuốc đang dùng trước")
+        if not (is_sec_hist or any(re.search(r'\b' + re.escape(h) + r'\b', near_hist_slice, re.UNICODE) for h in hist_trigs)):
             ent["assertions"] = [a for a in ent.get("assertions", []) if a != "isHistorical"]
 
     # Build record + attach candidates
