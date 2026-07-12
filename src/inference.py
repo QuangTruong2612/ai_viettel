@@ -395,6 +395,16 @@ def process_record(
     else:
         sorted_few_shot = few_shot
 
+    if few_shot_stage2 and len(few_shot_stage2) > 4:
+        paired_s2 = [few_shot_stage2[i:i+2] for i in range(0, len(few_shot_stage2), 2) if i+1 < len(few_shot_stage2)]
+        if paired_s2:
+            paired_s2.sort(key=lambda pair: -_score_few_shot_item(pair[0]))
+            sorted_few_shot_stage2 = [msg for pair in paired_s2 for msg in pair]
+        else:
+            sorted_few_shot_stage2 = sorted(few_shot_stage2, key=lambda item: -_score_few_shot_item(item))
+    else:
+        sorted_few_shot_stage2 = few_shot_stage2 or []
+
     if user_prompt_len > 8000:
         adaptive_few_shot = sorted_few_shot[:12]
         logger.debug("[%d] Adaptive: keep 6 pairs (12 msgs) domain-ranked few-shot (input len=%d > 8000)",
@@ -499,7 +509,7 @@ def process_record(
             logger.warning("[%d] Stage 1 không tìm thấy mention nào hợp lệ.", rec_id)
         else:
             # Stage 2: Classification in batches (max 35 mentions per call)
-            s2_history = few_shot_stage2[:12] if few_shot_stage2 else []
+            s2_history = sorted_few_shot_stage2[:16] if sorted_few_shot_stage2 else []
             batch_size = 35
             for i in range(0, len(validated_mentions), batch_size):
                 batch = validated_mentions[i : i + batch_size]
@@ -748,9 +758,16 @@ def main(argv: list[str] | None = None) -> int:
     # Lưu ý: chars/4 heuristic underestimate ~60% cho VN. Dùng chars/2.5 (Qwen2.5 ratio)
     # để budget chính xác hơn.
     use_two_stage = not args.no_two_stage
-    if use_two_stage and Path("data/examples_stage1.jsonl").exists() and Path("data/examples_stage2.jsonl").exists():
-        s1_ex = load_few_shot(Path("data/examples_stage1.jsonl"))
-        s2_ex = load_few_shot(Path("data/examples_stage2.jsonl"))
+    s1_path = args.data_dir / "examples_stage1.jsonl"
+    if not s1_path.exists():
+        s1_path = _PROJECT_ROOT / "data" / "examples_stage1.jsonl"
+    s2_path = args.data_dir / "examples_stage2.jsonl"
+    if not s2_path.exists():
+        s2_path = _PROJECT_ROOT / "data" / "examples_stage2.jsonl"
+
+    if use_two_stage and s1_path.exists() and s2_path.exists():
+        s1_ex = load_few_shot(s1_path)
+        s2_ex = load_few_shot(s2_path)
         few_shot = format_few_shot_messages(s1_ex)
         few_shot_stage2 = format_few_shot_stage2_messages(s2_ex)
         logger.info("Two-Stage Pipeline mode: loaded %d S1 and %d S2 few-shot examples.", len(s1_ex), len(s2_ex))
@@ -759,7 +776,7 @@ def main(argv: list[str] | None = None) -> int:
         few_shot = format_few_shot_messages(all_examples)
         few_shot_stage2 = None
         if use_two_stage:
-            logger.info("Two-Stage Pipeline mode (using universal few_shot fallback).")
+            logger.info("Two-Stage Pipeline mode (using universal few_shot fallback from %s).", _PROJECT_ROOT / "data" / "examples.jsonl")
         else:
             logger.info("Single-Pass Pipeline mode (--no-two-stage).")
 
