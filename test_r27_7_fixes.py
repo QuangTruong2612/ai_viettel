@@ -49,8 +49,11 @@ def test_1_split_dien_tam_do():
     if result[1]["type"] != "KẾT_QUẢ_XÉT_NGHIỆM":
         print(f"❌ FAIL: entity 2 type should be 'KẾT_QUẢ_XÉT_NGHIỆM', got '{result[1]['type']}'")
         return False
-    if result[1]["position"][0] != result[0]["position"][1]:
-        print(f"❌ FAIL: entity 2 position not contiguous")
+    if input_text[result[0]["position"][0]:result[0]["position"][1]] != result[0]["text"]:
+        print(f"❌ FAIL: entity 1 span incorrect")
+        return False
+    if input_text[result[1]["position"][0]:result[1]["position"][1]] != result[1]["text"]:
+        print(f"❌ FAIL: entity 2 span incorrect")
         return False
 
     print("✅ PASS test_1_split_dien_tam_do")

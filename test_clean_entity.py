@@ -22,9 +22,9 @@ def test_strip_leading_qualifier():
     """Strip leading verb/qualifier cho TRIỆU_CHỨNG/CHẨN_ĐOÁN."""
     cases = [
         # (input, etype, expected)
-        ("cảm giác đánh trống ngực", "TRIỆU_CHỨNG", "đánh trống ngực"),
-        ("cảm giác thắt chặt ngực vùng trước tim", "TRIỆU_CHỨNG", "thắt chặt ngực vùng trước tim"),
-        ("tăng đánh trống ngực", "TRIỆU_CHỨNG", "đánh trống ngực"),
+        ("cảm giác đánh trống ngực", "TRIỆU_CHỨNG", "cảm giác đánh trống ngực"),
+        ("cảm giác thắt chặt ngực vùng trước tim", "TRIỆU_CHỨNG", "cảm giác thắt chặt ngực vùng trước tim"),
+        ("tăng đánh trống ngực", "TRIỆU_CHỨNG", "tăng đánh trống ngực"),
         ("có triệu chứng đau ngực", "TRIỆU_CHỨNG", "đau ngực"),
         ("bị đau đầu", "TRIỆU_CHỨNG", "đau đầu"),
         ("xuất hiện khó thở", "TRIỆU_CHỨNG", "khó thở"),
@@ -142,10 +142,10 @@ def test_real_data_from_output_1():
         # (text, type, expected)
         ("atenolol (uống hôm nay)", "THUỐC", "atenolol"),
         ("10 ngày trước", "TRIỆU_CHỨNG", None),  # DROP
-        ("cảm giác đánh trống ngực", "TRIỆU_CHỨNG", "đánh trống ngực"),
-        ("cảm giác thắt chặt ngực vùng trước tim", "TRIỆU_CHỨNG", "thắt chặt ngực vùng trước tim"),
+        ("cảm giác đánh trống ngực", "TRIỆU_CHỨNG", "cảm giác đánh trống ngực"),
+        ("cảm giác thắt chặt ngực vùng trước tim", "TRIỆU_CHỨNG", "cảm giác thắt chặt ngực vùng trước tim"),
         ("mệt mỏi nhiều khi gắng sức trong tuần qua", "TRIỆU_CHỨNG", "mệt mỏi khi gắng sức trong tuần qua"),  # strip "nhiều"
-        ("tăng đánh trống ngực", "TRIỆU_CHỨNG", "đánh trống ngực"),
+        ("tăng đánh trống ngực", "TRIỆU_CHỨNG", "tăng đánh trống ngực"),
         ("trung tâm", "TRIỆU_CHỨNG", None),  # DROP noise
         ("không có khó chịu vùng ngực khi đến tầng", "TRIỆU_CHỨNG", "khó có khó chịu vùng ngực khi đến tầng"),  # partial cleanup
         ("không liên quan đến gắng sức hoặc tư thế", "TRIỆU_CHỨNG", None),  # DROP

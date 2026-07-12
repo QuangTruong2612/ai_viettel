@@ -399,6 +399,27 @@ def build_context_query(
     return " | ".join(parts)
 
 
+class ICDCrossEncoderReranker:
+    """Re-rank top-K ICD candidates bằng BGE-M3 cosine giữa entity text và ICD description."""
+
+    def __init__(self, encoder: Any) -> None:
+        self.encoder = encoder
+
+    def rerank(self, entity_text: str, candidates: list[str], icd_descriptions: dict[str, str], top_k: int = 1) -> list[str]:
+        if not candidates or not hasattr(self, 'encoder') or not self.encoder:
+            return candidates[:top_k] if candidates else []
+        try:
+            entity_emb = self.encoder.encode([entity_text.lower()], normalize_embeddings=True)[0]
+            cand_texts = [f"{code}: {icd_descriptions.get(code, code)}" for code in candidates]
+            cand_embs = self.encoder.encode(cand_texts, normalize_embeddings=True)
+            import numpy as np
+            scores = np.dot(cand_embs, entity_emb)
+            ranked = sorted(zip(candidates, scores), key=lambda x: -x[1])
+            return [c for c, _ in ranked[:top_k]]
+        except Exception:
+            return candidates[:top_k]
+
+
 class ICDRetriever:
     """High-level wrapper: exact + semantic extraction + fuzzy (offline).
 
@@ -457,6 +478,13 @@ class ICDRetriever:
                 for c, n in zip(vs.codes, vs.names):
                     if c not in self._code_to_desc:
                         self._code_to_desc[c] = n.lower()
+            if hasattr(vs, 'model') and vs.model is not None:
+                self._reranker = ICDCrossEncoderReranker(vs.model)
+            else:
+                self._reranker = None
+        else:
+            self._reranker = None
+        self._llm_client = None
 
     # ------------------------------------------------------------------ #
 
@@ -499,7 +527,14 @@ class ICDRetriever:
             return []
         restricted = _restrict_chapter(filtered, text)
         result = restricted if restricted else filtered
-        
+
+        if not _text_matches_chapter_keyword(text):
+            inferred = self._infer_chapter_from_other_entities(other_entities)
+            if inferred:
+                pref_filtered = [c for c in result if c.startswith(inferred)]
+                if pref_filtered:
+                    result = pref_filtered
+
         boosted_prefixes = _get_boosted_prefixes(other_entities) if entity_type != "TRIỆU_CHỨNG" else set()
 
         # Smart sorting: ưu tiên các chương bệnh phổ biến cho người lớn (I, J, K, E, N, M, S, T, C, D, G, A, B, R)
@@ -584,31 +619,45 @@ class ICDRetriever:
 
         return sorted(set(result), key=_lex_score)
 
-    def _select_adaptive_top_k(self, codes: list[str], max_k: int = 4) -> list[str]:
-        """Chọn danh sách mã đủ và chính xác theo Dynamic Score Gap & Category Consistency.
+    def _infer_chapter_from_other_entities(self, other_entities: list[dict] | None) -> str:
+        if not other_entities:
+            return ""
+        drug_prefixes = _get_boosted_prefixes(other_entities)
+        if not drug_prefixes:
+            return ""
+        from collections import Counter
+        pref_count = Counter(p[:3] for p in drug_prefixes)
+        most_common = pref_count.most_common(1)
+        return most_common[0][0] if most_common else ""
 
-        Đảm bảo 'lấy đủ nhưng vẫn chính xác':
-        - Nếu danh sách <= 1 mã -> trả về nguyên danh sách.
-        - Giữ mã đứng đầu (Rank 1).
-        - Với các mã tiếp theo (Rank 2..max_k):
-          1. Nếu thuộc cùng họ 3 ký tự (vd L73.2 & L73.9) hoặc cùng chapter lân cận (vd L73, L74, L75 cho tuyến mồ hôi)
-             và khoảng cách điểm lexical nhỏ -> giữ mã đó.
-          2. Nếu không thuộc cùng họ nhưng có điểm số bằng hoặc cực kỳ sát với Rank 1 -> giữ mã đó.
-          3. Nếu lệch họ và điểm xa -> dừng lại để giữ độ chính xác cao nhất.
-        """
-        if not codes or len(codes) <= 1:
+    def _rerank_and_select(self, codes: list[str], text: str, max_k: int = 1) -> list[str]:
+        if not codes:
+            return []
+        if hasattr(self, '_reranker') and self._reranker and len(codes) > 1:
+            codes = self._reranker.rerank(text, codes[:10], getattr(self, '_code_to_desc', {}), top_k=max(3, max_k))
+        return self._select_adaptive_top_k(codes, max_k=max_k, text=text)
+
+    def _select_adaptive_top_k(self, codes: list[str], max_k: int = 1, text: str = "") -> list[str]:
+        """Mặc định 1 code để tối ưu Jaccard. Chỉ giữ thêm nếu cùng 3-char prefix."""
+        if not codes:
+            return []
+        if len(codes) == 1:
             return codes
         out = [codes[0]]
-        top_c = codes[0]
-        top_prefix_3 = top_c[:3]
-        top_prefix_2 = top_c[:2]
+        top_prefix_3 = codes[0][:3]
         for c in codes[1:max_k]:
-            if c[:3] == top_prefix_3 or c[:2] == top_prefix_2:
+            if c[:3] == top_prefix_3 and c not in out:
                 out.append(c)
-            elif len(out) < 2:  # cho phép tối đa 2 mã nếu khác nhóm sát điểm
-                out.append(c)
-            else:
-                break
+        if len(out) == 1 and max_k == 1 and text and len(codes) > 1:
+            # Specificity-Aware Picker (Super-Upgrade 4)
+            # Nếu text có từ khóa độ specific cao mà trong top-3 candidates có mã dài hơn cùng prefix (vd I21.1 thay vì I21) thì ưu tiên mã dài
+            spec_keywords = ("vùng", "dưới", "trước", "sau", "bên", "độ 1", "độ i", "độ 2", "độ ii", "độ 3", "độ iii", "độ 4", "độ iv", "mạn tính", "cấp tính", "cấp", "mạn", "nhánh", "kịch phát", "giai đoạn cuối", "thùy")
+            text_lower = text.lower()
+            if any(k in text_lower for k in spec_keywords):
+                for cand in codes[1:4]:
+                    if cand[:3] == top_prefix_3 and len(cand) > len(out[0]):
+                        out = [cand]
+                        break
         return out
 
     def _split_compound_diagnosis(self, text: str) -> list[str]:
@@ -647,7 +696,7 @@ class ICDRetriever:
                 for c in codes:
                     if c not in out:
                         out.append(c)
-            result = out[:4]
+            result = out[:2]
         else:
             result = self._lookup_single(vn_text, context_query, other_entities, entity_type=entity_type)
 
@@ -675,26 +724,43 @@ class ICDRetriever:
             key_lower = text.lower().strip()
             if key_lower in self._icd_vn_to_codes:
                 logger.debug("L0 short-circuit direct match: '%s' → %s", text, self._icd_vn_to_codes[key_lower])
-                return self._filter_and_sort_codes(self._icd_vn_to_codes[key_lower], text, other_entities=other_entities, entity_type=entity_type)[:8]
+                filtered = self._filter_and_sort_codes(self._icd_vn_to_codes[key_lower], text, other_entities=other_entities, entity_type=entity_type)
+                return self._rerank_and_select(filtered if filtered else self._icd_vn_to_codes[key_lower], max_k=1, text=text)
 
-        # L1: Exact (cao độ tin cậy nhất — cap 8)
+            # Tier-1b: Prefix & Word-containment fallback trong _icd_vn_to_codes (Fix 1.3)
+            for key, codes in self._icd_vn_to_codes.items():
+                if len(key) >= 8 and key_lower.startswith(key):
+                    filtered = self._filter_and_sort_codes(codes, text, other_entities=other_entities, entity_type=entity_type)
+                    if filtered:
+                        return self._rerank_and_select(filtered, max_k=1, text=text)
+            text_words = f" {key_lower} "
+            for key, codes in self._icd_vn_to_codes.items():
+                if len(key) >= 6 and f" {key} " in text_words:
+                    filtered = self._filter_and_sort_codes(codes, text, other_entities=other_entities, entity_type=entity_type)
+                    if filtered:
+                        return self._rerank_and_select(filtered, max_k=1, text=text)
+
+        # L1: Exact (cao độ tin cậy nhất — cap 1)
         key = text.lower()
         if key in self.idx.exact:
-            return self._filter_and_sort_codes(self.idx.exact[key], text, other_entities=other_entities, entity_type=entity_type)[:8]
+            filtered = self._filter_and_sort_codes(self.idx.exact[key], text, other_entities=other_entities, entity_type=entity_type)
+            return self._rerank_and_select(filtered if filtered else self.idx.exact[key], max_k=1, text=text)
 
         # L1.5: VN prefix exact match — nếu text là prefix của desc_vi
         prefix_codes = self._exact_match_vn_prefix(text)
         if prefix_codes:
             filtered = self._filter_and_sort_codes(prefix_codes, text, other_entities=other_entities, entity_type=entity_type)
-            return self._select_adaptive_top_k(filtered, max_k=5)
+            if filtered:
+                return self._rerank_and_select(filtered, max_k=1, text=text)
 
         # L1.7 (NEW 2026-07-10): VN substring match (text chứa trong desc_vi)
         if len(text) >= 5:
             substring_codes = self._exact_match_vn_substring(text)
             if substring_codes:
                 filtered = self._filter_and_sort_codes(substring_codes, text, other_entities=other_entities, entity_type=entity_type)
-                logger.debug("L1.7 substring match '%s' → %s", text, filtered[:5])
-                return self._select_adaptive_top_k(filtered, max_k=5)
+                if filtered:
+                    logger.debug("L1.7 substring match '%s' → %s", text, filtered[:2])
+                    return self._rerank_and_select(filtered, max_k=1, text=text)
 
         # L2: Build query có context cho BM25 (dùng nearby drugs/symptoms)
         bm25_query = build_context_query(text, "CHẨN_ĐOÁN", other_entities)
@@ -721,40 +787,45 @@ class ICDRetriever:
             if rrf_scores:
                 sorted_codes = sorted(rrf_scores.keys(), key=lambda c: -rrf_scores[c])
                 filtered = self._filter_and_sort_codes(sorted_codes[:8], text, other_entities=other_entities, entity_type=entity_type)
-                return self._select_adaptive_top_k(filtered, max_k=4)
+                if filtered:
+                    return self._rerank_and_select(filtered, max_k=1, text=text)
 
-        # L4: Local fuzzy match trên names VN (threshold 75, cap 4)
+        # L4: Local fuzzy match trên names VN (threshold 75, cap 1)
         fuzzy_vn = self._fuzzy_local(text, threshold=75)
         if fuzzy_vn:
             filtered = self._filter_and_sort_codes(fuzzy_vn, text, other_entities=other_entities, entity_type=entity_type)
-            return self._select_adaptive_top_k(filtered, max_k=4)
+            if filtered:
+                return self._rerank_and_select(filtered, max_k=1, text=text)
 
-        # L5: BM25 fallback (top-4 — adaptive)
+        # L5: BM25 fallback (top-1 — adaptive)
         if self.local_search is not None and hasattr(self.local_search, 'bm25_index'):
             bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=4)
             if bm25_codes:
                 bm25_codes = self._filter_and_sort_codes(bm25_codes, text, other_entities=other_entities, entity_type=entity_type)
                 if bm25_codes:
-                    return self._select_adaptive_top_k(bm25_codes, max_k=4)
+                    return self._rerank_and_select(bm25_codes, max_k=1, text=text)
 
         # L6 (NEW R27.7 2026-07-10): Aggressive final fallback - thử MULTIPLE strategies
         if len(text) >= 5:
             substring_codes = self._exact_match_vn_substring(text)
             if substring_codes:
                 filtered = self._filter_and_sort_codes(substring_codes, text, other_entities=other_entities, entity_type=entity_type)
-                logger.debug("L6 substring fallback '%s' → %s", text, filtered[:4])
-                return self._select_adaptive_top_k(filtered, max_k=4)
+                if filtered:
+                    logger.debug("L6 substring fallback '%s' → %s", text, filtered[:2])
+                    return self._rerank_and_select(filtered, max_k=1, text=text)
 
         if _text_matches_chapter_keyword(text):
             prefix_codes = self._exact_match_vn_prefix(text)
             if prefix_codes:
                 filtered = self._filter_and_sort_codes(prefix_codes, text, other_entities=other_entities, entity_type=entity_type)
-                return self._select_adaptive_top_k(filtered, max_k=4)
+                if filtered:
+                    return self._rerank_and_select(filtered, max_k=1, text=text)
             chapter_codes = self._chapter_codes_lookup(text)
             if chapter_codes:
                 filtered = self._filter_and_sort_codes(chapter_codes, text, other_entities=other_entities, entity_type=entity_type)
-                logger.debug("L6 chapter lookup '%s' → %s", text, filtered[:4])
-                return self._select_adaptive_top_k(filtered, max_k=4)
+                if filtered:
+                    logger.debug("L6 chapter lookup '%s' → %s", text, filtered[:2])
+                    return self._rerank_and_select(filtered, max_k=1, text=text)
 
         if self.local_search is not None:
             low_threshold_codes = self.local_search.search(
@@ -762,8 +833,34 @@ class ICDRetriever:
             ) or []
             if low_threshold_codes:
                 filtered = self._filter_and_sort_codes(low_threshold_codes, text, other_entities=other_entities, entity_type=entity_type)
-                logger.debug("L6 low-threshold vector '%s' → %s", text, filtered[:4])
-                return self._select_adaptive_top_k(filtered, max_k=4)
+                if filtered:
+                    logger.debug("L6 low-threshold vector '%s' → %s", text, filtered[:2])
+                    return self._rerank_and_select(filtered, max_k=1, text=text)
+
+        # L7: LLM Fallback (Strict Validated) khi tất cả tiers RAG đều empty
+        if hasattr(self, '_llm_client') and self._llm_client:
+            try:
+                from src.prompts import ICD_LLM_FALLBACK_PROMPT
+                context = ""
+                if other_entities:
+                    ctx_entities = [e.get("text", "") for e in other_entities[:3] if isinstance(e, dict)]
+                    context = " | Nearby: " + ", ".join(ctx_entities)
+                prompt = ICD_LLM_FALLBACK_PROMPT.format(
+                    entity_text=vn_text,
+                    context_window=context,
+                )
+                response = self._llm_client.call_sync(prompt, max_tokens=50, temperature=0.1)
+                import re as _re
+                codes = _re.findall(r'\b([A-TV-Z]\d{2}(?:\.\d{1,2})?)\b', response.upper())
+                valid_codes = []
+                for c in codes:
+                    if not c.startswith(('U', 'V', 'W', 'X', 'Y')) and (c in self.idx.codes or c[:3] in [code[:3] for code in self.idx.codes[:500]]):
+                        valid_codes.append(c)
+                if valid_codes:
+                    logger.info("L7 LLM fallback ICD: '%s' → %s", vn_text, valid_codes[:1])
+                    return self._rerank_and_select(valid_codes, max_k=1, text=text)
+            except Exception as exc:
+                logger.warning("L7 LLM fallback ICD failed: %s", exc)
 
         return []  # noqa: RET504
 
@@ -887,33 +984,33 @@ class ICDRetriever:
         # ICD direct mapping (R27.5): VN → exact ICD codes.
         # desc_en BYT không exact-match bản dịch EN nên cần map trực tiếp.
         self._icd_vn_to_codes = {
-            "ung thư phổi": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
-            "ung thư phổi không tế bào nhỏ": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
-            "ung thư phổi tế bào nhỏ": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
-            "u ác tính phổi": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
-            "k phổi": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
-            "ung thư não": ["C71", "C71.0", "C71.1", "C71.2", "C71.3", "C71.4", "C71.5", "C71.6", "C71.7", "C71.8", "C71.9"],
-            "u não": ["C71", "C71.0", "C71.1", "C71.2", "C71.3", "C71.4", "C71.5", "C71.6", "C71.7", "C71.8", "C71.9"],
-            "u ác tính não": ["C71", "C71.0", "C71.1", "C71.2", "C71.3", "C71.4", "C71.5", "C71.6", "C71.7", "C71.8", "C71.9"],
-            "di căn não": ["C79.3", "C79.30", "C79.31", "C79.32"],
-            "u ác tính thứ phát ở não": ["C79.3", "C79.30", "C79.31", "C79.32"],
+            "ung thư phổi": ["C34", "C34.9"],
+            "ung thư phổi không tế bào nhỏ": ["C34", "C34.9"],
+            "ung thư phổi tế bào nhỏ": ["C34", "C34.9"],
+            "u ác tính phổi": ["C34", "C34.9"],
+            "k phổi": ["C34", "C34.9"],
+            "ung thư não": ["C71", "C71.9"],
+            "u não": ["C71", "C71.9"],
+            "u ác tính não": ["C71", "C71.9"],
+            "di căn não": ["C79.3"],
+            "u ác tính thứ phát ở não": ["C79.3"],
             "di căn xương": ["C79.5"],
             "di căn gan": ["C78.7"],
             "di căn phổi": ["C78.0"],
-            "di căn": ["C79", "C79.0", "C79.1", "C79.2", "C79.3", "C79.4", "C79.5", "C79.6", "C79.7", "C79.8", "C79.9"],
-            "ung thư vú": ["C50", "C50.0", "C50.1", "C50.2", "C50.3", "C50.4", "C50.5", "C50.6", "C50.8", "C50.9"],
-            "ung thư gan": ["C22", "C22.0", "C22.1", "C22.2", "C22.3", "C22.4", "C22.7", "C22.8", "C22.9"],
-            "ung thư dạ dày": ["C16", "C16.0", "C16.1", "C16.2", "C16.3", "C16.4", "C16.5", "C16.6", "C16.8", "C16.9"],
-            "ung thư đại tràng": ["C18", "C18.0", "C18.1", "C18.2", "C18.3", "C18.4", "C18.5", "C18.6", "C18.7", "C18.8", "C18.9"],
+            "di căn": ["C79", "C79.9"],
+            "ung thư vú": ["C50", "C50.9"],
+            "ung thư gan": ["C22", "C22.9"],
+            "ung thư dạ dày": ["C16", "C16.9"],
+            "ung thư đại tràng": ["C18", "C18.9"],
             "ung thư trực tràng": ["C20"],
             "tăng huyết áp": ["I10"],
             "tăng huyết áp vô căn": ["I10"],
             "tăng huyết áp thứ phát": ["I15"],
             "cao huyết áp": ["I10"],
-            "nhồi máu cơ tim": ["I21", "I21.0", "I21.1", "I21.2", "I21.3", "I21.4", "I21.9"],
-            "đau thắt ngực": ["I20", "I20.0", "I20.1", "I20.8", "I20.9"],
-            "suy tim": ["I50", "I50.0", "I50.1", "I50.9"],
-            "rung nhĩ": ["I48", "I48.0", "I48.1", "I48.2", "I48.3", "I48.4", "I48.9"],
+            "nhồi máu cơ tim": ["I21", "I21.9"],
+            "đau thắt ngực": ["I20", "I20.9"],
+            "suy tim": ["I50", "I50.9"],
+            "rung nhĩ": ["I48", "I48.9"],
             "ngoại tâm thu thất": ["I49.3"],
             "ngoại tâm thu nhĩ": ["I49.1"],
             "sa van hai lá": ["I34.1"],
@@ -922,40 +1019,39 @@ class ICDRetriever:
             "hở van hai lá": ["I34.0"],
             "hở van 2 lá": ["I34.0"],
             "hẹp van hai lá": ["I34.2"],
-            "tắc mạch huyết khối": ["I82", "I82.0", "I82.1", "I82.2", "I82.3", "I82.8", "I82.9"],
-            "tắc mạch": ["I82", "I82.0", "I82.1", "I82.2", "I82.3", "I82.8", "I82.9"],
+            "tắc mạch huyết khối": ["I82", "I82.9"],
+            "tắc mạch": ["I82", "I82.9"],
             "huyết khối": ["I82"],
-            "hen phế quản": ["J45", "J45.0", "J45.1", "J45.8", "J45.9"],
-            "hen suyễn": ["J45", "J45.0", "J45.1", "J45.8", "J45.9"],
-            "viêm phổi": ["J12", "J13", "J14", "J15", "J16", "J17", "J18"],
+            "hen phế quản": ["J45", "J45.9"],
+            "hen suyễn": ["J45", "J45.9"],
+            "viêm phổi": ["J18", "J18.9"],
             "viêm tuyến mồ hôi": ["L73.2"],  # mới 2026-07-10: R27.7 — match L73.2 (Hidradenitis suppurativa)
             "viêm tuyến mồ hôi mủ": ["L73.2"],
             "nhọt ổ gà": ["L73.2"],
-            "đái tháo đường": ["E11", "E11.0", "E11.1", "E11.2", "E11.3", "E11.4", "E11.5", "E11.6", "E11.7", "E11.8", "E11.9"],
+            "đái tháo đường": ["E11", "E11.9"],
             "đái tháo đường type 2": ["E11"],
-            "suy thận": ["N17", "N18", "N19"],
+            "suy thận": ["N19"],
             "suy thận cấp": ["N17"],
-            "suy thận mạn": ["N18", "N18.1", "N18.2", "N18.3", "N18.4", "N18.5", "N18.6", "N18.9"],
+            "suy thận mạn": ["N18", "N18.9"],
             "viêm gan b": ["B16", "B18.1"],
             "viêm gan c": ["B17.1", "B18.2"],
-            "xơ gan": ["K74", "K74.0", "K74.1", "K74.2", "K74.3", "K74.4", "K74.5", "K74.6"],
-            "sỏi thận": ["N20", "N20.0", "N20.1", "N20.2", "N20.9"],
-            "thoát vị đĩa đệm": ["M51", "M51.0", "M51.1", "M51.2", "M51.3", "M51.4", "M51.5", "M51.6", "M51.7", "M51.8", "M51.9"],
+            "xơ gan": ["K74", "K74.6"],
+            "sỏi thận": ["N20", "N20.0"],
+            "thoát vị đĩa đệm": ["M51", "M51.9"],
             "đột quỵ": ["I63", "I64"],
             "tai biến mạch máu não": ["I63", "I64"],
-            "thiếu máu": ["D50", "D50.0", "D50.1", "D50.2", "D50.3", "D50.4", "D50.5", "D50.6", "D50.7", "D50.8", "D50.9"],
+            "thiếu máu": ["D50", "D50.9"],
 
             # === MỚI 2026-07-10 — abbreviations VN (R27.6) ===
-            # VN doctors dùng viết tắt rất phổ biến. Map trước lookup chain.
             "tha": ["I10"],  # Tăng huyết áp
-            "nmct": ["I21", "I21.0", "I21.1", "I21.2", "I21.3", "I21.4", "I21.9"],  # Nhồi máu cơ tim
-            "đtđ": ["E11", "E11.0", "E11.1", "E11.2", "E11.3", "E11.4", "E11.5", "E11.6", "E11.7", "E11.8", "E11.9"],  # Đái tháo đường
-            "đtđ type 2": ["E11"],  # ĐTĐ type 2
-            "đtđ type 1": ["E10"],  # ĐTĐ type 1
-            "tbmmn": ["I63", "I64"],  # Tai biến mạch máu não
-            "tbmmnn": ["I63", "I64"],  # Tai biến mạch máu não
-            "copd": ["J44", "J44.0", "J44.1", "J44.8", "J44.9"],  # Bệnh phổi tắc nghẽn mạn
-            "osa": ["G47.3"],  # Ngưng thở khi ngủ
+            "nmct": ["I21", "I21.9"],  # Nhồi máu cơ tim
+            "đtđ": ["E11", "E11.9"],  # Đái tháo đường
+            "đtđ type 2": ["E11"],
+            "đtđ type 1": ["E10"],
+            "tbmmn": ["I63", "I64"],
+            "tbmmnn": ["I63", "I64"],
+            "copd": ["J44", "J44.9"],
+            "osa": ["G47.3"],
             "ngưng thở khi ngủ": ["G47.3"],
             "ngừng thở khi ngủ": ["G47.3"],
             "ngưng thở khi ngủ do tắc nghẽn": ["G47.3"],
@@ -967,60 +1063,49 @@ class ICDRetriever:
             "viêm đường tiết niệu": ["N39.0"],
             "bất thường điện giải": ["E87.8"],
             "rối loạn điện giải": ["E87.8"],
-            "tử vong": ["R96", "R96.1", "R98"],
-            "hc": ["R59"],  # Hạch (general lymphadenopathy)
+            "tử vong": ["R96"],
+            "hc": ["R59"],
 
             # === MỚI 2026-07-10 — synonyms cho u (R27.6) ===
-            # ICD desc_vi dùng "U ác tính" nhưng LLM hay ghi "u ác" / "khối u"
-            "u ác tính": ["C", "C00", "C80"],  # placeholder - cần organ context
-            "u ác": ["C", "C00", "C80"],  # placeholder - cần organ context
-            "u lành": ["D", "D00", "D48"],  # placeholder - cần organ context
-            "u lành tính": ["D", "D00", "D48"],  # placeholder
-            "khối u": ["D48"],  # unspecified neoplasm (placeholder)
+            "u ác tính": ["C80"],
+            "u ác": ["C80"],
+            "u lành": ["D48"],
+            "u lành tính": ["D48"],
+            "khối u": ["D48"],
             "neoplasm": ["D48"],
 
             # === MỚI 2026-07-10 — Organ-based mappings (R27.6) ===
-            # Pattern: "u ác/khối u/u ác tính [organ]" → Cxx (malignant) hoặc Dxx (benign)
-            # Direct dict cho common organs để match exact LLM text
             "u ác tính trực tràng": ["C20"],
             "u ác trực tràng": ["C20"],
             "ung thư trực tràng": ["C20"],
-            "khối u trực tràng": ["C20", "D12"],  # ambiguous - default malignant first
+            "khối u trực tràng": ["C20", "D12"],
             "u lành trực tràng": ["D12"],
             "u lành tính trực tràng": ["D12"],
 
-            "u ác tính đại tràng": ["C18", "C18.0", "C18.1", "C18.2", "C18.3", "C18.4", "C18.5", "C18.6", "C18.7", "C18.8", "C18.9"],
+            "u ác tính đại tràng": ["C18", "C18.9"],
             "u ác đại tràng": ["C18"],
             "ung thư đại tràng": ["C18"],
             "khối u đại tràng": ["C18", "D12"],
 
-            "u ác tính dạ dày": ["C16", "C16.0", "C16.1", "C16.2", "C16.3", "C16.4", "C16.5", "C16.6", "C16.8", "C16.9"],
+            "u ác tính dạ dày": ["C16", "C16.9"],
             "u ác dạ dày": ["C16"],
             "ung thư dạ dày": ["C16"],
             "khối u dạ dày": ["C16", "D13.1"],
 
-            "u ác tính gan": ["C22", "C22.0", "C22.1", "C22.2", "C22.3", "C22.4", "C22.7", "C22.8", "C22.9"],
+            "u ác tính gan": ["C22", "C22.9"],
             "u ác gan": ["C22"],
             "ung thư gan": ["C22"],
             "khối u gan": ["C22", "D13.4"],
 
-            "u ác tính phổi": ["C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"],
-            "u ác phổi": ["C34"],
-            "khối u phổi": ["C34", "D14.3"],
-
-            "u ác tính vú": ["C50", "C50.0", "C50.1", "C50.2", "C50.3", "C50.4", "C50.5", "C50.6", "C50.8", "C50.9"],
+            "u ác tính vú": ["C50", "C50.9"],
             "u ác vú": ["C50"],
             "khối u vú": ["C50", "D24"],
-
-            "u ác tính não": ["C71", "C71.0", "C71.1", "C71.2", "C71.3", "C71.4", "C71.5", "C71.6", "C71.7", "C71.8", "C71.9"],
-            "u não ác tính": ["C71"],
-            "khối u não": ["C71", "D33"],
 
             "u ác tính buồng trứng": ["C56"],
             "u ác buồng trứng": ["C56"],
             "khối u buồng trứng": ["C56", "D27"],
 
-            "u ác tính cổ tử cung": ["C53", "C53.0", "C53.1", "C53.8", "C53.9"],
+            "u ác tính cổ tử cung": ["C53", "C53.9"],
             "u ác cổ tử cung": ["C53"],
             "khối u cổ tử cung": ["C53", "D26.0"],
 
@@ -1030,22 +1115,21 @@ class ICDRetriever:
             "u ác tính tuyến tiền liệt": ["C61"],
             "khối u tuyến tiền liệt": ["C61", "D29.1"],
 
-            "u ác tính bàng quang": ["C67", "C67.0", "C67.1", "C67.2", "C67.3", "C67.4", "C67.5", "C67.6", "C67.7", "C67.8", "C67.9"],
+            "u ác tính bàng quang": ["C67", "C67.9"],
             "khối u bàng quang": ["C67", "D30.3"],
 
             "u ác tính thận": ["C64"],
             "khối u thận": ["C64", "D30.0"],
 
-            "u ác tính tụy": ["C25", "C25.0", "C25.1", "C25.2", "C25.3", "C25.4", "C25.7", "C25.8", "C25.9"],
+            "u ác tính tụy": ["C25", "C25.9"],
             "khối u tụy": ["C25", "D13.6"],
 
-            "u ác tính thực quản": ["C15", "C15.0", "C15.1", "C15.2", "C15.3", "C15.4", "C15.5", "C15.8", "C15.9"],
+            "u ác tính thực quản": ["C15", "C15.9"],
             "khối u thực quản": ["C15", "D13.0"],
 
             # === TIM MẠCH (Cardiology) — chuẩn BYT/WHO ICD-10 2026 ===
-            # Nhồi máu cơ tim và ECG findings
-            "nhồi máu cơ tim cấp st chênh lên": ["I21.0", "I21.1", "I21.2", "I21.3"],
-            "nmct cấp st chênh lên": ["I21.0", "I21.1", "I21.2", "I21.3"],
+            "nhồi máu cơ tim cấp st chênh lên": ["I21.0"],
+            "nmct cấp st chênh lên": ["I21.0"],
             "nhồi máu cơ tim cấp không st chênh lên": ["I21.4"],
             "nmct cấp không st chênh lên": ["I21.4"],
             "nhồi máu cơ tim cũ": ["I25.2"],
@@ -1055,32 +1139,29 @@ class ICDRetriever:
             "hội chứng vành cấp": ["I24"],
             "đau thắt ngực không ổn định": ["I20.0"],
             "đau thắt ngực ổn định": ["I20.8"],
-            "st chênh lên": ["I21.3"],   # STEMI (acute)
-            "st chênh xuống": ["I21.4"],  # NSTEMI pattern
+            "st chênh lên": ["I21.3"],
+            "st chênh xuống": ["I21.4"],
             "st chênh lên v1-v4": ["I21.0"],
             "st chênh lên v1-v6": ["I21.0"],
-            "sóng q bệnh lý": ["I25.2"],  # old MI
+            "sóng q bệnh lý": ["I25.2"],
             "sóng t đảo ngược": ["I24.8"],
-            # Rối loạn nhịp tim
             "cuồng nhĩ": ["I48.3"],
             "rung nhĩ kèm đáp ứng thất nhanh": ["I48"],
             "nhịp nhanh trên thất": ["I47.1"],
             "nhịp nhanh thất": ["I47.2"],
             "rung thất": ["I49.0"],
-            "block nhánh trái": ["I44.4", "I44.5", "I44.6"],
-            "block nhánh phải": ["I45.0", "I45.1", "I45.2"],
-            "block nhánh": ["I44.4", "I45.0"],
+            "block nhánh trái": ["I44.7"],
+            "block nhánh phải": ["I45.1"],
+            "block nhánh": ["I44.7", "I45.1"],
             "hội chứng sick sinus": ["I49.5"],
             "nhịp nhanh xoang": ["R00.0"],
             "nhịp chậm xoang": ["R00.1"],
-            # Block nhĩ thất
-            "block nhĩ thất": ["I44", "I44.0", "I44.1", "I44.2", "I44.3"],
+            "block nhĩ thất": ["I44"],
             "block nhĩ thất độ 1": ["I44.0"],
             "block nhĩ thất độ 2": ["I44.1"],
             "block nhĩ thất độ 3": ["I44.2"],
             "block nhĩ thất hoàn toàn": ["I44.2"],
             "block tim": ["I44"],
-            # Van tim
             "tách thành động mạch chủ": ["I71.0"],
             "phình động mạch chủ": ["I71"],
             "phình động mạch chủ bụng": ["I71.4"],
@@ -1097,16 +1178,14 @@ class ICDRetriever:
             "hẹp van động mạch chủ": ["I35.0"],
             "hở van ba lá": ["I36.1"],
             "hẹp van ba lá": ["I36.0"],
-            # Viêm cơ tim, màng ngoài tim
-            "viêm nội tâm mạc": ["I33", "I33.0", "I33.9"],
+            "viêm nội tâm mạc": ["I33", "I33.9"],
             "viêm nội tâm mạc nhiễm khuẩn": ["I33.0"],
-            "viêm cơ tim": ["I40", "I40.0", "I40.1", "I40.8", "I40.9"],
+            "viêm cơ tim": ["I40", "I40.9"],
             "viêm màng ngoài tim": ["I30"],
             "tràn dịch màng tim": ["I31.3"],
             "bệnh cơ tim": ["I42"],
             "bệnh cơ tim phì đại": ["I42.1"],
             "bệnh cơ tim giãn": ["I42.0"],
-            # Suy tim theo mức độ
             "suy tim độ i nyha": ["I50.9"],
             "suy tim độ ii nyha": ["I50.9"],
             "suy tim độ iii nyha": ["I50.0"],
@@ -1115,16 +1194,13 @@ class ICDRetriever:
             "suy tim tâm trương": ["I50.9"],
             "suy tim cấp": ["I50.9"],
             "suy tim mạn": ["I50.9"],
-            # Mạch máu
             "huyết khối tĩnh mạch sâu": ["I82.4"],
             "dvt": ["I82.4"],
-            "thuyên tắc phổi": ["I26", "I26.0", "I26.9"],
+            "thuyên tắc phổi": ["I26.9"],
             "pe": ["I26.9"],
 
             # === MỚI 2026-07-10 — TIÊU HÓA, GAN, MẬT ===
-            "viêm gan virus": ["B15", "B16", "B17", "B18", "B19"],
-            "viêm gan b": ["B16", "B18.1"],
-            "viêm gan c": ["B17.1", "B18.2"],
+            "viêm gan virus": ["B19"],
             "viêm gan mạn": ["K73"],
             "viêm gan cấp": ["K72.0"],
             "gan nhiễm mỡ": ["K76.0"],
@@ -1143,15 +1219,13 @@ class ICDRetriever:
             "viêm đại tràng": ["K51", "K52"],
             "viêm ruột thừa": ["K35"],
             "thoát vị bẹn": ["K40"],
-            "thoát vị": ["K40", "K41", "K42", "K43", "K44", "K45", "K46"],
+            "thoát vị": ["K46"],
 
             # === MỚI 2026-07-10 — HÔ HẤP ===
             "viêm phế quản": ["J20", "J21"],
             "viêm phế quản cấp": ["J20"],
             "viêm phế quản mạn": ["J42"],
             "viêm tiểu phế quản": ["J21"],
-            "hen phế quản": ["J45", "J45.0", "J45.1", "J45.8", "J45.9"],
-            "hen suyễn": ["J45"],
             "viêm phổi mắc phải cộng đồng": ["J18", "J18.9"],
             "viêm phổi cộng đồng": ["J18", "J18.9"],
             "tràn khí màng phổi": ["J93"],
@@ -1160,47 +1234,43 @@ class ICDRetriever:
             "lao phổi": ["A15", "A15.0"],
 
             # === MỚI 2026-07-10 — THẦN KINH, TÂM THẦN ===
-            "động kinh": ["G40", "G40.0", "G40.1", "G40.2", "G40.3", "G40.4", "G40.5", "G40.6", "G40.7", "G40.8", "G40.9"],
+            "động kinh": ["G40", "G40.9"],
             "parkinson": ["G20", "G21"],
             "bệnh parkinson": ["G20"],
-            "alzheimer": ["G30", "G30.0", "G30.1", "G30.8", "G30.9"],
+            "alzheimer": ["G30", "G30.9"],
             "sa sút trí tuệ": ["F03"],
-            "trầm cảm": ["F32", "F32.0", "F32.1", "F32.2", "F32.3", "F32.8", "F32.9"],
-            "rối loạn lo âu": ["F41", "F41.0", "F41.1", "F41.2", "F41.3", "F41.8", "F41.9"],
+            "trầm cảm": ["F32", "F32.9"],
+            "rối loạn lo âu": ["F41", "F41.9"],
             "tâm thần phân liệt": ["F20"],
-            "đau nửa đầu": ["G43", "G43.0", "G43.1", "G43.2", "G43.3", "G43.8", "G43.9"],
+            "đau nửa đầu": ["G43", "G43.9"],
             "migraine": ["G43"],
 
             # === MỚI 2026-07-10 — THẬN, TIẾT NIỆU ===
-            "sỏi thận": ["N20"],
             "sỏi niệu quản": ["N20.1"],
             "sỏi bàng quang": ["N21.0"],
-            "viêm đường tiết niệu": ["N39.0"],
             "viêm bàng quang": ["N30"],
-            "viêm thận - bể thận": ["N10", "N11", "N12"],
+            "viêm thận - bể thận": ["N12"],
             "viêm bể thận": ["N12"],
-            "viêm cầu thận": ["N00", "N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08"],
+            "viêm cầu thận": ["N05"],
             "hội chứng thận hư": ["N04"],
-            "suy thận cấp": ["N17"],
-            "suy thận mạn": ["N18"],
             "suy thận giai đoạn cuối": ["N18.6"],
 
             # === MỚI 2026-07-10 — CƠ XƯƠNG KHỚP ===
-            "thoái hóa khớp": ["M15", "M16", "M17", "M18", "M19"],
+            "thoái hóa khớp": ["M19"],
             "thoái hóa khớp gối": ["M17"],
             "thoái hóa khớp háng": ["M16"],
             "viêm khớp dạng thấp": ["M05", "M06"],
-            "gout": ["M10", "M10.0", "M10.1", "M10.2", "M10.3", "M10.4", "M10.9"],
+            "gout": ["M10", "M10.9"],
             "gút": ["M10"],
-            "loãng xương": ["M80", "M81", "M82"],
+            "loãng xương": ["M81"],
             "viêm cơ": ["M60"],
             "đau cơ xơ hóa": ["M79.7"],
 
             # === MỚI 2026-07-10 — DA, MÔ LIÊN KẾT ===
-            "vẩy nến": ["L40", "L40.0", "L40.1", "L40.2", "L40.3", "L40.4", "L40.5", "L40.8", "L40.9"],
+            "vẩy nến": ["L40", "L40.9"],
             "eczema": ["L20", "L30"],
             "viêm da cơ địa": ["L20"],
-            "viêm da tiếp xúc": ["L23", "L24", "L25"],
+            "viêm da tiếp xúc": ["L25"],
             "mày đay": ["L50"],
             "zona": ["B02"],
             "herpes": ["B00"],
@@ -1208,21 +1278,20 @@ class ICDRetriever:
             # === MỚI 2026-07-10 — NỘI TIẾT ===
             "basedow": ["E05.0"],
             "cường giáp": ["E05"],
-            "suy giáp": ["E03", "E03.0", "E03.1", "E03.2", "E03.3", "E03.4", "E03.5", "E03.8", "E03.9"],
+            "suy giáp": ["E03", "E03.9"],
             "suy tuyến yên": ["E23.0"],
             "rối loạn lipid máu": ["E78"],
             "tăng cholesterol máu": ["E78.0"],
             "tăng triglyceride máu": ["E78.1"],
             "béo phì": ["E66"],
-            "suy dinh dưỡng": ["E40", "E41", "E42", "E43", "E44", "E45", "E46"],
-            "loãng xương": ["M80", "M81"],
+            "suy dinh dưỡng": ["E46"],
 
             # === MỚI 2026-07-10 — MÁU ===
             "thiếu máu thiếu sắt": ["D50"],
             "thiếu máu mạn": ["D50", "D63"],
             "thiếu máu cấp": ["D62"],
-            "leukemia": ["C91", "C92", "C93", "C94", "C95"],
-            "lymphoma": ["C81", "C82", "C83", "C84", "C85", "C86", "C88", "C96"],
+            "leukemia": ["C95"],
+            "lymphoma": ["C85"],
             "xuất huyết giảm tiểu cầu": ["D69.3"],
             "đông máu nội quản lý tán": ["D65"],
             "dic": ["D65"],
@@ -1232,7 +1301,7 @@ class ICDRetriever:
             "viêm tai giữa": ["H66"],
             "viêm amidan": ["J03"],
             "đục thủy tinh thể": ["H25", "H26"],
-            "glocom": ["H40", "H40.0", "H40.1", "H40.2", "H40.3", "H40.4", "H40.5", "H40.6", "H40.8", "H40.9"],
+            "glocom": ["H40", "H40.9"],
             "tăng nhãn áp": ["H40"],
 
             # === MỚI 2026-07-10 — MẠCH MÁU ===
@@ -1277,6 +1346,223 @@ class ICDRetriever:
             "tiêu chảy": ["A09", "K52.9"],
             "táo bón": ["K59.0"],
             "phù": ["R60", "R60.9"],
+            # Expanded common cardiac & liver & kidney & respiratory mappings (Priority 1.1)
+            "hội chứng não gan": ["K72.9", "G94"],
+            "xơ gan do rượu": ["K70.3", "K70"],
+            "nghi ngờ xơ gan do rượu": ["K70.3"],
+            "gan nhiễm mỡ do rượu": ["K70.0"],
+            "viêm gan do rượu": ["K70.1"],
+            "phình động mạch chủ": ["I71", "I71.9"],
+            "phình động mạch chủ nhỏ": ["I71"],
+            "phình động mạch chủ bụng": ["I71.4"],
+            "phình động mạch chủ ngực": ["I71.2"],
+            "nhồi máu cơ tim vùng dưới cũ": ["I25.2"],
+            "nhồi máu cơ tim cũ": ["I25.2"],
+            "nhồi máu cơ tim vùng dưới": ["I21.1"],
+            "nmct vùng dưới": ["I21.1"],
+            "nmct vùng dưới cũ": ["I25.2"],
+            "cuồng nhĩ": ["I48.3", "I48"],
+            "block nhánh trái": ["I44.7"],
+            "block nhánh phải": ["I45.1"],
+            "block nhĩ thất độ 1": ["I44.0"],
+            "block nhĩ thất độ 2": ["I44.1"],
+            "block nhĩ thất độ 3": ["I44.2"],
+            "block av": ["I44"],
+            "suy thận mạn giai đoạn cuối": ["N18.5", "N18.9"],
+            "suy thận mạn tính": ["N18", "N18.9"],
+            "viêm phổi mắc phải cộng đồng": ["J18", "J18.9"],
+            "vpmpccđ": ["J18", "J18.9"],
+            # === Plan Fix 1.1: Comprehensive Expansion ===
+            # Cardiac & Circulatory
+            "nhồi máu cơ tim không sóng q": ["I21.4"],
+            "nhồi máu cơ tim không st chênh lên": ["I21.4"],
+            "rung nhĩ kịch phát": ["I48.0"],
+            "rung nhĩ mạn": ["I48.2"],
+            "rung nhĩ dai dẳng": ["I48.1"],
+            "cuồng nhĩ điển hình": ["I48.3"],
+            "cuồng nhĩ không điển hình": ["I48.4"],
+            "nhịp nhanh xoang": ["R00.0"],
+            "nhịp chậm xoang": ["R00.1"],
+            "nhịp nhanh kịch phát trên thất": ["I47.1"],
+            "nhịp nhanh thất": ["I47.2"],
+            "rung thất": ["I49.0"],
+            "block av độ 1": ["I44.0"],
+            "block av độ 2": ["I44.1"],
+            "block av độ 3": ["I44.2"],
+            "block av hoàn toàn": ["I44.2"],
+            "block nhánh trái trước": ["I44.4"],
+            "block nhánh trái sau": ["I44.5"],
+            "block 2 nhánh": ["I45.2"],
+            "block 3 nhánh": ["I45.3"],
+            "suy tim độ i": ["I50.1"],
+            "suy tim độ ii": ["I50.2"],
+            "suy tim độ iii": ["I50.3"],
+            "suy tim độ iv": ["I50.4"],
+            "suy tim trái": ["I50.1"],
+            "suy tim phải": ["I50.0"],
+            "suy tim toàn bộ": ["I50.9"],
+            "phình tách động mạch chủ": ["I71.0"],
+            "hẹp van hai lá": ["I34.2"],
+            "hở van động mạch chủ": ["I35.1"],
+            "hẹp van động mạch chủ": ["I35.0"],
+            "hẹp van 3 lá": ["I36.0"],
+            "hở van 3 lá": ["I36.1"],
+            "viêm cơ tim": ["I40"],
+            "viêm màng ngoài tim": ["I30"],
+            "viêm màng ngoài tim cấp": ["I30.0"],
+            "viêm nội tâm mạc": ["I33"],
+            "tràn dịch màng tim": ["I31.3"],
+            "chèn ép tim": ["I31.1"],
+            "bệnh cơ tim": ["I42"],
+            "bệnh cơ tim phì đại": ["I42.1"],
+            "bệnh cơ tim giãn": ["I42.0"],
+            "bệnh cơ tim hạn chế": ["I42.5"],
+            "thiếu máu cơ tim": ["I24.9", "I20"],
+            "thiếu máu cơ tim cục bộ": ["I25"],
+            "thiếu máu cơ tim thầm lặng": ["I25.6"],
+            "đau thắt ngực ổn định": ["I20.8"],
+            "đau thắt ngực không ổn định": ["I20.0"],
+            "cơn đau thắt ngực": ["I20"],
+            # Cerebrovascular & Neurological
+            "nhồi máu não": ["I63"],
+            "nhồi máu não cũ": ["I69.3"],
+            "xuất huyết dưới màng nhện": ["I60"],
+            "đột quỵ não": ["I64"],
+            "liệt nửa người": ["G81"],
+            "liệt mặt": ["G51.0"],
+            "co giật": ["R56"],
+            "động kinh": ["G40"],
+            "động kinh cục bộ": ["G40.0"],
+            "động kinh toàn thể": ["G40.3"],
+            "hôn mê": ["R40.2"],
+            "mất ý thức": ["R40"],
+            "ngất": ["R55"],
+            "ngất xỉu": ["R55"],
+            "đau nửa đầu": ["G43"],
+            "viêm màng não": ["G00", "G03"],
+            "viêm màng não mủ": ["G00"],
+            "viêm màng não virus": ["G02.0"],
+            "viêm não": ["G04"],
+            "viêm tủy": ["G04"],
+            "parkinson": ["G20"],
+            "alzheimer": ["G30"],
+            "sa sút trí tuệ": ["F03"],
+            "trầm cảm": ["F32"],
+            "rối loạn lo âu": ["F41"],
+            # Respiratory
+            "viêm phổi thùy": ["J18.1"],
+            "viêm phổi không điển hình": ["J18.9"],
+            "viêm phế quản": ["J42"],
+            "viêm phế quản cấp": ["J20"],
+            "viêm phế quản mạn": ["J42"],
+            "hen": ["J45"],
+            "hen bội nhiễm": ["J45"],
+            "hen cấp": ["J46"],
+            "hen mạn": ["J45"],
+            "bệnh phổi tắc nghẽn mạn": ["J44"],
+            "bệnh phổi tắc nghẽn mạn tính": ["J44"],
+            "khí phế thũng": ["J43"],
+            "tràn khí màng phổi": ["J93"],
+            "xẹp phổi": ["J98.1"],
+            "ung thư phế quản": ["C34"],
+            "lao phổi": ["A15"],
+            # Digestive & Hepatobiliary
+            "viêm gan virus": ["B19"],
+            "viêm gan a": ["B15"],
+            "viêm gan mạn": ["K73"],
+            "gan nhiễm mỡ": ["K76.0"],
+            "xơ gan mật": ["K74.4"],
+            "suy gan": ["K72"],
+            "suy gan cấp": ["K72.0"],
+            "suy gan mạn": ["K72.1"],
+            "hôn mê gan": ["K72.9"],
+            "não gan": ["K72.9"],
+            "ung thư gan nguyên phát": ["C22.0"],
+            "viêm túi mật": ["K81"],
+            "viêm túi mật cấp": ["K81.0"],
+            "sỏi mật": ["K80"],
+            "sỏi túi mật": ["K80.2"],
+            "sỏi ống mật chủ": ["K80.5"],
+            "viêm đường mật": ["K83.0"],
+            "viêm tụy": ["K86.1"],
+            "viêm tụy cấp": ["K85"],
+            "viêm tụy mạn": ["K86.1"],
+            "ung thư tụy": ["C25"],
+            "ung thư đường mật": ["C22.1", "C24"],
+            "viêm dạ dày cấp": ["K29.0"],
+            "viêm dạ dày mạn": ["K29.5"],
+            "loét dạ dày": ["K25"],
+            "loét tá tràng": ["K26"],
+            "viêm ruột thừa": ["K35"],
+            "viêm ruột thừa cấp": ["K35"],
+            "thoát vị bẹn": ["K40"],
+            "thoát vị đùi": ["K41"],
+            "thoát vị rốn": ["K42"],
+            "thoát vị hoành": ["K44"],
+            "tắc ruột": ["K56"],
+            "viêm phúc mạc": ["K65"],
+            # Renal & Urinary
+            "suy thận giai đoạn cuối": ["N18.6"],
+            "viêm bể thận": ["N12"],
+            "viêm bể thận cấp": ["N10"],
+            "viêm thận": ["N05"],
+            "viêm cầu thận": ["N05"],
+            "viêm cầu thận cấp": ["N00"],
+            "hội chứng thận hư": ["N04"],
+            "sỏi niệu quản": ["N20.1"],
+            "sỏi bàng quang": ["N21.0"],
+            "sỏi đường tiết niệu": ["N20"],
+            "viêm bàng quang": ["N30"],
+            "ung thư thận": ["C64"],
+            "ung thư bàng quang": ["C67"],
+            "ung thư tuyến tiền liệt": ["C61"],
+            # Endocrine & Metabolic
+            "suy thượng thận": ["E27"],
+            "hội chứng cushing": ["E24"],
+            # Infectious Diseases
+            "sốt xuất huyết": ["A91"],
+            "sốt xuất huyết dengue": ["A91"],
+            "sốt rét": ["B54"],
+            "sốt rét ác tính": ["B50"],
+            "lao": ["A15"],
+            "lao ngoài phổi": ["A18"],
+            "nhiễm hiv": ["B24"],
+            "aids": ["B24"],
+            "viêm gan siêu vi": ["B19"],
+            "thương hàn": ["A01"],
+            "viêm não nhật bản": ["A83.0"],
+            "covid": ["U07"],
+            "covid-19": ["U07"],
+            # Oncology
+            "ung thư vòm họng": ["C11"],
+            "ung thư thực quản": ["C15"],
+            "u lympho": ["C85"],
+            # Musculoskeletal
+            "thoái hóa cột sống": ["M47"],
+            "thoái hóa khớp gối": ["M17"],
+            "thoát vị đĩa đệm cột sống": ["M51"],
+            "viêm khớp": ["M13"],
+            "viêm đa khớp": ["M13"],
+            "trượt đĩa đệm": ["M51"],
+            "đau lưng": ["M54.5"],
+            "đau cổ": ["M54.2"],
+            "đau vai": ["M75"],
+            # Hematology
+            "thiếu máu ác tính": ["D51"],
+            "giảm tiểu cầu": ["D69"],
+            "tăng tiểu cầu": ["D75.8"],
+            "đông máu nội mạch": ["D65"],
+            # Symptoms / General
+            "tiêu chảy": ["R19.7"],
+            "phù chi dưới": ["R60.0"],
+            "gan to": ["R16.0"],
+            "lách to": ["R16.1"],
+            "tim to": ["I51.7"],
+            "suy kiệt": ["R64"],
+            "mệt mỏi": ["R53"],
+            "chán ăn": ["R63.0"],
+            "sụt cân": ["R63.4"],
+            "tăng cân": ["R63.5"],
         }
 
     def _chapter_codes_lookup(self, text: str) -> list[str]:

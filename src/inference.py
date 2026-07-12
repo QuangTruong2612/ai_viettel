@@ -41,6 +41,9 @@ from src.postprocess import (
     preprocess_input_for_llm,
     _preprocess_highlight_duplicates,
     align_and_expand_entities,
+    _validate_stage1_mentions,
+    _refine_stage2_results,
+    _stage2_fallback_classify,
 )
 from src.prompts import (
     SYSTEM_PROMPT,
@@ -48,6 +51,11 @@ from src.prompts import (
     format_few_shot_messages,
     load_few_shot,
     select_dynamic_few_shot,
+    STAGE1_PROMPT,
+    STAGE2_PROMPT,
+    build_stage1_user_prompt,
+    build_stage2_user_prompt,
+    format_few_shot_stage2_messages,
 )
 from src.rxnorm_rag import RxNormRetriever
 
@@ -323,11 +331,11 @@ def _split_into_sections(text: str, max_chunk_len: int = 1400, overlap_len: int 
         if chunks and len(chunk_str) < 280:
             # Nếu chunk cuối quá ngắn (< 280 chars), gộp luôn vào chunk liền trước và giữ nguyên offset
             prev_str, prev_offset = chunks.pop()
-            tail_len = (prev_offset + len(prev_str)) - current_offset
-            if 0 <= tail_len < len(chunk_str):
+            tail_len = max(0, (prev_offset + len(prev_str)) - current_offset)
+            if tail_len < len(chunk_str):
                 chunks.append((prev_str + chunk_str[tail_len:], prev_offset))
             else:
-                chunks.append((prev_str + "\n" + chunk_str, prev_offset))
+                chunks.append((prev_str, prev_offset))
         else:
             chunks.append((chunk_str, current_offset))
 
@@ -347,8 +355,10 @@ def process_record(
     icd_retriever: ICDRetriever,
     few_shot: list[dict[str, str]],
     output_dir: Path,
+    few_shot_stage2: list[dict[str, str]] | None = None,
+    use_two_stage: bool = True,
 ) -> None:
-    """Xử lý 1 record: gọi LLM → assemble → ghi file.
+    """Xử lý 1 record: gọi LLM (Two-Stage hoặc Single-Pass) → assemble → ghi file.
 
     Đảm bảo context cô lập per-record:
       - Reset module-level state trước khi xử lý
@@ -357,7 +367,7 @@ def process_record(
     _reset_per_record_state()
     _CURRENT_REC_ID[0] = rec_id
     t0 = time.time()
-    logger.info("[%d] Bắt đầu (len=%d)", rec_id, len(input_text))
+    logger.info("[%d] Bắt đầu (len=%d, two_stage=%s)", rec_id, len(input_text), use_two_stage)
     # Adaptive few-shot: cap ở 12-20 examples dựa trên test thực nghiệm.
     # Test data (user Kaggle 10/07/2026):
     #   12 few-shot → 37 entities (TỐT NHẤT - sweet spot)
@@ -426,7 +436,7 @@ def process_record(
             len(highlighted_input) - len(cleaned_input),
         )
 
-    # Section-Based Chunking (Cách 1): nếu bài án dài (> 1400 chars), tách thành các chunks theo đoạn
+    # Section-Based Chunking: nếu bài án dài (> 1400 chars), tách thành các chunks theo đoạn
     # để LLM càn quét kiệt để từng đoạn nhỏ, triệt tiêu hiện tượng mỏi (fatigue) bỏ sót entities ở cuối.
     chunks = _split_into_sections(highlighted_input, max_chunk_len=1400)
     if len(chunks) > 1:
@@ -435,55 +445,153 @@ def process_record(
             rec_id, len(highlighted_input), len(chunks),
         )
 
+    seen_chunk_spans: set[tuple[str, str, int, int]] = set()
     raw: list[dict[str, Any]] = []
-    for chunk_idx, (chunk_text, chunk_offset) in enumerate(chunks):
-        if not chunk_text.strip():
-            continue
-        chunk_prompt = build_user_prompt(chunk_text)
-        _log_token_budget(rec_id, llm, chunk_prompt, adaptive_few_shot)
-        try:
-            chunk_raw = _call_with_retry(
-                llm,
-                SYSTEM_PROMPT,
-                chunk_prompt,
-                history=adaptive_few_shot,
-            )
-            if not isinstance(chunk_raw, list):
-                if isinstance(chunk_raw, dict):
-                    for key in ("entities", "results", "data"):
-                        if key in chunk_raw and isinstance(chunk_raw[key], list):
-                            chunk_raw = chunk_raw[key]
-                            break
-                if not isinstance(chunk_raw, list):
-                    chunk_raw = []
 
-            # Điều chỉnh position [start, end] tương đối trong chunk về offset tuyệt đối trong highlighted_input
-            for ent in chunk_raw:
-                if isinstance(ent, dict) and "position" in ent and isinstance(ent["position"], list) and len(ent["position"]) == 2:
-                    try:
-                        s_rel, e_rel = int(ent["position"][0]), int(ent["position"][1])
-                        ent["position"] = [s_rel + chunk_offset, e_rel + chunk_offset]
-                    except (ValueError, TypeError):
-                        pass
-                raw.append(ent)
-
-            if len(chunks) > 1:
-                logger.debug(
-                    "[%d] Chunk %d/%d (offset %d, len %d) → %d entities",
-                    rec_id, chunk_idx + 1, len(chunks), chunk_offset, len(chunk_text), len(chunk_raw),
+    if use_two_stage:
+        # ======================================================================
+        # TWO-STAGE PIPELINE (Stage 1: Mentions + Python Validate -> Stage 2: Classify)
+        # ======================================================================
+        raw_stage1: list[dict[str, Any]] = []
+        for chunk_idx, (chunk_text, chunk_offset) in enumerate(chunks):
+            if not chunk_text.strip():
+                continue
+            chunk_prompt = build_stage1_user_prompt(chunk_text)
+            _log_token_budget(rec_id, llm, chunk_prompt, adaptive_few_shot)
+            try:
+                chunk_raw = _call_with_retry(
+                    llm,
+                    STAGE1_PROMPT,
+                    chunk_prompt,
+                    history=adaptive_few_shot,
                 )
-        except Exception as exc:
-            logger.error("[%d] LLM fail chunk %d/%d: %s", rec_id, chunk_idx + 1, len(chunks), exc)
-            if len(chunks) == 1:
-                # Nếu chỉ có 1 chunk và fail → ghi debug và return rỗng
-                debug_path = output_dir / f"{rec_id}.debug.txt"
+                if not isinstance(chunk_raw, list):
+                    if isinstance(chunk_raw, dict):
+                        for key in ("entities", "results", "data", "mentions"):
+                            if key in chunk_raw and isinstance(chunk_raw[key], list):
+                                chunk_raw = chunk_raw[key]
+                                break
+                    if not isinstance(chunk_raw, list):
+                        chunk_raw = []
+
+                for ent in chunk_raw:
+                    if not isinstance(ent, dict):
+                        continue
+                    pos = ent.get("position", [0, 0])
+                    if isinstance(pos, list) and len(pos) == 2:
+                        try:
+                            s_rel, e_rel = int(pos[0]), int(pos[1])
+                            ent["position"] = [s_rel + chunk_offset, e_rel + chunk_offset]
+                        except (ValueError, TypeError):
+                            pass
+                    raw_stage1.append(ent)
+            except Exception as exc:
+                logger.error("[%d] Stage 1 fail chunk %d/%d: %s", rec_id, chunk_idx + 1, len(chunks), exc)
+
+        # Python Layer: validation & exact boundary recovery
+        validated_mentions = _validate_stage1_mentions(input_text, raw_stage1)
+        logger.info(
+            "[%d] Stage 1 Mentions: %d raw spans → %d validated spans",
+            rec_id, len(raw_stage1), len(validated_mentions)
+        )
+
+        if not validated_mentions:
+            logger.warning("[%d] Stage 1 không tìm thấy mention nào hợp lệ.", rec_id)
+        else:
+            # Stage 2: Classification in batches (max 35 mentions per call)
+            s2_history = few_shot_stage2[:12] if few_shot_stage2 else []
+            batch_size = 35
+            for i in range(0, len(validated_mentions), batch_size):
+                batch = validated_mentions[i : i + batch_size]
+                s2_prompt = build_stage2_user_prompt(input_text, batch)
+                s2_raw = []
                 try:
-                    with debug_path.open("w", encoding="utf-8") as f:
-                        f.write(f"RECORD {rec_id}\nINPUT:\n{input_text}\n\nRAW RESPONSE:\n{_LAST_RAW_RESPONSE}\n")
-                except Exception:
-                    pass
-                write_output(output_dir / f"{rec_id}.json", [])
-                return
+                    s2_raw = _call_with_retry(
+                        llm,
+                        STAGE2_PROMPT,
+                        s2_prompt,
+                        history=s2_history if i == 0 else [],
+                    )
+                    if not isinstance(s2_raw, list):
+                        if isinstance(s2_raw, dict):
+                            for key in ("entities", "results", "data"):
+                                if key in s2_raw and isinstance(s2_raw[key], list):
+                                    s2_raw = s2_raw[key]
+                                    break
+                        if not isinstance(s2_raw, list):
+                            s2_raw = []
+                except Exception as exc:
+                    logger.error("[%d] Stage 2 fail batch %d-%d: %s → kích hoạt Smart Fallback", rec_id, i, i + len(batch), exc)
+
+                if not s2_raw:
+                    logger.warning("[%d] Stage 2 batch %d-%d rỗng hoặc lỗi → dùng Rule-Based Fallback Classifier", rec_id, i, i + len(batch))
+                    s2_raw = _stage2_fallback_classify(batch)
+
+                for ent in s2_raw:
+                    if isinstance(ent, dict) and ent.get("text") and ent.get("type"):
+                        raw.append(ent)
+
+            # Python Refiner: Kiểm duyệt & tự động sửa type/assertions theo luật chuyên gia
+            raw = _refine_stage2_results(input_text, raw)
+            logger.info("[%d] Stage 2 Refinement hoàn tất: %d entities", rec_id, len(raw))
+    else:
+        # ======================================================================
+        # SINGLE-PASS PIPELINE (Legacy mode for benchmarking via --no-two-stage)
+        # ======================================================================
+        for chunk_idx, (chunk_text, chunk_offset) in enumerate(chunks):
+            if not chunk_text.strip():
+                continue
+            chunk_prompt = build_user_prompt(chunk_text)
+            _log_token_budget(rec_id, llm, chunk_prompt, adaptive_few_shot)
+            try:
+                chunk_raw = _call_with_retry(
+                    llm,
+                    SYSTEM_PROMPT,
+                    chunk_prompt,
+                    history=adaptive_few_shot,
+                )
+                if not isinstance(chunk_raw, list):
+                    if isinstance(chunk_raw, dict):
+                        for key in ("entities", "results", "data"):
+                            if key in chunk_raw and isinstance(chunk_raw[key], list):
+                                chunk_raw = chunk_raw[key]
+                                break
+                    if not isinstance(chunk_raw, list):
+                        chunk_raw = []
+
+                # Điều chỉnh position [start, end] tương đối trong chunk về offset tuyệt đối trong highlighted_input
+                for ent in chunk_raw:
+                    if not isinstance(ent, dict):
+                        continue
+                    if "position" in ent and isinstance(ent["position"], list) and len(ent["position"]) == 2:
+                        try:
+                            s_rel, e_rel = int(ent["position"][0]), int(ent["position"][1])
+                            abs_s, abs_e = s_rel + chunk_offset, e_rel + chunk_offset
+                            ent["position"] = [abs_s, abs_e]
+                            key = (str(ent.get("type", "")), str(ent.get("text", "")).lower().strip(), abs_s, abs_e)
+                            if key in seen_chunk_spans:
+                                continue
+                            seen_chunk_spans.add(key)
+                        except (ValueError, TypeError):
+                            pass
+                    raw.append(ent)
+
+                if len(chunks) > 1:
+                    logger.debug(
+                        "[%d] Chunk %d/%d (offset %d, len %d) → %d entities",
+                        rec_id, chunk_idx + 1, len(chunks), chunk_offset, len(chunk_text), len(chunk_raw),
+                    )
+            except Exception as exc:
+                logger.error("[%d] LLM fail chunk %d/%d: %s", rec_id, chunk_idx + 1, len(chunks), exc)
+                if len(chunks) == 1:
+                    debug_path = output_dir / f"{rec_id}.debug.txt"
+                    try:
+                        with debug_path.open("w", encoding="utf-8") as f:
+                            f.write(f"RECORD {rec_id}\nINPUT:\n{input_text}\n\nRAW RESPONSE:\n{_LAST_RAW_RESPONSE}\n")
+                    except Exception:
+                        pass
+                    write_output(output_dir / f"{rec_id}.json", [])
+                    return
 
     # Debug: nếu LLM trả [] thì log raw response để chẩn đoán
     if not raw:
@@ -557,6 +665,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=65536,
         help="Context length Ollama (default 65536 = nhiều few-shot hơn). Nếu budget âm → ép 1 few-shot.",
+    )
+    parser.add_argument(
+        "--no-two-stage",
+        action="store_true",
+        help="Chạy ở chế độ Single-Pass (extract + classify cùng 1 call) thay vì Two-Stage.",
     )
     parser.add_argument("--log-file", type=Path, default=Path("predictions.log"))
     args = parser.parse_args(argv)
@@ -634,53 +747,35 @@ def main(argv: list[str] | None = None) -> int:
     # Tính số few-shot vừa đủ dựa trên: target_ctx - sys_prompt - max_tokens - user_input.
     # Lưu ý: chars/4 heuristic underestimate ~60% cho VN. Dùng chars/2.5 (Qwen2.5 ratio)
     # để budget chính xác hơn.
-    all_examples = load_few_shot()
-
-    # Estimate budget (target_ctx = Ollama Context Length, do user truyền)
-    # Dùng chars/3 cho VN text (Qwen tokenizer rất hiệu quả với tiếng Việt, ~3-4 chars/token)
-    sys_tokens_real = int(len(SYSTEM_PROMPT) / 3)
-    # Không reserve 8192 token cho output vì NER JSON hiếm khi vượt quá 2000 tokens.
-    max_output_tokens = min(llm.config.max_tokens, 2048)
-    reserve_for_safety = 512  # buffer cho input + few-shot overhead
-    budget_for_input = args.target_ctx - max_output_tokens - reserve_for_safety
-    budget_for_sys_fewshot = budget_for_input
-    remaining_for_fewshot = budget_for_sys_fewshot - sys_tokens_real
-    # Mỗi few-shot (user + assistant) ≈ 600 chars input mỗi (~200 tokens với chars/3)
-    if remaining_for_fewshot < 0:
-        # Budget âm: SYSTEM_PROMPT quá dài so với target_ctx.
-        # Ép dùng TỐI THIỂU 1 few-shot để có pattern (dù thiếu budget).
-        auto_few_shot = 1
-        logger.warning(
-            "Context budget ÂM (sys=%d > budget_in=%d). Ép dùng 1 few-shot.",
-            sys_tokens_real, budget_for_input,
-        )
+    use_two_stage = not args.no_two_stage
+    if use_two_stage and Path("data/examples_stage1.jsonl").exists() and Path("data/examples_stage2.jsonl").exists():
+        s1_ex = load_few_shot(Path("data/examples_stage1.jsonl"))
+        s2_ex = load_few_shot(Path("data/examples_stage2.jsonl"))
+        few_shot = format_few_shot_messages(s1_ex)
+        few_shot_stage2 = format_few_shot_stage2_messages(s2_ex)
+        logger.info("Two-Stage Pipeline mode: loaded %d S1 and %d S2 few-shot examples.", len(s1_ex), len(s2_ex))
     else:
-        # Each example ~ 200 real tokens (chars/3)
-        auto_few_shot = max(
-            0, min(remaining_for_fewshot // 200, len(all_examples), args.max_few_shot)
-        )
-        # Ít nhất 1 example để có diversity, nhiều nhất theo budget
-        auto_few_shot = max(0, min(auto_few_shot, args.max_few_shot))
+        all_examples = load_few_shot()
+        few_shot = format_few_shot_messages(all_examples)
+        few_shot_stage2 = None
+        if use_two_stage:
+            logger.info("Two-Stage Pipeline mode (using universal few_shot fallback).")
+        else:
+            logger.info("Single-Pass Pipeline mode (--no-two-stage).")
 
-    few_shot = format_few_shot_messages(all_examples)
     # Dùng real token estimate cho log
-    sys_tokens_for_log = sys_tokens_real
+    sys_tokens_for_log = int(len(SYSTEM_PROMPT) / 3)
     logger.info(
-        "Context budget: target=%d sys=%d(real) max_out=%d budget_in=%d → few_shot=%d/%d",
+        "Context budget target=%d → few_shot msgs=%d",
         args.target_ctx,
-        sys_tokens_for_log,
-        max_output_tokens,
-        budget_for_input,
-        len(few_shot) // 2 if few_shot else 0,
-        len(all_examples),
+        len(few_shot),
     )
     if few_shot:
         fs_chars = sum(len(m["content"]) for m in few_shot)
         logger.info(
-            "Few-shot selected: %d msgs, ~%d input tokens from %d total tokens budget",
+            "Few-shot Stage 1 selected: %d msgs, ~%d input tokens",
             len(few_shot),
             fs_chars // 4,
-            budget_for_sys_fewshot // 4,
         )
 
     files = list_input_files(args.input)
@@ -722,7 +817,8 @@ def main(argv: list[str] | None = None) -> int:
             # làm dừng toàn bộ loop. Đảm bảo mỗi record luôn kết thúc sạch.
             try:
                 process_record(
-                    rec_id, text, llm, retriever, icd_retriever, few_shot, args.output
+                    rec_id, text, llm, retriever, icd_retriever, few_shot, args.output,
+                    few_shot_stage2=few_shot_stage2, use_two_stage=use_two_stage,
                 )
             except SystemExit as se:
                 # SystemExit thường từ Ollama client hoặc assertFail.
@@ -762,6 +858,8 @@ def main(argv: list[str] | None = None) -> int:
                         icd_retriever,
                         few_shot,
                         args.output,
+                        few_shot_stage2=few_shot_stage2,
+                        use_two_stage=use_two_stage,
                     )
                 )
             for fut in cf.as_completed(futures):

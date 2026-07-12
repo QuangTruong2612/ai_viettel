@@ -397,6 +397,7 @@ Học cách SUY LUẬN thay vì memorize:
 # ---------------------------------------------------------------------- #
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -470,12 +471,11 @@ def load_few_shot(path: Path | None = None) -> list[dict]:
                 ex = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Invalid JSON in {p}: {line[:80]!r} ({exc})") from exc
-            # Chỉ giữ 2 fields cần thiết
             inp = ex.get("input")
             out = ex.get("output")
             if not isinstance(inp, str) or not isinstance(out, list):
                 continue
-            examples.append({"input": inp, "output": out})
+            examples.append(ex)
     return examples
 
 
@@ -529,6 +529,19 @@ def format_few_shot_messages(examples: list[dict]) -> list[dict[str, str]]:
     return msgs
 
 
+def format_few_shot_stage2_messages(examples: list[dict]) -> list[dict[str, str]]:
+    """Chuyển few-shot examples của Stage 2 sang OpenAI chat messages."""
+    msgs: list[dict[str, str]] = []
+    for ex in examples:
+        inp = ex.get("input", "")
+        ments = ex.get("mentions", [])
+        out = ex.get("output", [])
+        user_content = build_stage2_user_prompt(inp, ments)
+        msgs.append({"role": "user", "content": user_content})
+        msgs.append({"role": "assistant", "content": json.dumps(out, ensure_ascii=False)})
+    return msgs
+
+
 def build_user_prompt(input_text: str) -> str:
     """Build user prompt với input text.
 
@@ -564,3 +577,147 @@ def build_user_prompt(input_text: str) -> str:
         f"INPUT:\n{input_text}\n\n"
         "OUTPUT JSON ARRAY (chỉ các trường text, type, assertions — không cần position, không kèm lời giải thích):"
     )
+
+
+# ==============================================================================
+# TWO-STAGE PIPELINE PROMPTS (R32 - 2026-07-12)
+# ==============================================================================
+
+STAGE1_PROMPT = """Bạn là chuyên gia trích xuất thực thể y tế tiếng Việt.
+
+# NHIỆM VỤ DUY NHẤT
+Tìm TẤT CẢ các cụm từ (text spans) trong văn bản là KHÁI NIỆM Y TẾ thực sự thuộc 5 lĩnh vực lâm sàng:
+(1) Thuốc, (2) Chẩn đoán / Bệnh danh / Bất thường CLS, (3) Triệu chứng lâm sàng, (4) Tên xét nghiệm / Thăm dò, (5) Kết quả xét nghiệm / Sinh hiệu / Kết quả bình thường.
+CHỈ trả về text + position[start, end]. KHÔNG cần phân loại type hay assertions.
+
+# NÊN TRÍCH (medical mentions)
+- Tên thuốc: "aspirin 325mg x 1", "metoprolol 25mg po bid", "doxycycline"
+- Tên bệnh/chẩn đoán/bất thường: "tăng huyết áp", "viêm tuyến mồ hôi", "nhồi máu cơ tim vùng dưới cũ", "ngoại tâm thu nhĩ", "ST chênh lên"
+- Triệu chứng: "đau ngực", "khó thở", "khó thở nhẹ", "cảm giác đánh trống ngực", "mệt mỏi nhiều khi gắng sức", "thắt chặt ngực vùng trước tim"
+- Tên xét nghiệm: "điện tâm đồ", "x-quang ngực", "siêu âm tim qua thành ngực", "phân tích nước tiểu", "monitor holter"
+- Kết quả xét nghiệm/sinh hiệu: "bình thường", "không ghi nhận gì bất thường", "nhịp xoang chiếm ưu thế", "160/90 mmHg", "VS98.3 12987 56 18 99RA"
+
+# KHÔNG ĐƯỢC TRÍCH (false positives / noise)
+- Câu chuyện cá nhân / giao tiếp: "Tỉnh dậy thấy cháu gái hét lên", "cô ấy sẽ được phục vụ tốt hơn", "bệnh nhân đã đến khám"
+- Hành vi / đánh giá chung: "theo đó", "sau đó", "kết quả cho thấy", "quyết định rằng", "nhận thấy", "chúng tôi sẽ"
+- Từ chung chung mờ nhạt 1 từ: "bệnh", "đau", "mệt" (trừ khi là triệu chứng rõ ràng trong khám lâm sàng)
+- Đoạn văn kể chuyện dài > 40-60 ký tự không chứa thông tin định lượng thuốc hay chỉ số
+
+# QUY TẮC BOUNDARY CỐT LÕI
+- Giữ chính xác text trong input, không thêm/bớt từ hoặc tự viết lại.
+- KHÔNG gộp chỉ định vào chẩn đoán: "nhồi máu cơ tim vùng dưới cũ (điện tâm đồ (ecg))" → TÁCH thành các mentions riêng biệt: "nhồi máu cơ tim vùng dưới cũ", "điện tâm đồ", "ecg".
+- Nếu một cụm từ xuất hiện lặp lại ở nhiều vị trí khác nhau trong văn bản → BẮT BUỘC trích xuất tất cả các lần xuất hiện với các position khác nhau.
+
+# OUTPUT FORMAT
+[
+  {"text": "<exact text from input>", "position": [start, end]},
+  ...
+]
+
+QUAN TRỌNG: position tính theo CHARACTER index trong input gốc (0-indexed).
+"""
+
+STAGE2_PROMPT = """Bạn là chuyên gia phân loại thực thể y tế tiếng Việt lâm sàng.
+
+# NHIỆM VỤ
+Cho một danh sách các cụm từ y tế (đã được trích xuất từ văn bản gốc kèm vị trí character position), hãy phân loại cho mỗi cụm từ:
+- type: BẮT BUỘC chọn đúng 1 trong 5 loại:
+  - THUỐC: Tên thuốc, hoạt chất, liều lượng (`aspirin 325mg po bid`).
+  - CHẨN_ĐOÁN: Tên bệnh lý, hội chứng, tổn thương hình ảnh, bất thường ECG (`tăng huyết áp`, `ngoại tâm thu nhĩ`, `ST chênh lên`).
+  - TRIỆU_CHỨNG: Biểu hiện cơ năng/thực thể, cảm giác lâm sàng (`đau ngực`, `khó thở`, `cảm giác đánh trống ngực`).
+  - TÊN_XÉT_NGHIỆM: Chỉ định cận lâm sàng, thăm dò, thủ thuật (`điện tâm đồ`, `x-quang ngực`, `siêu âm tim`).
+  - KẾT_QUẢ_XÉT_NGHIỆM: Chỉ số định lượng (`160/90 mmHg`, `96%`), chuỗi sinh hiệu (`VS98.3 12987...`) hoặc kết quả bình thường (`nhịp xoang chiếm ưu thế`, `bình thường`, `không ghi nhận gì bất thường`).
+- assertions: Mảng chuỗi các nhãn ngữ cảnh lâm sàng, có thể chứa:
+  - "isNegated": Nếu cụm từ bị phủ định trực tiếp (`không đau ngực`, `không có khó thở`). Lưu ý: Kết quả bình thường (`ECG bình thường`) KHÔNG negated!
+  - "isHistorical": Nếu cụm từ thuộc phần tiền sử (`Tiền sử: THA 10 năm`) hoặc thuốc đang dùng trước nhập viện (`Thuốc trước nhập viện`).
+  - "isFamily": Nếu cụm từ là bệnh của người thân (`bố bị ĐTĐ`, `tiền sử gia đình ung thư`).
+  - Nếu không thuộc các trường hợp trên → assertions để mảng rỗng `[]`.
+
+# ĐẦU VÀO
+Văn bản gốc đầy đủ (để hiểu ngữ cảnh):
+<input>
+{input_text}
+</input>
+
+Danh sách mentions cần phân loại (kèm đoạn ngữ cảnh trích xuất xung quanh để phán đoán chính xác nhãn phủ định/tiền sử):
+{mentions_list}
+
+# ĐẦU RA
+Trả về JSON array chứa đầy đủ các mentions đã phân loại:
+[
+  {{"text": "...", "position": [start, end], "type": "THUỐC|CHẨN_ĐOÁN|TRIỆU_CHỨNG|TÊN_XÉT_NGHIỆM|KẾT_QUẢ_XÉT_NGHIỆM", "assertions": ["isNegated", "isHistorical", "isFamily"]}},
+  ...
+]
+
+# QUY TẮC
+- Giữ nguyên chính xác `text` và `position` từ danh sách mentions đầu vào. KHÔNG đổi offset hoặc bỏ bớt mention nào.
+- Dùng thông tin `| ngữ cảnh: "..."` đi kèm mỗi mention để xác định cực kỳ chính xác `type` và `assertions`.
+"""
+
+
+def build_stage1_user_prompt(input_text: str) -> str:
+    """Build user prompt cho Stage 1 Mention Extraction."""
+    return (
+        "🎯 NHIỆM VỤ: Tìm và trích xuất tất cả các cụm từ y khoa (medical concept spans) trong văn bản lâm sàng dưới đây kèm vị trí character offset [start, end].\n\n"
+        f"INPUT:\n{input_text}\n\n"
+        "OUTPUT JSON ARRAY (chỉ trả về [{'text': '...', 'position': [start, end]}], không kèm lời giải thích):"
+    )
+
+
+def build_stage2_user_prompt(input_text: str, mentions: list[dict]) -> str:
+    """Build user prompt cho Stage 2 Classification, kèm theo Local Context Injection (±45 chars)."""
+    lines = []
+    for i, m in enumerate(mentions):
+        text = m.get("text", "")
+        pos = m.get("position", [0, 0])
+        snippet = ""
+        if isinstance(pos, list) and len(pos) == 2:
+            try:
+                s, e = int(pos[0]), int(pos[1])
+                if 0 <= s <= e <= len(input_text):
+                    ctx_s = max(0, s - 45)
+                    ctx_e = min(len(input_text), e + 45)
+                    raw_snippet = input_text[ctx_s:ctx_e].strip()
+                    clean_snippet = re.sub(r'\s+', ' ', raw_snippet)
+                    snippet = f' | ngữ cảnh: "...{clean_snippet}..."'
+            except (ValueError, TypeError):
+                pass
+        lines.append(f"- {i+1}. text=\"{text}\" position={pos}{snippet}")
+    mentions_str = "\n".join(lines)
+    return STAGE2_PROMPT.format(
+        input_text=input_text,
+        mentions_list=mentions_str,
+    )
+
+
+ICD_LLM_FALLBACK_PROMPT = """Bạn là bác sĩ chuyên gia. Hãy đề xuất ICD-10 code phù hợp nhất.
+
+Cho một chẩn đoán y tế tiếng Việt, trả về danh sách ICD-10 code(s) chính xác nhất.
+
+QUY TẮC:
+- Ưu tiên code cụ thể (3-4 ký tự) hơn code cha
+- Nếu không chắc chắn, trả 1 code gần nhất
+- Format: I21, I21.1, K70.3, J18, etc.
+- KHÔNG trả code ngoài ICD-10
+- KHÔNG giải thích
+
+Input: "{entity_text}"
+Context: {context_window}
+
+Output: [code1, code2, ...]
+"""
+
+RXNORM_LLM_FALLBACK_PROMPT = """Bạn là dược sĩ lâm sàng. Hãy đề xuất RxNorm rxcui code cho thuốc.
+
+Cho tên thuốc tiếng Việt (có thể kèm liều), trả về rxcui code (số nguyên).
+
+QUY TẮC:
+- Trả về rxcui code chính xác nhất cho hoạt chất/thuốc
+- Bỏ qua thông tin route (po, iv, bid) và tần suất
+- Nếu không chắc, trả [] (không trả sai code)
+
+Input: "{drug_text}"
+
+Output: [rxcui1, rxcui2, ...]
+"""
+

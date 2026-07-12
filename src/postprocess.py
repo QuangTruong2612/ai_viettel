@@ -243,6 +243,274 @@ def validate_positions(
     return out
 
 
+# ==============================================================================
+# STAGE 1 MENTION BOUNDARY VALIDATION (R32 - 2026-07-12)
+# ==============================================================================
+
+def _try_recover_position(input_text: str, text: str, hint_pos: int, window: int = 50) -> dict[str, Any] | None:
+    """Tìm text trong input xung quanh hint_pos ± window chars cho Stage 1 mentions."""
+    text_lower = text.lower()
+    occurrences: list[int] = []
+    start = 0
+    while True:
+        idx = input_text.lower().find(text_lower, start)
+        if idx < 0:
+            break
+        occurrences.append(idx)
+        start = idx + 1
+        if len(occurrences) > 20:
+            break
+
+    if not occurrences:
+        # Sử dụng _find_span có sẵn với recovery sliding window
+        span = _find_span(input_text, text, start=max(0, hint_pos - 15))
+        if span is not None:
+            return {"text": input_text[span[0]:span[1]], "position": [span[0], span[1]]}
+        # Thử fuzzy match sliding window ratio >= 80 nếu span là None
+        try:
+            from rapidfuzz import fuzz
+            candidates: list[tuple[int, float]] = []
+            step = max(1, len(text) // 2)
+            for i in range(0, max(1, len(input_text) - len(text) + 1), step):
+                window_text = input_text[i : i + len(text) + 10]
+                score = fuzz.ratio(text_lower, window_text.lower())
+                if score >= 80:
+                    candidates.append((i, score))
+            if candidates:
+                best = min(candidates, key=lambda c: abs(c[0] - hint_pos))
+                return {"text": input_text[best[0] : best[0] + len(text)], "position": [best[0], best[0] + len(text)]}
+        except ImportError:
+            pass
+        return None
+
+    best_pos = min(occurrences, key=lambda p: abs(p - hint_pos))
+    return {"text": input_text[best_pos : best_pos + len(text)], "position": [best_pos, best_pos + len(text)]}
+
+
+def _boost_and_split_stage1_mentions(input_text: str, mentions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Tách gộp (Compound Splitting) và bổ sung sinh hiệu/thuốc cốt lõi (Recall Booster) cho Stage 1."""
+    # 1. Compound Splitting (Tách cụm gộp)
+    split_mentions: list[dict[str, Any]] = []
+    for m in mentions:
+        text = str(m.get("text", "")).strip()
+        pos = m.get("position", [0, 0])
+        if not isinstance(pos, list) or len(pos) != 2:
+            split_mentions.append(m)
+            continue
+        s, e = int(pos[0]), int(pos[1])
+        
+        # Tách cấu trúc: Tên XN (Abbr) -> ví dụ "điện tâm đồ (ECG)" -> "điện tâm đồ", "ECG"
+        m_paren = re.match(r"^(.+?)\s*\((.+?)\)$", text)
+        if m_paren and len(text) > 8:
+            part1, part2 = m_paren.group(1).strip(), m_paren.group(2).strip()
+            idx1 = input_text.find(part1, max(0, s - 5), min(len(input_text), e + 5))
+            idx2 = input_text.find(part2, max(0, s - 5), min(len(input_text), e + 5))
+            if idx1 >= 0 and idx2 >= 0:
+                split_mentions.append({"text": input_text[idx1:idx1+len(part1)], "position": [idx1, idx1+len(part1)]})
+                split_mentions.append({"text": input_text[idx2:idx2+len(part2)], "position": [idx2, idx2+len(part2)]})
+                continue
+
+        # Tách theo từ nối " và " hoặc ", " nếu span dài > 24 chars và không phải bệnh/thuốc gộp cố định
+        if (" và " in text or ", " in text) and len(text) > 24 and not re.search(r"(?:tràn dịch|tràn khí|động mạch|tĩnh mạch|nhồi máu|viêm|thuốc)", text, re.IGNORECASE):
+            parts = re.split(r"\s+và\s+|,\s*", text)
+            curr_offset = s
+            temp_list = []
+            for p in parts:
+                p_clean = p.strip()
+                if len(p_clean) >= 3:
+                    idx = input_text.find(p_clean, curr_offset, e + 5)
+                    if idx >= 0:
+                        temp_list.append({"text": input_text[idx:idx+len(p_clean)], "position": [idx, idx+len(p_clean)]})
+                        curr_offset = idx + len(p_clean)
+            if len(temp_list) >= 2:
+                split_mentions.extend(temp_list)
+                continue
+
+        split_mentions.append(m)
+
+    # 2. Recall Booster (Mention Injection cho Sinh hiệu / Định lượng cốt lõi)
+    existing_spans = {(item["position"][0], item["position"][1]) for item in split_mentions if "position" in item and len(item["position"]) == 2}
+    
+    # Các regex cốt lõi cần quét bổ sung
+    patterns = [
+        r"\b(?:HA|Huyết\s+áp)\s*[:=]?\s*\d{2,3}/\d{2,3}\s*(?:mmHg)?\b",
+        r"\b\d{2,3}/\d{2,3}\s*mmHg\b",
+        r"\b(?:SpO2|Sp02)\s*[:=]?\s*\d{2,3}\s*%\b",
+        r"\b(?:Mạch|Tần\s+số\s+tim|Nhịp\s+tim)\s*[:=]?\s*\d{2,3}\s*(?:lần/phút|nhịp/phút)?\b",
+        r"\b(?:EF|LVEF)\s*[:=]?\s*\d{2,3}\s*%\b",
+        r"\bVS\d+\.\d+\s+(?:\d+\s+){3,5}\d+[A-Z0-9]*\b",
+    ]
+    for pat in patterns:
+        for match in re.finditer(pat, input_text, re.IGNORECASE):
+            ms, me = match.start(), match.end()
+            if not any(max(ms, es) < min(me, ee) for (es, ee) in existing_spans):
+                split_mentions.append({"text": match.group(0).strip(), "position": [ms, me]})
+                existing_spans.add((ms, me))
+
+    split_mentions.sort(key=lambda x: x["position"][0] if "position" in x and len(x["position"]) == 2 else 0)
+    return split_mentions
+
+
+def _validate_stage1_mentions(input_text: str, mentions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Validate Stage 1 mentions: drop invalid length/noise, fix positions exact/fuzzy.
+
+    Returns list of {"text": str, "position": [start, end]} đã được chuẩn hóa.
+    """
+    valid: list[dict[str, Any]] = []
+    seen_spans: set[tuple[int, int]] = set()
+
+    for m in mentions:
+        if not isinstance(m, dict):
+            continue
+        text = str(m.get("text", "")).strip()
+        pos = m.get("position", [0, 0])
+        if not isinstance(pos, list) or len(pos) != 2:
+            pos = [0, 0]
+        hint_pos = int(pos[0]) if isinstance(pos[0], int) else 0
+
+        # 1. Drop nếu text > 60 chars (trừ khi chứa định lượng thuốc rõ ràng)
+        if len(text) > 60 and not re.search(r"\d+\s*(mg|mcg|g|ml|iu|viên|ống|gói|x\s*\d)", text, re.IGNORECASE):
+            continue
+
+        # 2. Drop nếu text > 40 chars và chứa dấu câu narrative (.,;:)
+        if len(text) > 40 and any(c in text for c in ".,;:"):
+            continue
+
+        # 3. Drop theo noise patterns (_DROP_NOISE_PATTERNS / pure duration)
+        if any(p.match(text) for p in _DROP_NOISE_PATTERNS) or _PURE_DURATION_ENHANCED_RE.match(text):
+            continue
+
+        # 4. Exact validation t[pos[0]:pos[1]] vs input
+        if 0 <= pos[0] < pos[1] <= len(input_text):
+            actual_text = input_text[pos[0]:pos[1]]
+            if actual_text.lower() == text.lower():
+                span = (pos[0], pos[1])
+                if span not in seen_spans:
+                    seen_spans.add(span)
+                    valid.append({"text": actual_text, "position": [pos[0], pos[1]]})
+                continue
+
+        # 5. Fuzzy / closest recovery
+        recovered = _try_recover_position(input_text, text, hint_pos)
+        if recovered is not None:
+            rpos = recovered["position"]
+            span = (rpos[0], rpos[1])
+            if span not in seen_spans:
+                seen_spans.add(span)
+                valid.append(recovered)
+            continue
+
+    return _boost_and_split_stage1_mentions(input_text, valid)
+
+
+def _refine_stage2_results(input_text: str, stage2_entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Kiểm duyệt & tinh chỉnh nhãn type và assertions sau Stage 2 theo luật chuyên gia."""
+    refined: list[dict[str, Any]] = []
+    
+    drug_endings = re.compile(r"\d+\s*(?:mg|mcg|g|ml|iu|viên|ống|gói|po|bid|tid|daily|prn)$", re.IGNORECASE)
+    drug_names = {"aspirin", "atenolol", "metoprolol", "amlodipine", "bisoprolol", "furosemide", "paracetamol", "doxycycline", "clopidogrel", "atorvastatin", "losartan", "enoxaparin", "nitroglycerin"}
+    normal_patterns = re.compile(r"^(?:bình\s+thường|không\s+ghi\s+nhận.*|nhịp\s+xoang.*|không\s+có\s+gì\s+đáng\s+chú\s+ý)$", re.IGNORECASE)
+    vital_patterns = re.compile(r"^(?:\d{2,3}/\d{2,3}\s*(?:mmHg)?|SpO2.*|\d{2,3}\s*%|VS\d+\.\d+.*|\d{2,3}\s*(?:lần/phút|nhịp/phút|\s*°C))$", re.IGNORECASE)
+    test_names = {"điện tâm đồ", "ecg", "x-quang ngực", "siêu âm tim", "siêu âm tim qua thành ngực", "phân tích nước tiểu", "công thức máu", "monitor holter", "chụp x-quang"}
+
+    for ent in stage2_entities:
+        if not isinstance(ent, dict):
+            continue
+        text = str(ent.get("text", "")).strip()
+        pos = ent.get("position", [0, 0])
+        etype = str(ent.get("type", "")).strip()
+        assertions = list(ent.get("assertions", [])) if isinstance(ent.get("assertions"), list) else []
+
+        # A. Auto-Type Correction
+        if normal_patterns.match(text) or vital_patterns.match(text):
+            etype = "KẾT_QUẢ_XÉT_NGHIỆM"
+        elif drug_endings.search(text) or any(text.lower().startswith(dn) for dn in drug_names):
+            etype = "THUỐC"
+        elif text.lower() in test_names:
+            etype = "TÊN_XÉT_NGHIỆM"
+
+        # B. Assertion Cross-Validation & Refinement
+        if etype == "KẾT_QUẢ_XÉT_NGHIỆM" and "isNegated" in assertions:
+            assertions = [a for a in assertions if a != "isNegated"]
+
+        if isinstance(pos, list) and len(pos) == 2 and etype in ("CHẨN_ĐOÁN", "THUỐC", "TRIỆU_CHỨNG"):
+            try:
+                s = int(pos[0])
+                if 0 <= s < len(input_text):
+                    pre_window = input_text[max(0, s - 16):s].lower()
+                    if re.search(r"\b(?:không|chưa|chẳng)\s+(?:có\s+)?$", pre_window) and not re.search(r"\b(?:tuân\s+thủ|rõ|thể|biết|dùng)\s*$", pre_window):
+                        if "isNegated" not in assertions:
+                            assertions.append("isNegated")
+
+                    # Rule-Dominance Merge (Super-Upgrade 5)
+                    rule_assertions = _detect_assertions_from_context(text, input_text, etype, s)
+                    section_id = _find_current_section(input_text, s)
+                    if section_id == "tien_su":
+                        if "isHistorical" not in assertions:
+                            assertions.append("isHistorical")
+                    elif section_id in ("hien_tai", "ly_do", "danh_gia", "khám"):
+                        assertions = [a for a in assertions if a != "isHistorical"]
+
+                    for ra in rule_assertions:
+                        if ra in ("isNegated", "isFamily") and ra not in assertions:
+                            assertions.append(ra)
+            except (ValueError, TypeError):
+                pass
+
+        seen_a = set()
+        clean_a = []
+        for a in assertions:
+            if a in ("isNegated", "isHistorical", "isFamily") and a not in seen_a:
+                seen_a.add(a)
+                clean_a.append(a)
+
+        ent["type"] = etype
+        ent["assertions"] = clean_a
+        refined.append(ent)
+
+    return refined
+
+
+def _stage2_fallback_classify(mentions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Smart Fallback Classifier cho Stage 2 (dùng khi LLM trả về lô rỗng hoặc timeout)."""
+    fallback_list: list[dict[str, Any]] = []
+    drug_endings = re.compile(r"\d+\s*(?:mg|mcg|g|ml|iu|viên|ống|gói|po|bid|tid|daily|prn)$", re.IGNORECASE)
+    drug_names = {"aspirin", "atenolol", "metoprolol", "amlodipine", "bisoprolol", "furosemide", "paracetamol", "doxycycline", "clopidogrel", "atorvastatin", "losartan", "enoxaparin", "nitroglycerin"}
+    normal_patterns = re.compile(r"^(?:bình\s+thường|không\s+ghi\s+nhận.*|nhịp\s+xoang.*|không\s+có\s+gì\s+đáng\s+chú\s+ý)$", re.IGNORECASE)
+    vital_patterns = re.compile(r"^(?:\d{2,3}/\d{2,3}\s*(?:mmHg)?|SpO2.*|\d{2,3}\s*%|VS\d+\.\d+.*|\d{2,3}\s*(?:lần/phút|nhịp/phút|\s*°C))$", re.IGNORECASE)
+    test_names = {"điện tâm đồ", "ecg", "x-quang ngực", "siêu âm tim", "siêu âm tim qua thành ngực", "phân tích nước tiểu", "công thức máu", "monitor holter", "chụp x-quang"}
+    symptom_hints = {"đau ", "khó thở", "sốt", "mệt mỏi", "đánh trống ngực", "thắt chặt ngực", "buồn nôn", "chóng mặt", "ho ", "phù "}
+
+    for m in mentions:
+        if not isinstance(m, dict):
+            continue
+        text = str(m.get("text", "")).strip()
+        pos = m.get("position", [0, 0])
+        if not text:
+            continue
+        tl = text.lower()
+        
+        if normal_patterns.match(text) or vital_patterns.match(text):
+            etype = "KẾT_QUẢ_XÉT_NGHIỆM"
+        elif drug_endings.search(text) or any(tl.startswith(dn) for dn in drug_names):
+            etype = "THUỐC"
+        elif tl in test_names or "xét nghiệm" in tl or "chụp" in tl or "siêu âm" in tl:
+            etype = "TÊN_XÉT_NGHIỆM"
+        elif any(sh in tl for sh in symptom_hints):
+            etype = "TRIỆU_CHỨNG"
+        else:
+            etype = "CHẨN_ĐOÁN"
+
+        fallback_list.append({
+            "text": text,
+            "position": pos,
+            "type": etype,
+            "assertions": []
+        })
+
+    return fallback_list
+
+
 def _find_closest_occurrence(
     text: str, substring: str, hint_pos: int
 ) -> int | None:
@@ -721,31 +989,38 @@ def _detect_assertions_from_context(
     if is_in_tien_su:
         found.append("isHistorical")
 
-    # isFamily: cần word boundary để tránh "ông " match "không "
+    # isFamily: sử dụng re.UNICODE và patterns đầy đủ cho tiếng Việt
     family_patterns = [
-        r"\bbố\s+([bệe]nh\s+)?nh[âa]n",       # bố (bệnh) nhân
-        r"\bm[ẹe]\s+([bệe]nh\s+)?nh[âa]n",      # mẹ/me (bệnh) nhân
-        r"\bcha\s+([bệe]nh\s+)?nh[âa]n",      # cha (bệnh) nhân
-        r"\banh\s+(trai\s+)?[bệe]nh\s+nh[âa]n",
-        r"\bch[ịi]\s+(g[áa]i\s+)?[bệe]nh\s+nh[âa]n",
-        r"\bem\s+(trai\s+|g[áa]i\s+)?[bệe]nh\s+nh[âa]n",
-        r"\bcon\s+(trai\s+|g[áa]i\s+)?[bệe]nh\s+nh[âa]n",
-        r"\bông\s+([bệe]nh\s+)?nh[âa]n",       # ông (bệnh) nhân — word boundary!
-        r"\bbà\s+([bệe]nh\s+)?nh[âa]n",        # bà (bệnh) nhân
-        r"\bti[eề]n\s+s[ử]?\s*gia\s+[đd][ìi]nh",  # tiền sử gia đình
+        r"(?:bố|cha)(?:\s+(?:bệnh|nhân|em|cô|dì|chú|bác))?\s+(?:bệnh\s+)?nhân",
+        r"(?:mẹ|me)(?:\s+(?:bệnh|nhân|em|cô|dì|chú|bác))?\s+(?:bệnh\s+)?nhân",
+        r"(?:anh|chị|em)(?:\s+(?:trai|gái))?\s+(?:bệnh\s+)?nhân",
+        r"(?:con)(?:\s+(?:trai|gái))?\s+(?:bệnh\s+)?nhân",
+        r"(?:ông|bà)(?:\s+(?:bệnh|nhân|em|cô|dì|chú|bác))?\s+(?:bệnh\s+)?nhân",
+        r"gia\s+đình\s+có",
+        r"ti[eề]n\s+s[ử]?\s*gia\s+[đd][ìi]nh",
+        r"họ\s+hàng",
+        r"người\s+thân",
+        r"di\s+truyền",
     ]
-    # Window 200 chars quanh entity cho family
-    family_win_start = max(0, pos - 200)
-    family_win_end = min(len(input_text), pos + len(entity_text) + 100)
-    family_window = text_lower[family_win_start:family_win_end]
+    # Window 200 chars quanh entity cho family, NHƯNG cắt theo ranh giới câu (Clause Boundary Barriers - Super-Upgrade 3)
+    family_win_start = max(0, pos - 160)
+    family_win_end = min(len(input_text), pos + len(entity_text) + 80)
+    family_slice = text_lower[family_win_start:family_win_end]
+    rel_pos = pos - family_win_start
+    barriers = [m.start() for m in re.finditer(r'[.;\n]+', family_slice)]
+    clause_start = max([b for b in barriers if b < rel_pos], default=0)
+    clause_end = min([b for b in barriers if b >= rel_pos + len(entity_text)], default=len(family_slice))
+    family_window = family_slice[clause_start:clause_end]
     for pat in family_patterns:
-        if re.search(pat, family_window):
+        if re.search(pat, family_window, re.UNICODE):
             found.append("isFamily")
             break
 
     # isNegated: check "không", "chưa", "âm tính", "loại trừ" trong window trước entity.
-    # Lưu ý: "không" có thể nằm sát entity (vd "không sốt" → pre_window kết thúc bằng "khô").
-    near = text_lower[max(0, pos - 35):pos + min(len(entity_text), 15)]  # rộng hơn để bắt đủ ngữ cảnh phủ định
+    # Clause Boundary Barriers (Super-Upgrade 3): cắt bỏ trước các ranh giới mệnh đề
+    near_raw = text_lower[max(0, pos - 45):pos + min(len(entity_text), 15)]
+    near_parts = re.split(r'[.;\n]|(?:\b(?:nhưng|tuy\s+nhiên|ngoại\s+trừ|hiện\s+tại|khám|chẩn\s+đoán|kết\s+luận|lúc\s+nhập\s+viện)\b)', near_raw)
+    near = near_parts[-1]
     found_negated = False
     neg_phrases = (
         "không thấy", "chưa thấy", "chưa có dấu hiệu", "loại trừ",
@@ -755,9 +1030,23 @@ def _detect_assertions_from_context(
     )
     for neg in neg_phrases:
         if neg in near:
-            if re.search(r'\b' + re.escape(neg) + r'\b', near):
+            if re.search(r'\b' + re.escape(neg) + r'\b', near, re.UNICODE):
                 found_negated = True
                 break
+
+    if found_negated:
+        NON_NEGATION_CONTEXTS = (
+            r"không\s+tuân\s+thủ",
+            r"không\s+thể",
+            r"không\s+có\s+khả\s+năng",
+            r"chưa\s+rõ",
+            r"không\s+được\s+(?:thực\s+hiện|làm|chụp|tiến\s+hành)",
+        )
+        for pat in NON_NEGATION_CONTEXTS:
+            if re.search(pat, near, re.UNICODE):
+                found_negated = False
+                break
+
     if found_negated and "isNegated" not in found:
         found.append("isNegated")
 
@@ -974,10 +1263,10 @@ def _filter_lifestyle_entities(entities: list[dict]) -> list[dict]:
             out.append(ent)
             continue
 
-        # 1. Lọc lifestyle / social / psych keywords
-        if _LIFESTYLE_RE.search(text):
+        # 1. Lọc lifestyle / social / psych keywords & narrative noise
+        if _LIFESTYLE_RE.search(text) or any(p.match(text.lower().strip()) for p in _DROP_NOISE_PATTERNS):
             logger.debug(
-                "[%d] Drop lifestyle/social/psych entity '%s' (kw match)",
+                "[%d] Drop lifestyle/social/psych/noise entity '%s'",
                 _seen_count, text,
             )
             continue
@@ -1050,11 +1339,9 @@ def sanitize_drug_text(text: str) -> str:
 # Leading verb/qualifier cần STRIP khi ở đầu TRIỆU_CHỨNG/CHẨN_ĐOÁN
 # (giữ lại canonical names như "tăng huyết áp" qua whitelist)
 _LEADING_VERB_QUALIFIER_RE = re.compile(
-    r"^(không\s+còn\s+cảm\s+giác|không\s+có\s+cảm\s+giác|còn\s+cảm\s+giác|không\s+còn\s+|không\s+có\s+|không\s+thấy\s+|"
-    r"còn\s+|tình\s+trạng\s+|cảm\s+giác\s+|cảm\s+thấy\s+|thấy\s+|có\s+dấu\s+hiệu\s+|có\s+triệu\s+chứng\s+|"
-    r"có\s+cảm\s+giác\s+|nhận\s+thấy\s+|ghi\s+nhận\s+|"
-    r"có\s+|bị\s+|xuất\s+hiện\s+|biểu\s+hiện\s+|xảy\s+ra\s+|phát\s+hiện\s+|gặp\s+phải\s+|"
-    r"tăng\s+|giảm\s+|nhiều\s+|ít\s+)\s*",
+    r"^(không\s+còn\s+|không\s+có\s+|không\s+thấy\s+|"
+    r"cảm\s+thấy\s+|thấy\s+|nhận\s+thấy\s+|ghi\s+nhận\s+|có\s+dấu\s+hiệu\s+|có\s+triệu\s+chứng\s+|"
+    r"có\s+|bị\s+|xuất\s+hiện\s+|biểu\s+hiện\s+|xảy\s+ra\s+|phát\s+hiện\s+|gặp\s+phải\s+)\s*",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -1086,11 +1373,30 @@ _DROP_NOISE_PATTERNS = [
     re.compile(r"^khi\s+đến\s+khoa.*$", re.IGNORECASE),
     re.compile(r"^vào\s+lúc.*$", re.IGNORECASE),
     # Fix #7: noise narrative về quá trình
-    re.compile(r"^khi\s+(?:được\s+)?chuyển\s+(?:vào|tới)\s+\w+", re.IGNORECASE),
-    re.compile(r"^khi\s+(?:đến|nhập|vào)\s+(?:khoa|viện)", re.IGNORECASE),
-    re.compile(r"^trong\s+quá\s+trình\s+\w+", re.IGNORECASE),
-    re.compile(r"^sau\s+khi\s+(?:được\s+)?\w+", re.IGNORECASE),
-    re.compile(r"^trước\s+khi\s+(?:được\s+)?\w+", re.IGNORECASE),
+    re.compile(r"^khi\s+(?:được\s+)?chuyển\s+(?:vào|tới|đến).*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^khi\s+(?:đến|nhập|vào)\s+(?:khoa|viện).*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^trong\s+quá\s+trình.*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^sau\s+khi\s+.*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^trước\s+khi\s+.*$", re.IGNORECASE | re.UNICODE),
+    # Fix 3.2: Drop narrative/lifestyle/status noise chunks
+    re.compile(r"^(?:bệnh\s+nhân\s+)?(?:đã|đang)?\s*(?:ăn\s+uống|ngủ|sinh\s+hoạt|tiếp\s+xúc).*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^(?:bệnh\s+nhân\s+)?(?:tỉnh|tiếp\s+xúc\s+tốt|da\s+niêm\s+hồng|hồng\s+hào).*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^quá\s+trình\s+bệnh\s+lý.*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^diễn\s+biến\s+(?:bệnh|tại\s+khoa).*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^tình\s+trạng\s+(?:hiện\s+tại|lúc\s+nhập\s+viện)$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^(?:được|đã)\s+(?:chuyển|chỉ\s+định|khuyên).*$", re.IGNORECASE | re.UNICODE),
+    # Stage 1 Narrative False Positives (Fix 2.2 / R32)
+    re.compile(r"^cô\s+ấy\s+sẽ\s+được.*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^tỉnh\s+dậy\s+thấy.*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^quyết\s+định\s+rằng.*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^nhận\s+thấy.*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^ước\s+tính.*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^chúng\s+tôi\s+(?:sẽ|đã|đang).*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^bệnh\s+nhân\s+(?:sẽ|đã|đang|có\s+thể).*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^theo\s+(?:đó|sự|chỉ\s+định).*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^sau\s+đó.*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^xỉu\s+trước$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^ngất\s+xỉu\s*$", re.IGNORECASE | re.UNICODE),
 ]
 
 # Pure duration (R28.2) - standalone time expression should not be entity
@@ -1192,6 +1498,14 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
             ).strip()
             if not text_new:
                 break
+
+        if etype == "CHẨN_ĐOÁN":
+            stripped_paren = re.sub(
+                r"\s*\(([^)]*(?:điện tâm đồ|x-quang|siêu âm|ECG|MRI|CT|XN)[^)]*)\)",
+                "", text_new, flags=re.IGNORECASE | re.UNICODE
+            ).strip()
+            if stripped_paren and stripped_paren != text_new:
+                text_new = stripped_paren
 
         if text_new != text and len(text_new) >= 3:
             logger.debug("Clean: strip leading/trailing '%s' → '%s'", text, text_new)
@@ -1422,7 +1736,15 @@ def _split_long_imaging_result(
         })
         search_start = finding_pos[1]
 
-    return result if len(result) >= 2 else None
+    if len(result) >= 2:
+        for r in result:
+            if not r.get("assertions") and isinstance(r.get("position"), list) and len(r["position"]) == 2:
+                detected = _detect_assertions_from_context(
+                    r["text"], input_text, r["type"], r["position"][0]
+                )
+                r["assertions"] = sorted(set(detected))
+        return result
+    return None
 
 
 
@@ -1641,44 +1963,11 @@ def _expand_duplicates(entities, input_text):
 
         all_positions = [list(p) for p in sorted(all_positions_set)]
 
-        # Nếu chỉ có 1 occurrence → giữ nguyên
-        if len(all_positions) <= 1:
-            continue
-
-        # Nếu có N occurrences > 1 entity hiện tại → tạo thêm entities
-        # MỚI 2026-07-10: check overlap thay vì chỉ check start position
-        # LLM 7B hay output duplicate với position LỆCH (vd [97,110] vs [102,110])
-        # → tránh tạo thêm entity trùng overlap
-        existing_positions = [
-            (e.get("position", [0, 0])[0], e.get("position", [0, 0])[1])
-            for e in expanded
-            if e.get("text", "").lower() == text_lower
-            or _MODIFIERS_PREFIX.sub("", e.get("text", "").lower()).strip() == text_stripped
-        ]
-        # Tìm các positions chưa có entity VÀ KHÔNG overlap với existing
-        missing_positions = [
-            p for p in all_positions
-            if p[0] not in [ep[0] for ep in existing_positions]  # chưa có start y hệt
-            and not any(
-                max(p[0], ep[0]) < min(p[1], ep[1])  # overlap check
-                for ep in existing_positions
-            )
-        ]
-
-        # Tạo entities mới cho các positions còn thiếu
-        for pos in missing_positions:
-            new_ent = {
-                "text": text,
-                "type": ent.get("type", ""),
-                "position": pos,
-                "assertions": _normalize_assertions_list(ent.get("assertions", [])),
-                "candidates": [],
-            }
-            expanded.append(new_ent)
-            logger.debug(
-                "R20.1 expand duplicate: '%s' tại pos=%d (đã có tại %s)",
-                text, pos[0], existing_positions,
-            )
+        # Nếu chỉ có 1 occurrence hoặc không muốn tạo thêm entities ảo → giữ nguyên
+        pos = ent.get("position", [0, 0])
+        if not (isinstance(pos, list) and len(pos) == 2 and 0 <= pos[0] < pos[1] <= len(input_text)):
+            if all_positions:
+                ent["position"] = all_positions[0]
 
     # Sort theo position
     expanded.sort(key=lambda e: e.get("position", [0, 0])[0])
@@ -1702,6 +1991,11 @@ def assemble_record(
       4. Gán candidates (RxNorm cho THUỐC, ICD cho CHẨN_ĐOÁN)
       5. Sort theo position
     """
+    if retriever is not None and llm_client is not None:
+        retriever._llm_client = llm_client
+    if icd_retriever is not None and llm_client is not None:
+        icd_retriever._llm_client = llm_client
+
     validated = _prepare_validated_entities(input_text, raw_entities)
 
     seen_test_names: set[str] = set()
@@ -1730,6 +2024,12 @@ def assemble_record(
         rec = final[0]
         if rec["type"] in ("THUỐC", "CHẨN_ĐOÁN"):
             _attach_candidates(rec, rec["text"], rec["type"], rec, validated, retriever, icd_retriever)
+
+    # Phase 3 cuối assemble_record (Fix 2.4)
+    for rec in final:
+        if "isHistorical" in rec.get("assertions", []):
+            if _find_current_section(input_text, rec["position"][0]) != "tien_su":
+                rec["assertions"] = [a for a in rec["assertions"] if a != "isHistorical"]
 
     final.sort(key=lambda e: e["position"][0])
     return final
@@ -1939,20 +2239,37 @@ def align_and_expand_entities(
             logger.debug("Align: không tìm được span cho '%s' (%s) → bỏ", base_text, etype)
             continue
 
-        # Gán tuần tự LLM entities cho các spans tìm được để GIỮ NGUYÊN ASSERTIONS
-        sorted_spans = sorted(list(all_spans))
-        for i, (span_start, span_end) in enumerate(sorted_spans):
+        # Gán từng ent in ents với span gần nhất trong all_spans (KHÔNG auto-expand mù quáng để tránh WER cao)
+        available_spans = sorted(list(all_spans))
+        for ent in ents:
+            if not available_spans:
+                pos_field = ent.get("position", [0, 0])
+                if isinstance(pos_field, list) and len(pos_field) == 2 and pos_field[1] > pos_field[0] >= 0:
+                    aligned.append(ent)
+                continue
+
+            hint_pos = 0
+            pos_field = ent.get("position", [0, 0])
+            if isinstance(pos_field, list) and len(pos_field) == 2:
+                try:
+                    hint_pos = int(pos_field[0])
+                except (ValueError, TypeError):
+                    hint_pos = 0
+
+            best_idx = 0
+            best_dist = abs(available_spans[0][0] - hint_pos)
+            for i, span in enumerate(available_spans):
+                dist = abs(span[0] - hint_pos)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = i
+
+            chosen_span = available_spans.pop(best_idx)
+            span_start, span_end = chosen_span
             actual_text = input_text[span_start:span_end]
-            if i < len(ents):
-                ent_to_use = ents[i]
-            else:
-                # Nếu text xuất hiện nhiều hơn số LLM trả về -> auto-expand (bảo vệ recall)
-                # XÓA assertions để tránh gán nhầm isHistorical/isNegated
-                ent_to_use = ents[0].copy()
-                ent_to_use["assertions"] = []
-                
+
             new_ent = {
-                **ent_to_use,
+                **ent,
                 "text": actual_text,
                 "position": [span_start, span_end],
             }
@@ -2051,6 +2368,13 @@ def _split_long_results(
                 continue
 
         out.append(ent)
+
+    for r in out:
+        if not r.get("assertions") and isinstance(r.get("position"), list) and len(r["position"]) == 2:
+            detected = _detect_assertions_from_context(
+                r["text"], input_text, r["type"], r["position"][0]
+            )
+            r["assertions"] = sorted(set(detected))
     return out
 
 
@@ -2070,12 +2394,12 @@ def _is_overlap_dup(
     """
     to_remove: list[int] = []
     for idx, (s_text, s_type, s_pos) in enumerate(seen_entities):
-        if s_type != etype or s_text != norm_text:
-            continue
         s_start, s_end = s_pos
-        # Same exact span → drop current (R22)
+        # Same exact span → drop current bất kể type/text để tránh 2 entity chiếm cùng 1 span
         if cur_start == s_start and cur_end == s_end:
             return True, []
+        if s_type != etype or s_text != norm_text:
+            continue
         # Overlap → keep longer span
         if max(cur_start, s_start) < min(cur_end, s_end):
             ex_len = s_end - s_start
@@ -2201,7 +2525,11 @@ def _emit_entity_record(
     if cleaned_text != text:
         text = cleaned_text
         ent["text"] = text
-        new_pos = _find_span(input_text, text)
+        old_pos = ent.get("position", [0, 0])
+        old_start = int(old_pos[0]) if isinstance(old_pos, list) and len(old_pos) == 2 else 0
+        new_pos = _find_span(input_text, text, start=max(0, old_start - 10))
+        if new_pos is None and old_start > 0:
+            new_pos = _find_span(input_text, text, start=0)
         if new_pos is not None:
             ent["position"] = list(new_pos)
 
@@ -2215,6 +2543,10 @@ def _emit_entity_record(
     new_etype = _retype_entity(text, etype)
     if new_etype != etype:
         etype = new_etype
+        ent["type"] = etype
+
+    if etype == "CHẨN_ĐOÁN" and _is_normal_finding_misclassified_as_diagnosis(text):
+        etype = "KẾT_QUẢ_XÉT_NGHIỆM"
         ent["type"] = etype
 
     norm_text = text.lower().strip()
@@ -2237,6 +2569,11 @@ def _emit_entity_record(
             if d not in existing:
                 existing.add(d)
         ent["assertions"] = sorted(existing)
+
+    # Sanity check isHistorical: CHỈ giữ isHistorical nếu section thực sự là tien_su
+    if "isHistorical" in ent.get("assertions", []):
+        if _find_current_section(input_text, cur_start) != "tien_su":
+            ent["assertions"] = [a for a in ent.get("assertions", []) if a != "isHistorical"]
 
     # Build record + attach candidates
     record = _build_entity_record(text, etype, pos, ent)
@@ -2270,6 +2607,7 @@ def validate_output(payload: list[dict[str, Any]]) -> bool:
         validate(instance=payload, schema=OUTPUT_SCHEMA)
         return True
     except Exception as exc:
+
         logger.warning("Validation lỗi: %s", exc)
         return False
 

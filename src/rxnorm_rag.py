@@ -487,10 +487,9 @@ class RxNormBM25Index:
         # 1. Try load cache
         if self._tokens_cache_path.exists():
             try:
-                with open(self._tokens_cache_path, "rb") as f:
-                    import gzip
-                    with gzip.open(self._tokens_cache_path, "rt", encoding="utf-8") as f:
-                        for line in f:
+                import gzip
+                with gzip.open(self._tokens_cache_path, "rt", encoding="utf-8") as f:
+                    for line in f:
                             line = line.strip()
                             if not line:
                                 continue
@@ -686,6 +685,7 @@ class RxNormRetriever:
             self.vector_search = None
             self.bm25_index = None
             self.hybrid_search = None
+        self._llm_client = None
 
     # ------------------------------------------------------------------ #
 
@@ -740,6 +740,7 @@ class RxNormRetriever:
                 "RxNorm L4 loose fuzzy fallback matched '%s' → %s",
                 drug_text, result,
             )
+            return result[:1]
         # L6: Multi-Hop Compound Drug Splitting (Upgrade G)
         if re.search(r'\s+[\/+\-]\s+|\s+và\s+', drug_text, re.IGNORECASE):
             parts = [p.strip() for p in re.split(r'\s+[\/+\-]\s+|\s+và\s+', drug_text, flags=re.IGNORECASE) if len(p.strip()) >= 3]
@@ -753,6 +754,21 @@ class RxNormRetriever:
                             combined.append(code)
                 if combined:
                     return combined[:3]
+
+        # L7: LLM Fallback (Strict Validated) khi tất cả tiers RAG đều empty
+        if hasattr(self, '_llm_client') and self._llm_client:
+            try:
+                from src.prompts import RXNORM_LLM_FALLBACK_PROMPT
+                prompt = RXNORM_LLM_FALLBACK_PROMPT.format(entity_text=drug_text)
+                response = self._llm_client.call_sync(prompt, max_tokens=30, temperature=0.1)
+                codes = re.findall(r'\b\d{4,8}\b', response)
+                valid_set = set(self.index.rxcuis)
+                valid_codes = [c for c in codes if c in valid_set]
+                if valid_codes:
+                    logger.info("L7 LLM fallback RxNorm: '%s' → %s", drug_text, valid_codes[:1])
+                    return valid_codes[:1]
+            except Exception as exc:
+                logger.warning("L7 LLM fallback RxNorm failed: %s", exc)
 
         return []  # confidence thấp → empty
 
