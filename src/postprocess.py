@@ -2282,6 +2282,32 @@ def align_and_expand_entities(
             }
             aligned.append(new_ent)
 
+        # ── Universal All-Occurrence Expansion (Mũi nhọn 1) ──────────────────────
+        # Nếu LLM bỏ sót các lần xuất hiện phía sau do mỏi/lặp lại (Summarization Bias),
+        # tự động nhân bản từ entity gốc và tính toán assertions theo đúng ngữ cảnh tại span_start!
+        for span_start, span_end in available_spans:
+            actual_text = input_text[span_start:span_end]
+            base_ent = ents[0]
+            new_assertions = []
+            section_id = _find_current_section(input_text, span_start)
+            if section_id == "tien_su":
+                new_assertions.append("isHistorical")
+            pre_window = input_text[max(0, span_start - 16):span_start].lower()
+            if re.search(r"\b(?:không|chưa|chẳng)\s+(?:có\s+)?$", pre_window) and not re.search(r"\b(?:tuân\s+thủ|rõ|thể|biết|dùng)\s*$", pre_window):
+                if "isNegated" not in new_assertions:
+                    new_assertions.append("isNegated")
+            rule_assertions = _detect_assertions_from_context(actual_text, input_text, etype, span_start)
+            for ra in rule_assertions:
+                if ra in ("isNegated", "isFamily", "isHistorical") and ra not in new_assertions:
+                    new_assertions.append(ra)
+
+            aligned.append({
+                **base_ent,
+                "text": actual_text,
+                "position": [span_start, span_end],
+                "assertions": new_assertions,
+            })
+
     # ── Split long imaging results (R31) ────────────────────────────────────────
     aligned = _split_long_results(input_text, aligned)
 
