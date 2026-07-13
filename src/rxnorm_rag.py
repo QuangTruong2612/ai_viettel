@@ -48,29 +48,93 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 # ---------------------------------------------------------------------- #
 
 _STRENGTH_RE = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|iu|unit|%|meq)(?:/(mg|mcg|g|ml|iu|unit|%|meq|mEq))?",
+    r"(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|iu|unit|unt|%|meq)(?:/(mg|mcg|g|ml|iu|unit|unt|%|meq|mEq))?",
+    re.IGNORECASE,
+)
+# R34: Range strength pattern (vd "325-650 mg" → use LOW value 325mg)
+_RANGE_STRENGTH_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|iu|unit|unt|%|meq)",
     re.IGNORECASE,
 )
 
 
 def _normalize_strength(s: str) -> str:
-    """Chuẩn hoá strength string → dạng "25MG", "25MG/ML"."""
+    """Chuẩn hoá strength string → dạng "25MG", "25MG/ML".
+
+    Logic:
+        - Detect if norm is JUST bare ml (e.g. "5ML", "10ML") → return ""
+        - Otherwise: collapse whitespace + uppercase (preserve /ml concentration)
+    """
     if not s:
         return ""
     s = s.strip().lower()
     s = re.sub(r"(\d+(?:\.\d+)?)\s+(mg|mcg|g|ml|iu|unit|%|meq)", r"\1\2", s, flags=re.IGNORECASE)
-    return s.upper()
+    norm = s.upper()
+    # R29: bare ML (volume) is not strength. /ML kept (concentration).
+    if re.fullmatch(r"\d+(?:\.\d+)?ML", norm):
+        return ""
+    return norm
+
+
+# R34 (2026-07-13): Parse strength thành số để so sánh closest match.
+def _parse_strength_value(s: str) -> float | None:
+    """Parse numerical từ strength. '25MG' → 25.0; '0.5MG' → 0.5; '5MG/ML' → 5.0."""
+    if not s:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)", s)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+# R34 (2026-07-13): Salt preference — user pipeline thường pick salt forms
+# (pravastatin sodium, metoprolol tartrate, etc.) over plain base.
+_SALT_WORDS = (
+    "sodium", "potassium", "calcium", "hydrochloride", "hcl",
+    "sulfate", "tartrate", "maleate", "mesylate", "besylate",
+)
+_SALT_BONUS = 1.0  # mild preference
+
+
+def _salt_preference_score(name_lower: str) -> float:
+    """+1.0 nếu matched name có salt form."""
+    if any(s in name_lower for s in _SALT_WORDS):
+        return _SALT_BONUS
+    return 0.0
 
 
 def _normalize_ingredient(s: str) -> str:
-    """Lowercase + strip + collapse whitespace."""
-    return re.sub(r"\s+", " ", s.strip().lower()) if s else ""
+    """Lowercase + strip + collapse whitespace + STRIP doseform tokens.
+
+    R34 (2026-07-13): Một số rxcui có `ingredient="Drug Oral Tablet"` (vd
+    373942 = "Spiramycin Oral Tablet"). Strip doseform tokens để index key
+    khớp với plain ingredient (vd "spiramycin"). Fix quá trình lookup cho
+    Spiramycin/Mifepristone variants.
+    """
+    if not s:
+        return ""
+    s = re.sub(r"\s+", " ", s.strip().lower())
+    # Doseform & descriptor words to strip from ingredient
+    doseform_strip = {
+        "oral", "tablet", "tablets", "capsule", "capsules", "solution",
+        "suspension", "injection", "injectable", "cream", "ointment",
+        "gel", "patch", "syrup", "powder", "spray", "drops", "granules",
+        "suppository", "inhaler", "nebulizer",
+        "extended", "release", "delayed", "disintegrating", "chewable",
+        "long", "acting", "short", "hr", "formulation",
+    }
+    tokens = [t for t in s.split() if t not in doseform_strip]
+    cleaned = " ".join(tokens).strip()
+    # Use cleaned form nếu non-empty (preserves compound "metoprolol tartrate" etc.)
+    return cleaned if cleaned else s
 
 
 def _strip_route_freq(text: str) -> str:
     """Loại bỏ route/freq/doseform tokens khỏi VN/EN drug text.
 
     VD: 'metoprolol 25 mg (uống hôm nay) po bid' → 'metoprolol 25 mg'.
+
+    R34: Cũng normalize range strength (vd '325-650 mg' → '325mg', dùng LOW value).
     """
     def _repl(m: "re.Match[str]") -> str:
         content = m.group(1).strip()
@@ -79,6 +143,12 @@ def _strip_route_freq(text: str) -> str:
         return " "
 
     text = re.sub(r"\(([^)]*)\)", _repl, text)
+
+    # R34: Range strength → LOW value (more conservative prescription)
+    # "325-650 mg" → "325mg" trước khi main strength regex xử lý
+    text = _RANGE_STRENGTH_RE.sub(
+        lambda m: f"{m.group(1)}{m.group(3).lower()}", text
+    )
 
     skip_tokens = {
         "po", "iv", "im", "sc", "sl", "pr", "topical", "inhale", "oral",
@@ -90,6 +160,9 @@ def _strip_route_freq(text: str) -> str:
         "q6h", "q8h", "q12h", "prn", "qd", "qod", "hs", "ac", "pc",
         "uống", "tiêm", "tiêng", "viên", "ống", "gói", "lần", "ngày",
         "giờ", "tuần", "tháng", "sáng", "trưa", "chiều", "tối",
+        # R34: standalone "ml" is volume/noise (vd "guaifenesin ml" → drop).
+        # Combined "5ml" (sau _STRENGTH_RE.sub) là token riêng, không bị ảnh hưởng.
+        "ml",
     }
 
     def _compact(m: "re.Match[str]") -> str:
@@ -97,7 +170,10 @@ def _strip_route_freq(text: str) -> str:
         return f"{m.group(1)}{m.group(2).lower()}{suffix}"
 
     text = _STRENGTH_RE.sub(_compact, text)
-    tokens = [t for t in re.split(r"[^a-z0-9/]+", text.lower()) if t]
+    # R31 (2026-07-13): Fix Bug 9 — tokenize regex `[^a-z0-9/]+` was splitting
+    # DECIMAL strengths like "0.5mg" into ["0", "5mg"] because "." is not in
+    # the allowed char class. Added "." to keep-list so floats survive.
+    tokens = [t for t in re.split(r"[^a-z0-9/.]+", text.lower()) if t]
     return " ".join(t for t in tokens if t not in skip_tokens)
 
 
@@ -121,12 +197,230 @@ def _load_drug_aliases() -> dict[str, str]:
 _DRUG_ALIASES: dict[str, str] = _load_drug_aliases()
 
 
-def _alias_to_generic(drug_text: str) -> str:
-    """Translate brand name / misspellings in drug text → generic name (Robust against prefixes like thuốc, viên, viên uống...)."""
+# ════════════════════════════════════════════════════════════════════════════════
+# R28 (2026-07-13): Auto-load drug INN whitelist từ data/drug_inn_cache.json
+# (cache được sinh bởi scripts/build_mining_index.py từ rxnorm.jsonl).
+# Trước đây whitelist cứng chỉ 13 entries → "truyền dịch yếu tố IX", "kháng sinh"
+# không match → LLM classify sai. Nay whitelist ~63k unique INN → match hầu hết
+# drug names. Cached set lookup O(1).
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _load_drug_inn_whitelist() -> frozenset[str]:
+    """Load unique INN/generic names từ cache. Trả frozenset (immutable, hashable)."""
+    cache = DATA_DIR / "drug_inn_cache.json"
+    if not cache.exists():
+        logger.debug(
+            "[R28] %s chưa tồn tại — chạy `python scripts/build_mining_index.py` "
+            "để auto-mine drug INN.", cache.name,
+        )
+        return frozenset()
+    try:
+        return frozenset(json.loads(cache.read_text(encoding="utf-8")))
+    except Exception as exc:
+        logger.warning("[R28] Failed to load %s: %s", cache, exc)
+        return frozenset()
+
+
+_DRUG_INN_WHITELIST: frozenset[str] = _load_drug_inn_whitelist()
+if _DRUG_INN_WHITELIST:
+    logger.info("[R28] Loaded drug INN whitelist: %d entries", len(_DRUG_INN_WHITELIST))
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# R34 (2026-07-13): Auto-mined RxNorm signals — doseform re-rank, historical
+# penalty, brand whitelist, resistance/class context filter.
+#   - _HISTORICAL_RXCUI: rxcui có `historical=True` (159k rows) — soft penalty
+#   - _BRAND_NAMES: brand names auto-mined từ "[Brand]" brackets (R34 5.4)
+#   - _DOSEFORM_SCORE: doseform bonus table (R34 5.1)
+#   - _NON_TREATMENT_TERMS: drug-class blacklist (nitrates, corticoid...)
+# Cache: data/rxnorm_signals.json (~5-10s scan). Một lần duy nhất.
+# ════════════════════════════════════════════════════════════════════════════════
+
+_BRACKET_PATTERN = re.compile(r'\[([^\]]+)\]')
+
+# 5.1 Doseform bonus table — R34 spec
+_DOSEFORM_SCORE: dict[str, float] = {
+    "extended release oral tablet": 15.0,
+    "oral tablet": 10.0,
+    "oral capsule": 5.0,
+    "oral solution": 2.0,
+    "oral suspension": 1.0,
+    "injectable solution": 0.0,
+    "injectable suspension": 0.0,
+    "topical cream": 0.0,
+    "topical ointment": 0.0,
+    "disintegrating tablet": -5.0,
+}
+
+# Doseform keywords for L3 fuzzy post-filter (R34: avoid "urea → chemical" match)
+_DOSEFORM_KEYWORDS = (
+    "tablet", "capsule", "solution", "injection", "cream", "ointment",
+    "gel", "patch", "syrup", "suspension", "powder", "spray", "drops",
+    "inhaler", "suppository", "granules",
+)
+
+# R34: Drug-class blacklist (lookup() sẽ return [] nếu query thuần class term)
+_NON_TREATMENT_TERMS: frozenset[str] = frozenset({
+    "nitrates", "corticoid", "corticosteroid", "nsaid", "nsaids",
+    "kháng sinh", "kháng viêm", "kháng đông",
+    "thuốc chống đông", "thuốc giảm đau", "thuốc hạ sốt",
+    "thuốc lợi tiểu", "thuốc an thần", "thuốc chống viêm",
+    "thuốc kháng sinh",
+})
+
+
+def _extract_brand_from_brackets(name: str) -> str | None:
+    """Extract brand text từ 'Ingredient Strength [Brand Name]' format."""
+    m = _BRACKET_PATTERN.search(name)
+    return m.group(1).strip() if m else None
+
+
+def _extract_doseform_score(name_lower: str, wants_extended: bool = False) -> float:
+    """Score bonus dựa trên doseform name (5.1). Order: specific → generic.
+
+    R34: ER Oral Tablet chỉ +15 khi query có ER signal (xl/xr/er/sr/24hr);
+    nếu không, fall back về +10 (regular OT) để tránh prefer ER khi không cần.
+    """
+    if "extended release oral tablet" in name_lower:
+        return _DOSEFORM_SCORE["extended release oral tablet"] if wants_extended else _DOSEFORM_SCORE["oral tablet"]
+    if "disintegrating tablet" in name_lower:
+        return _DOSEFORM_SCORE["disintegrating tablet"]
+    if "oral tablet" in name_lower:
+        return _DOSEFORM_SCORE["oral tablet"]
+    if "oral capsule" in name_lower:
+        return _DOSEFORM_SCORE["oral capsule"]
+    if "oral solution" in name_lower:
+        return _DOSEFORM_SCORE["oral solution"]
+    if "oral suspension" in name_lower:
+        return _DOSEFORM_SCORE["oral suspension"]
+    if "injectable" in name_lower or "injection" in name_lower:
+        return _DOSEFORM_SCORE["injectable solution"]
+    if "topical cream" in name_lower:
+        return _DOSEFORM_SCORE["topical cream"]
+    if "topical ointment" in name_lower:
+        return _DOSEFORM_SCORE["topical ointment"]
+    return 0.0
+
+
+def _load_rxnorm_signals() -> tuple[frozenset[str], frozenset[str]]:
+    """One-shot scan rxnorm.jsonl → (historical_rxcui, brand_names). Cached to JSON."""
+    cache = DATA_DIR / "rxnorm_signals.json"
+    if cache.exists():
+        try:
+            data = json.loads(cache.read_text(encoding="utf-8"))
+            hist = frozenset(data.get("historical", []))
+            brands = frozenset(data.get("brands", []))
+            if hist or brands:
+                logger.info("[R34] Loaded cached signals: %d historical, %d brands",
+                            len(hist), len(brands))
+                return hist, brands
+        except Exception as exc:
+            logger.debug("[R34] Cache read fail (%s) — rebuilding", exc)
+
+    historical: set[str] = set()
+    brands: set[str] = set()
+
+    jsonl = DATA_DIR / "rxnorm.jsonl"
+    if jsonl.exists():
+        t0 = time.time()
+        with jsonl.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rxcui = str(r.get("rxcui", "")).strip()
+                if not rxcui:
+                    continue
+                # 5.2: collect historical
+                if r.get("historical"):
+                    historical.add(rxcui)
+                # 5.4: mine brand names từ "[Brand]" brackets
+                for m in _BRACKET_PATTERN.finditer(r.get("name", "")):
+                    for part in m.group(1).split("/"):
+                        b = part.strip()
+                        if 3 <= len(b) <= 50 and any(c.isalpha() for c in b):
+                            brands.add(b.lower())
+        logger.info("[R34] Mined %d historical + %d brands (%.1fs)",
+                    len(historical), len(brands), time.time() - t0)
+
+    # Save cache
+    try:
+        cache.write_text(
+            json.dumps(
+                {"historical": sorted(historical), "brands": sorted(brands)},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.warning("[R34] Cache save fail: %s", exc)
+
+    return frozenset(historical), frozenset(brands)
+
+
+_HISTORICAL_RXCUI, _BRAND_NAMES = _load_rxnorm_signals()
+
+
+def _has_resistance_context(text: str) -> bool:
+    """True nếu text là resistance mention (vd 'kháng vancomycin', 'kháng sinh').
+
+    R34: Fix 0% pass trên `empty_resistance` — chuyển filter từ postprocess sang
+    retriever để retriever standalone-correct.
+    """
+    t = text.lower()
+    # "kháng sinh" = antibiotic class (generic) → reject
+    if re.search(r"\bkháng\s+sinh\b", t):
+        return True
+    # "X kháng Y" pattern (resistance) → reject
+    if re.search(r"\bkháng\s+\w{3,}", t):
+        return True
+    return False
+
+
+def _has_drug_context(text: str) -> bool:
+    """True nếu text có tín hiệu là drug đơn thuốc (R34: lọc nhiễu lab tokens).
+
+    Cần ÍT NHẤT 1 trong:
+      - Strength (digit + unit: mg, ml, %, ...)
+      - Route token (po, iv, tiêm, uống, daily, bid, ...)
+      - Doseform (tablet, capsule, cream, ...)
+      - Compound separator (/, +, -, và)
+      - Multi-word tổ hợp (≥ 2 alphanumeric tokens)
+    """
+    t = text.lower()
+    if _STRENGTH_RE.search(t):
+        return True
+    if re.search(r"\b(po|iv|im|sc|pr|tiêm|tiêng|uống|siro|daily|bid|tid|qid|q\d+h|hs|prn|ac|pc|am|pm)\b", t):
+        return True
+    if re.search(r"\b(tablet|capsule|cream|injection|suspension|syrup|drop|oral|ointment|gel|patch|spray|viên|ống|gói)\b", t):
+        return True
+    if re.search(r"\s+[\/+\-]\s+|\s+và\s+", t):
+        return True
+    # Multi-word OK (>1 alphanumeric token) — likely drug name (vd "cipro flagyl")
+    tokens = re.findall(r"[a-z0-9]{3,}", t)
+    if len(tokens) >= 2:
+        return True
+    return False
+
+
+def _alias_to_generic(drug_text: str) -> str | list[str]:
+    """Translate brand name / misspellings / compound in drug text → generic name(s).
+
+    R29 (2026-07-13 spec round 2): Hỗ trợ compound drug names — value trong
+    data/drug_aliases.json có thể là LIST (compound, vd 'ciproflagyl' → ['cipro', 'flagyl']).
+    Returns:
+        - str: cho single brand → generic translation
+        - list[str]: cho compound drug → nhiều generic names
+        - str input: nếu không match (no-op)
+    """
     if not drug_text or not _DRUG_ALIASES:
         return drug_text
     text_lower = drug_text.lower().strip()
-    
+
     # Strip common Vietnamese prefix words before matching
     prefix_re = re.compile(r"^(?:viên\s+uống|viên\s+nén|viên\s+nang|thuốc\s+viên|thuốc\s+tiêm|thuốc\s+uống|thuốc|viên|viêm|tiêm|ống|gói|lọ|dung\s+dịch|hỗn\s+dịch|siro)\s+", re.IGNORECASE)
     stripped_prefix = ""
@@ -139,15 +433,29 @@ def _alias_to_generic(drug_text: str) -> str:
 
     # Thử match từ dài nhất trước
     for brand in sorted(_DRUG_ALIASES.keys(), key=len, reverse=True):
-        if text_lower.startswith(brand + " ") or text_lower == brand:
-            generic = _DRUG_ALIASES[brand]
-            rest = drug_text[len(brand):].lstrip()
-            return f"{generic} {rest}".strip() if rest else generic
-        # Nếu brand nằm giữa hoặc có từ lót
+        value = _DRUG_ALIASES[brand]
+        is_compound = isinstance(value, list)
+        if text_lower == brand:
+            # Exact match → return generic name(s)
+            return list(value) if is_compound else value
+        # Brand như PREFIX (vd "Augmentin 1g") → replace and append rest
+        if text_lower.startswith(brand + " ") or text_lower.startswith(brand):
+            rest = drug_text[len(brand):].lstrip() if drug_text[len(brand):].strip() else ""
+            if is_compound:
+                # Compound: trả list các tên + strength suffix
+                if rest:
+                    return [f"{g} {rest}".strip() for g in value]
+                return list(value)
+            return f"{value} {rest}".strip() if rest else value
+        # Brand nằm giữa hoặc có từ lót
         pattern = r"\b" + re.escape(brand) + r"\b"
         if re.search(pattern, text_lower):
-            generic = _DRUG_ALIASES[brand]
-            replaced = re.sub(pattern, generic, drug_text, count=1, flags=re.IGNORECASE)
+            if is_compound:
+                # Compound mid-text: replace 1 occurrence with FIRST generic, return single
+                # (không safe để split giữa text lúc mid-match)
+                replaced = re.sub(pattern, value[0], drug_text, count=1, flags=re.IGNORECASE)
+                return replaced.strip()
+            replaced = re.sub(pattern, value, drug_text, count=1, flags=re.IGNORECASE)
             return replaced.strip()
 
     return drug_text
@@ -210,6 +518,7 @@ class RxNormIndex:
     names: list[str] = field(default_factory=list)
     rxcuis: list[str] = field(default_factory=list)
     name_to_idx: dict[str, int] = field(default_factory=dict)
+    rxcui_to_idx: dict[str, int] = field(default_factory=dict)  # R33
 
     @classmethod
     def from_dict(cls, data: dict) -> "RxNormIndex":
@@ -229,6 +538,8 @@ class RxNormIndex:
             rxcuis=data.get("rxcuis", []),
         )
         idx.name_to_idx = {n: i for i, n in enumerate(idx.names)}
+        # R33: also build rxcui_to_idx for O(1) name lookup by rxcui
+        idx.rxcui_to_idx = {r: i for i, r in enumerate(idx.rxcuis)}
         return idx
 
     def to_dict(self) -> dict:
@@ -243,6 +554,19 @@ class RxNormIndex:
     def add(self, rxcui: str, ingredient: str, strength: str, name: str = "") -> None:
         rxcui = str(rxcui).strip()
         ing_norm = _normalize_ingredient(ingredient)
+        # R34: 8.4k rows có ingredient="" (vd '24 HR metoprolol succinate 50 MG Extended Release Oral Tablet').
+        # Fallback: parse ingredient từ name (skip "HR"/"Extended Release"/doseform).
+        if not ing_norm and name:
+            name_tokens = re.findall(r"[A-Za-z][a-z]+", name)
+            skip_words = {
+                "hr", "release", "extended", "oral", "tablet", "capsule",
+                "solution", "injection", "cream", "ointment", "gel", "patch",
+                "spray", "powder", "drops", "syrup", "suspension", "suppository",
+                "granules", "delayed", "disintegrating", "chewable",
+            }
+            filtered = [t for t in name_tokens if t.lower() not in skip_words]
+            if filtered:
+                ing_norm = _normalize_ingredient(" ".join(filtered))
         str_norm = _normalize_strength(strength)
         if not rxcui:
             return
@@ -260,7 +584,26 @@ class RxNormIndex:
     # ------------------------------------------------------------------ #
 
     def lookup(self, drug_text: str) -> list[str]:
-        """Pipeline L1 + L4 + L5 (fast exact path)."""
+        """Pipeline L1 + L4 + L5 (fast exact path).
+
+        Args:
+            drug_text: text đã được strip route/freq. `_parse_drug` sẽ internally
+                        strip lại (idempotent) để tách (ing, str).
+        Returns:
+            list[rxcui] (max 1).
+        """
+        return self._lookup_with_original(drug_text, original_text=None)
+
+    def _lookup_with_original(
+        self, drug_text: str, original_text: Optional[str] = None
+    ) -> list[str]:
+        """Lookup với original_text pass-through (R34: doseform hint detection).
+
+        `original_text` là query GỐC (chưa strip) — dùng để detect doseform hint
+        mà `_parse_drug` đã strip mất (vd 'Spiramycin Oral Tablet po prn' → sau
+        strip là 'spiramycin' → mất thông tin doseform).
+        """
+        orig = original_text or drug_text
         ing, strength = _parse_drug(drug_text)
         if not ing:
             return []
@@ -268,29 +611,252 @@ class RxNormIndex:
         # L1: Exact (ingredient, strength) tuple
         if strength:
             cands = self.by_ingredient_strength.get((ing, strength), [])
+            # R34: ALWAYS merge common salt variants (vd 'pravastatin' → 'pravastatin sodium').
+            # User clinical practice thường dùng salt form, base name lookup phải expand.
+            for salt in ("sodium", "hydrochloride", "tartrate", "sulfate",
+                         "potassium", "calcium", "maleate", "mesylate", "besylate"):
+                cands.extend(
+                    self.by_ingredient_strength.get((f"{ing} {salt}", strength), [])
+                )
+            # Dedup preserve order
             if cands:
-                return [cands[0]]
+                cands = list(dict.fromkeys(cands))
+                ranked = _rank_rxnorm_candidates(
+                    cands, self.rxcui_to_idx, self.names, orig
+                )
+                return [ranked[0]]
 
-            # L4: Compound split
+            # L4: Compound split (also try salt variants for each part)
             if " / " in strength:
                 for sub in strength.split(" / "):
                     sub = sub.strip()
                     if not sub:
                         continue
-                    cands = self.by_ingredient_strength.get((ing, sub), [])
-                    if cands:
-                        return [cands[0]]
+                    sub_cands = self.by_ingredient_strength.get((ing, sub), [])
+                    for salt in ("sodium", "hydrochloride", "tartrate", "sulfate"):
+                        sub_cands.extend(
+                            self.by_ingredient_strength.get((f"{ing} {salt}", sub), [])
+                        )
+                    if sub_cands:
+                        sub_cands = list(dict.fromkeys(sub_cands))
+                        ranked = _rank_rxnorm_candidates(
+                            sub_cands, self.rxcui_to_idx, self.names, orig
+                        )
+                        return [ranked[0]]
 
-        # L5: Ingredient-only
+        # L5: Ingredient-only (NO strength) — R34 conditional re-rank.
+        # CHỈ fire khi NO strength VÀ query có drug context (skip lab values).
+        # Bare single-word lab chemicals như 'urea', 'creatinine', 'hemoglobin'
+        # không có route/doseform/multi-word → likely là LAB VALUE, không phải đơn.
         cands = self.by_ingredient.get(ing, [])
-        if cands:
+        if cands and not strength and _has_drug_context(orig):
+            has_volume_in_orig = bool(re.search(r"\b\d+(?:\.\d+)?\s*ml\b", orig.lower()))
+            if len(cands) > 1 and not has_volume_in_orig:
+                ranked = _rank_rxnorm_candidates(
+                    cands, self.rxcui_to_idx, self.names, orig
+                )
+                return [ranked[0]]
             return [cands[0]]
         return []
 
+    def closest_strength_lookup(self, drug_text: str, original_text: str = "") -> list[str]:
+        """R34 (2026-07-13): Closest strength fallback khi L1 miss.
 
-# ---------------------------------------------------------------------- #
-# Vector Search — BGE-M3 cosine trên name field
-# ---------------------------------------------------------------------- #
+        Khi query có strength (vd '1.5 mg') nhưng by_ingredient_strength lookup miss
+        (vd 'clonazepam 1.5 MG' không có trong data), tìm SCD cùng ingredient với
+        numerical strength GẦN NHẤT. Returns ranked rxcui list (max 1).
+
+        Args:
+            drug_text: stripped text (cho _parse_drug)
+            original_text: full query (cho re-rank context)
+
+        Returns:
+            list[rxcui] of closest matches (max 1 re-ranked), or [] nếu không tìm được.
+        """
+        orig = original_text or drug_text
+        ing, strength = _parse_drug(drug_text)
+        if not ing or not strength:
+            return []
+        q_val = _parse_strength_value(strength)
+        if q_val is None:
+            return []
+
+        # Find candidate keys for this ingredient với strength values
+        scored_keys = []
+        for k, cands in self.by_ingredient_strength.items():
+            if k[0] != ing:
+                continue
+            k_val = _parse_strength_value(k[1])
+            if k_val is None:
+                continue
+            dist = abs(k_val - q_val)
+            scored_keys.append((dist, cands))
+
+        if not scored_keys:
+            return []
+        scored_keys.sort(key=lambda x: x[0])
+        # Lấy rxcui list từ closest
+        closest_cands = scored_keys[0][1]
+        if not closest_cands:
+            return []
+        # Re-rank top-1 với full signals (dùng original text cho context)
+        ranked = _rank_rxnorm_candidates(
+            closest_cands, self.rxcui_to_idx, self.names, orig
+        )
+        return [ranked[0]]
+# R32 (2026-07-13): Name-based re-ranking for RxNorm candidates
+# R34 (2026-07-13): +5.1 doseform, +5.2 historical, +5.4 brand tighten
+# Gold uses: GENERIC (no [Brand] bracket), Oral Tablet form, shorter name.
+# ════════════════════════════════════════════════════════════════════════════════
+
+_BRACKET_BRAND_PENALTY = 50.0
+_DISINTEGRATING_PENALTY = 5.0
+_NON_ORAL_TABLET_PENALTY = 1.0
+_EXTENDED_RELEASE_BONUS = 30.0  # R33: prefer XL/ER/SR when input has xl/er/sr/24hr token
+# R34: thêm — known-branded penalty (no-bracket brand like "Tylenol Extra Strength")
+_KNOWN_BRAND_PENALTY = 25.0
+# R34: penalty cho `historical=True` entries (5.2)
+_HISTORICAL_PENALTY = 2.0
+
+
+def _rank_rxnorm_candidates(
+    rxcui_list: list[str],
+    rxcui_to_idx: dict,
+    names: list[str],
+    drug_text: str,
+    vec_scores: Optional[dict[str, float]] = None,
+    bm25_scores: Optional[dict[str, float]] = None,
+) -> list[str]:
+    """Re-rank RxNorm candidates dựa trên name + (optionally) vec/bm25 score.
+
+    R34: Tích hợp 5.1 (doseform), 5.2 (historical), 5.4 (known brand ngoài bracket),
+    5.3 (hybrid vec + bm25 + name weighted).
+
+    Scoring components (higher = better):
+      - Có [BrandName] bracket              : -50  (deprioritize branded)
+      - Known brand không bracket (5.4)     : -25  (heuristic: title-case token)
+      - Disintegrating form                  : -5
+      - Form ≠ "Oral Tablet" AND "po" in text: -1  (prefer OT for oral route)
+      - Extended release want + match       : +30
+      - Extended release want + non-release  : -5
+      - Doseform bonus (5.1)                 : +15 / +10 / +5 / +2 / 0 / -5
+      - Historical entry (5.2)               : -2 (soft penalty)
+      - Hybrid (5.3, chỉ khi truyền scores) : 50*vec + 30*bm25 + 0.5*name_signal
+
+    Args:
+        rxcui_list: candidates from by_ingredient_strength / by_ingredient
+        rxcui_to_idx: rxcui → index map
+        names: parallel name list
+        drug_text: original query (for context like "po" → Oral Tablet preference)
+        vec_scores: optional {rxcui: cosine} from BGE-M3 (5.3 hybrid path)
+        bm25_scores: optional {rxcui: bm25_score} (5.3 hybrid path)
+
+    Returns:
+        Sorted rxcui list (best first). Nếu no names found, return input order.
+    """
+    if len(rxcui_list) <= 1:
+        return rxcui_list
+
+    drug_lower = drug_text.lower()
+    wants_oral = "po" in drug_lower or "uống" in drug_lower
+    wants_extended = bool(
+        re.search(r"\b(?:xl|xr|er|sr|24\s*hr|24hr|extended\s+release)\b", drug_lower)
+    )
+    has_hybrid = vec_scores is not None or bm25_scores is not None
+    query_has_str = bool(_STRENGTH_RE.search(drug_text))  # R34: cho tiebreaker
+
+    def _name_signal(rxcui: str, name_lower: str, drug_text_lower: str) -> float:
+        """Pure name-based signal (5.1, 5.2, 5.4 + R34 strength-presence)."""
+        s = 0.0
+        # Bracket brand
+        if "[" in name_lower and "]" in name_lower:
+            s -= _BRACKET_BRAND_PENALTY
+        # Known brand không có bracket (5.4) — title-case suspect
+        if not (("[" in name_lower and "]" in name_lower)):
+            # Heuristic: bất kỳ title-case token nào ∈ _BRAND_NAMES thì penalize
+            for tok in re.findall(r"\b[A-Z][a-zA-Z]+\b", names[rxcui_to_idx[rxcui]]):
+                if tok.lower() in _BRAND_NAMES:
+                    s -= _KNOWN_BRAND_PENALTY
+                    break
+        # Disintegrating
+        if "disintegrating" in name_lower:
+            s -= _DISINTEGRATING_PENALTY
+        # For oral prescriptions, prefer OT
+        if wants_oral and "oral tablet" not in name_lower:
+            s -= _NON_ORAL_TABLET_PENALTY
+        # Extended Release
+        if wants_extended:
+            if "extended release" in name_lower or " 24 hr " in f" {name_lower} ":
+                s += _EXTENDED_RELEASE_BONUS
+            elif "release" not in name_lower:
+                s -= 5.0
+        # 5.1: Doseform bonus (with R34 ER-conditional logic)
+        s += _extract_doseform_score(name_lower, wants_extended=wants_extended)
+        # 5.2: Historical penalty
+        if rxcui in _HISTORICAL_RXCUI:
+            s -= _HISTORICAL_PENALTY
+        # R34: Salt preference (user pipeline thường pick salt over plain base)
+        s += _salt_preference_score(name_lower)
+        # R34: Compound penalty — prefer plain SCD over compound (' / ') khi
+        # query không có ' / '. (vd 'guaifenesin ml' → plain, không phải
+        # 'guaifenesin 400 MG / pseudoephedrine 40 MG').
+        if " / " in name_lower and " / " not in drug_text_lower:
+            s -= 3.0
+        # R34: Strength-presence match (user-friendly cho L5 path)
+        # - Query KHÔNG có strength + name CÓ strength: penalty (-2) — user muốn generic
+        # - Query CÓ strength + name KHÔNG có strength: penalty (-5) — name quá generic
+        query_has_str = bool(_STRENGTH_RE.search(drug_text_lower))
+        name_has_str = bool(_STRENGTH_RE.search(name_lower))
+        if not query_has_str and name_has_str:
+            s -= 2.0
+        elif query_has_str and not name_has_str:
+            s -= 5.0
+        return s
+
+    def _score(rxcui: str) -> float:
+        if rxcui not in rxcui_to_idx:
+            return 0.0
+        name_lower = names[rxcui_to_idx[rxcui]].lower()
+        name_sig = _name_signal(rxcui, name_lower, drug_lower)
+
+        if has_hybrid:
+            # 5.3: vec + bm25 dominates, name signal = tiebreaker (R34 weighted)
+            v = (vec_scores or {}).get(rxcui, 0.0) or 0.0
+            b = (bm25_scores or {}).get(rxcui, 0.0) or 0.0
+            # 50*vec (range 0-50) + 30*bm25 (range 0-30) + 0.5*name_sig (range ~-50/+30)
+            return 50.0 * v + 30.0 * b + 0.5 * name_sig
+        # L1 path: pure name signal
+        return name_sig
+
+    # Sort by score DESC, secondary tiebreak: when query has no strength,
+    # prefer (1) names without strength (no-str penalty candidate), then
+    # (2) HIGHEST numerical strength (clinical convention for OTC SCD).
+    # Tertiary: input order (stable).
+    def _sort_key(rxcui):
+        score = _score(rxcui)
+        if rxcui not in rxcui_to_idx:
+            return (-1e9, 0.0, 0)
+        name_l = names[rxcui_to_idx[rxcui]].lower()
+        # Secondary: prefer no-strength / highest strength when query no strength
+        if not query_has_str:
+            name_has_str = bool(_STRENGTH_RE.search(name_l))
+            if not name_has_str:
+                sec = 1e9  # Top — no strength when query has no strength
+            else:
+                v = _parse_strength_value(name_l)
+                sec = float(v) if v is not None else 0.0
+        else:
+            sec = 0.0
+        # Tertiary: input order (negative for DESC sort)
+        return (score, sec, -rxcui_list.index(rxcui))
+
+    scored = sorted(rxcui_list, key=_sort_key, reverse=True)
+    return scored
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Vector Search — BGE-M3 cosine
+# ════════════════════════════════════════════════════════════════════════════════
 
 
 class RxNormVectorSearch:
@@ -638,6 +1204,21 @@ class RxNormHybridSearch:
         matched.sort(key=lambda x: (-x[1], -bm25_scores.get(x[0], 0.0)))
 
         k = top_k if top_k is not None else 1
+        # R34 (5.3 + 5.1): Hybrid re-rank top candidates bằng weighted score
+        # Vec + bm25 dominate, name_signal (incl. doseform bonus) tiebreaker.
+        # Always fires (not just k>1) — also helps single-result case where
+        # doseform preference should override cosine (vd 'guaifenesin ml' → prefer
+        # 'guaifenesin 800 MG Oral Tablet' over 'Guaifenesin 6 MG/ML').
+        if matched:
+            top_cands = [c for c, _ in matched]
+            vec_all = self.vector_search.score_codes(query, top_cands) or {}
+            bm25_all = self.bm25_index.score_codes(query, top_cands) or {}
+            ranked = _rank_rxnorm_candidates(
+                top_cands, {c: i for i, c in enumerate(self.vector_search.codes)},
+                self.vector_search.names, query,
+                vec_scores=vec_all, bm25_scores=bm25_all,
+            )
+            return ranked[:k]
         return [c for c, _ in matched[:k]]
 
 
@@ -693,6 +1274,7 @@ class RxNormRetriever:
     # ------------------------------------------------------------------ #
 
     def lookup(self, drug_text: str) -> list[str]:
+        """External lookup entry point. Delegates to _lookup_uncached with re-ranking (R32)."""
         if not drug_text:
             return []
         if not hasattr(self, '_cache'):
@@ -700,6 +1282,7 @@ class RxNormRetriever:
         cache_key = drug_text.strip().lower()
         if cache_key in self._cache:
             return list(self._cache[cache_key])
+        # Pass self.index.name_to_idx + self.index.names for R32 re-rank
         result = self._lookup_uncached(drug_text)
         if len(self._cache) > 4096:
             self._cache.clear()
@@ -707,20 +1290,77 @@ class RxNormRetriever:
         return list(result)
 
     def _lookup_uncached(self, drug_text: str) -> list[str]:
-        """Tra RxNorm cho chuỗi thuốc VN/EN → list [rxcui] (0 hoặc 1 code, HIGH precision)."""
+        """Tra RxNorm cho chuỗi thuốc VN/EN → list [rxcui] (0 hoặc 1 code, HIGH precision).
+
+        R29 (2026-07-13 spec round 2): Support COMPOUND drug aliasing.
+        R34 (2026-07-13 spec round 3): + Context filter (resistance/class) + 5.1/5.2/5.3/5.4 re-rank.
+        """
         drug_text = drug_text.strip()
 
-        # Pre-step: Translate brand → generic (mới 2026-07).
-        # "Panadol 500mg" → "paracetamol 500mg" trước khi lookup RxNorm.
-        drug_text = _alias_to_generic(drug_text)
+        # R34: Context filter — reject resistance / non-treatment class
+        if _has_resistance_context(drug_text):
+            logger.debug("R34: resistance context rejected: '%s'", drug_text)
+            return []
+        if drug_text.lower().strip() in _NON_TREATMENT_TERMS:
+            logger.debug("R34: drug-class blacklist rejected: '%s'", drug_text)
+            return []
 
-        # L1: Exact (ing, strength) — highest confidence, cap 1
-        result = self.index.lookup(drug_text)
+        # R34: Capture ORIGINAL text (chưa alias/strip) để doseform hint detection
+        drug_text_orig = drug_text  # alias-translated hoặc original đều OK cho hint
+
+        # Pre-step: Translate brand → generic
+        alias_result = _alias_to_generic(drug_text)
+
+        # R29: Compound detection
+        if isinstance(alias_result, list) and len(alias_result) > 1:
+            combined: list[str] = []
+            for part in alias_result:
+                try:
+                    rxcui = self._lookup_single_part(part)
+                    if rxcui:
+                        for c in rxcui:
+                            if c not in combined:
+                                combined.append(c)
+                except Exception as exc:
+                    logger.warning("Compound lookup fail for '%s': %s", part, exc)
+            if combined:
+                logger.info("[R29] Compound drug '%s' → %s", drug_text, combined)
+                return combined
+            return []
+
+        drug_text = alias_result if isinstance(alias_result, str) else drug_text
+        # drug_text_orig = post-alias để doseform hint dùng context đúng
+        drug_text_orig = drug_text
+
+        # L1: Exact (ing, strength) — with R32 name re-rank (R34: 5.1/5.2/5.3/5.4)
+        result = self.index._lookup_with_original(
+            drug_text, original_text=drug_text_orig
+        )
         if result:
-            return result[:1]
+            ranked = _rank_rxnorm_candidates(
+                result, self.index.name_to_idx, self.index.names, drug_text_orig
+            )
+            return [ranked[0]]
+
+        # L1B: Closest strength fallback (R34) — khi L1 miss, tìm SCD cùng ing
+        # với strength gần nhất (vd 'clonazepam 1.5 mg' → 1 MG ≈ 197528).
+        result_closest = self.index.closest_strength_lookup(
+            drug_text, original_text=drug_text_orig
+        )
+        if result_closest:
+            logger.debug(
+                "RxNorm L1B closest strength: '%s' → %s",
+                drug_text_orig, result_closest,
+            )
+            return result_closest[:1]  # already ranked top-1
 
         # L2: Hybrid search — threshold 0.78 strict, top_k=1
-        if self.use_hybrid and self.hybrid_search is not None:
+        # R34: also require drug context to skip noise lab tokens
+        if (
+            self.use_hybrid
+            and self.hybrid_search is not None
+            and _has_drug_context(drug_text)
+        ):
             try:
                 result = self.hybrid_search.search(
                     drug_text, top_k=1, threshold=0.78
@@ -730,21 +1370,23 @@ class RxNormRetriever:
             except Exception as exc:
                 logger.warning("Hybrid search fail (%s): %s", drug_text[:30], exc)
 
-        # L3: Fuzzy match với threshold 80 (strict hơn 70 cũ)
-        result = self._fuzzy_local(drug_text, threshold=80)
-        if result:
-            return result[:1]
+        # L3: Fuzzy WRatio >= 80 — R34: require drug context + matched doseform
+        if _has_drug_context(drug_text):
+            result = self._fuzzy_local(drug_text, threshold=80)
+            if result:
+                return result[:1]
 
-        # L4: Fuzzy match lỏng hơn (75) — fallback cho drug name ngắn (vd "atenolol")
-        # mà L1 miss (do index chưa build đúng hoặc ingredient normalization fail)
-        result = self._fuzzy_local(drug_text, threshold=75)
-        if result:
-            logger.debug(
-                "RxNorm L4 loose fuzzy fallback matched '%s' → %s",
-                drug_text, result,
-            )
-            return result[:1]
-        # L6: Multi-Hop Compound Drug Splitting (Upgrade G)
+        # L4: Fuzzy partial >= 75 — fallback
+        if _has_drug_context(drug_text):
+            result = self._fuzzy_local(drug_text, threshold=75)
+            if result:
+                logger.debug(
+                    "RxNorm L4 loose fuzzy fallback matched '%s' → %s",
+                    drug_text, result,
+                )
+                return result[:1]
+
+        # L6: Multi-Hop Compound Drug Splitting
         if re.search(r'\s+[\/+\-]\s+|\s+và\s+', drug_text, re.IGNORECASE):
             parts = [p.strip() for p in re.split(r'\s+[\/+\-]\s+|\s+và\s+', drug_text, flags=re.IGNORECASE) if len(p.strip()) >= 3]
             if len(parts) >= 2 and len(parts) <= 4:
@@ -756,9 +1398,9 @@ class RxNormRetriever:
                         if code not in combined:
                             combined.append(code)
                 if combined:
-                    return combined[:3]
+                    return combined
 
-        # L7: LLM Fallback (Strict Validated) khi tất cả tiers RAG đều empty
+        # L7: LLM Fallback (Strict Validated)
         if hasattr(self, '_llm_client') and self._llm_client:
             try:
                 from src.prompts import RXNORM_LLM_FALLBACK_PROMPT
@@ -775,8 +1417,59 @@ class RxNormRetriever:
 
         return []  # confidence thấp → empty
 
+    def _lookup_single_part(self, drug_text: str) -> list[str]:
+        """R29 (2026-07-13): Sub-lookup cho 1 phần của compound drug.
+
+        Trả về max 1 rxcui (Section 8 candidate discipline). Gọi internal pipeline
+        L1 → L7 mà không qua bước L6 (compound) để tránh infinite recursion.
+
+        R34 fix: apply brand→generic alias translation (vd 'flagyl' → 'metronidazole').
+        Trước đây bare brand name miss L1 và bị fuzzy block (no drug context).
+        """
+        drug_text = drug_text.strip()
+        if not drug_text:
+            return []
+        # R34: alias translation cho sub-part (vd 'flagyl' → 'metronidazole')
+        aliased = _alias_to_generic(drug_text)
+        if isinstance(aliased, str) and aliased != drug_text:
+            drug_text = aliased
+        result = self.index.lookup(drug_text)
+        if result:
+            return result[:1]
+        if self.use_hybrid and self.hybrid_search is not None:
+            try:
+                result = self.hybrid_search.search(
+                    drug_text, top_k=1, threshold=0.78
+                )
+                if result:
+                    return result[:1]
+            except Exception:
+                pass
+        result = self._fuzzy_local(drug_text, threshold=80)
+        if result:
+            return result[:1]
+        result = self._fuzzy_local(drug_text, threshold=75)
+        if result:
+            return result[:1]
+        return []  # don't recurse, don't LLM fallback for sub-lookups
+
     def _fuzzy_local(self, query: str, threshold: int = 70) -> list[str]:
-        """Fuzzy match trên name list (rapidfuzz)."""
+        """Fuzzy match trên name list (rapidfuzz). R34: tightened with drug context.
+
+        Pre-filter (R34): Query PHẢI có drug context — strength, route, doseform,
+        compound separator, hoặc ≥2 alphanumeric tokens. Ngăn match nhầm bare
+        lab chemicals (urea, hemoglobin, sodium) mà L3 trước đây pick up.
+
+        Post-filter (R34): Matched RxNorm name PHẢI chứa doseform keyword
+        (tablet, capsule, ...) hoặc strength (digit + unit). Đây là drug
+        formulation, không phải chemical concept.
+
+        Args:
+            query: input text
+            threshold: min WRatio/partial_ratio score (default 70)
+        Returns:
+            list[rxcui] (max 1) hoặc [] nếu không match
+        """
         if not query or not self.index.names:
             return []
         try:
@@ -791,13 +1484,22 @@ class RxNormRetriever:
         q_tokens = [t for t in re.split(r"[^a-z0-9]+", stripped.lower()) if len(t) > 1]
         if not q_tokens:
             return []
-        q = " ".join(q_tokens)
 
+        # R34 pre-filter: yêu cầu drug context
+        if not _has_drug_context(query):
+            return []
+
+        q = " ".join(q_tokens)
         matches = process.extract(q, self.index.names, scorer=fuzz.WRatio, limit=5)
         matches += process.extract(q, self.index.names, scorer=fuzz.partial_ratio, limit=5)
         for name, score, _ in matches:
             if score >= threshold and name in self.index.name_to_idx:
-                return [self.index.rxcuis[self.index.name_to_idx[name]]]
+                # R34 post-filter: matched name phải có doseform hoặc strength
+                nl = name.lower()
+                has_doseform = any(kw in nl for kw in _DOSEFORM_KEYWORDS)
+                has_strength = bool(_STRENGTH_RE.search(name))
+                if has_doseform or has_strength:
+                    return [self.index.rxcuis[self.index.name_to_idx[name]]]
         return []
 
 
@@ -831,7 +1533,11 @@ def save_index(idx: RxNormIndex, path: Optional[Path] = None) -> None:
 
 
 def build_from_rxnorm_dump(dump_path: Path, out_path: Optional[Path] = None) -> RxNormIndex:
-    """Đọc JSONL [{rxcui, ingredient, strength, doseform, name, ...}] → build RxNormIndex."""
+    """Đọc JSONL [{rxcui, ingredient, strength, doseform, name, ...}] → build RxNormIndex.
+
+    R34: KHÔNG skip rows có empty ingredient (8.4k rows). `add()` sẽ fallback
+    parse ingredient từ name.
+    """
     idx = RxNormIndex()
     n = 0
     with dump_path.open("r", encoding="utf-8") as f:
@@ -847,7 +1553,7 @@ def build_from_rxnorm_dump(dump_path: Path, out_path: Optional[Path] = None) -> 
             ing = str(row.get("ingredient", "")).strip()
             strength = str(row.get("strength", "")).strip()
             name = str(row.get("name", "")).strip()
-            if rxcui and ing:
+            if rxcui:
                 idx.add(rxcui, ing, strength, name)
                 n += 1
     save_index(idx, out_path)

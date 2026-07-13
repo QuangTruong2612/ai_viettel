@@ -42,10 +42,248 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
+# ════════════════════════════════════════════════════════════════════════════════
+# R28 (2026-07-13): Loader cho auto-mined ICD aliases từ data/icd_aliases.json
+# (chạy `python scripts/build_mining_index.py` để generate file này).
+# Format file: {"code": [alias1, alias2, ...]} — sinh tự động từ icd10.jsonl
+# với bracket/paren extraction. Không cần hand-curate.
+# ════════════════════════════════════════════════════════════════════════════════
 
-# ---------------------------------------------------------------------- #
+def _load_mined_icd_aliases(target_dict: dict[str, list[str]]) -> int:
+    """Merge auto-mined aliases (alias_lower → [code]) vào target_dict in-place.
+
+    Không làm gì nếu data/icd_aliases.json không tồn tại (chưa chạy mining script).
+    Returns số aliases added. Idempotent — gọi nhiều lần OK.
+    """
+    path = DATA_DIR / "icd_aliases.json"
+    if not path.exists():
+        logger.debug(
+            "[R28] %s chưa tồn tại — chạy `python scripts/build_mining_index.py` "
+            "để auto-mine ICD aliases.", path.name,
+        )
+        return 0
+    try:
+        mined = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("[R28] Failed to load %s: %s", path, exc)
+        return 0
+    n_added = 0
+    for code, alias_list in mined.items():
+        for alias in alias_list:
+            ak = alias.lower().strip()
+            if not ak or len(ak) < 3:
+                continue
+            existing = target_dict.get(ak, [])
+            if code not in existing:
+                target_dict.setdefault(ak, []).append(code)
+                n_added += 1
+    logger.info(
+        "[R28] Merged %d auto-mined ICD aliases (%d unique codes)",
+        n_added, len(mined),
+    )
+    return n_added
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# R28 (2026-07-13): Generic class term detection + uninformative ICD precision guard.
+# Patterns load từ data/generic_class_stoplist.json (dễ mở rộng, không hardcode).
+# ════════════════════════════════════════════════════════════════════════════════
+
+_UNINFORMATIVE_ICD_PATTERNS: tuple[re.Pattern, ...] = (
+    # Catch-all chapters (R, Y, Z ở length 3)
+    # Specific catch-alls ONLY (R17, R51, etc. are SPECIFIC — không flag)
+    re.compile(r"^R69(\.\d+)?$"),
+    re.compile(r"^Z00\.\d+$"),
+    # T45.xx — broad poisoning by drugs class
+    re.compile(r"^T45\.\d+$"),
+    # Y50-Y57 — broad drug/medicament class
+    re.compile(r"^Y5[0-7]\.\d+$"),
+)
+
+
+def _is_uninformative_icd_code(code: str) -> bool:
+    """Return True nếu code là catch-all (low information for retrieval).
+
+    R29 (2026-07-13): Fix #2 — 3-char R/Y/Z blanket rule was over-aggressive:
+    R17 (hyperbilirubinemia), R51 (headache), R00-R09 chapters chứa codes CỤ THỂ.
+    R69 là CỤ THỂ broad code — chỉ flag R69/Y95/Z00/T45/Y50-57 explicit patterns.
+    """
+    if not code:
+        return True
+    return any(p.match(code) for p in _UNINFORMATIVE_ICD_PATTERNS)
+
+
+_GENERIC_DRUG_CLASS_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"^thuốc\s+(chống|kháng|giảm|hạ|tăng|điều\s+trị|cầm|lợi|giúp|bổ|an\s+thần)\s+", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^(kháng|chống)\s+(sinh|viêm|đông|nôn|histamin|histamine|đông\s+máu)", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^(nhóm|loại|họ)\s+\w+$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^thuốc\s+\w+$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"(toàn\s+thân)$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^(thuốc|loại\s+thuốc|nhóm\s+thuốc)$", re.IGNORECASE | re.UNICODE),
+)
+
+
+def _is_generic_drug_class(text: str) -> bool:
+    """Detect generic drug-class terms (vd 'thuốc chống đông', 'kháng sinh').
+
+    Trả True nếu text match generic pattern — caller nên SKIP candidate lookup
+    hoặc chỉ trả về [] để tránh noise trong J_candidates scoring.
+    """
+    if not text:
+        return False
+    tl = text.lower().strip()
+    if not tl or len(tl) > 60:
+        return False
+    return any(p.match(tl) for p in _GENERIC_DRUG_CLASS_PATTERNS)
+
+
+def _load_generic_stoplist() -> tuple[tuple[re.Pattern, ...], ...]:
+    """Load patterns từ data/generic_class_stoplist.json (overrides default)."""
+    path = DATA_DIR / "generic_class_stoplist.json"
+    if not path.exists():
+        return _GENERIC_DRUG_CLASS_PATTERNS,
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+        patterns = cfg.get("vn_drug_class_patterns", [])
+        return tuple(re.compile(p, re.IGNORECASE | re.UNICODE) for p in patterns),
+    except Exception:
+        return _GENERIC_DRUG_CLASS_PATTERNS,
+
+
+# Re-init từ file nếu có
+try:
+    _GENERIC_DRUG_CLASS_PATTERNS, = _load_generic_stoplist()
+    logger.info("[R28] Loaded %d generic drug class patterns", len(_GENERIC_DRUG_CLASS_PATTERNS))
+except Exception:
+    pass
+
+
+
+# R34: ICD drug-class blacklist + resistance detection (R34 spec round 3)
+_ICD_DRUG_CLASS_BLACKLIST: frozenset[str] = frozenset({
+    "kháng sinh", "thuốc chống đông", "thuốc giảm đau", "thuốc hạ sốt",
+    "nsaid", "corticoid", "thuốc lợi tiểu", "thuốc an thần",
+})
+
+
+def _has_resistance_context_icd(text: str) -> bool:
+    """True nếu text là resistance mention (vd 'vi khuẩn kháng thuốc',
+    'E. coli kháng vancomycin')."""
+    t = text.lower()
+    # Specific patterns (high precision)
+    if re.search(r"\bkháng\s+thuốc\b", t):
+        return True
+    if re.search(r"\bkháng\s+sinh\b", t):
+        return True
+    # General: 'X kháng Y' where Y is 3+ chars (drug name)
+    # Catches 'E. coli kháng vancomycin', 'Staph kháng methicillin', etc.
+    if re.search(r"kháng\s+\w{4,}", t):
+        return True
+    return False
+
+
+def _looks_like_noise_tokens(text: str) -> bool:
+    """Detect nonsense tokens (vd 'asdfgh', 'xyz test') — không phải clinical term.
+
+    Heuristics:
+      - Token toàn lowercase Latin letters, không có VN diacritic, AND
+      - Không match VN→ICD dict, AND
+      - Tất cả tokens đều random-like (chỉ chữ cái liền nhau không có nghĩa)
+    """
+    if not text or len(text) < 4:
+        return False
+    import re as _re
+
+    # Has Vietnamese diacritic → likely real VN text
+    if _re.search(r"[ăâđêôơưáàảãạắằẳẵặấầẩẫậéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]", text.lower()):
+        return False
+
+    # R34 fix: ALL-UPPERCASE tokens → acronym (NMCT, TBMMN), KHÔNG phải noise.
+    stripped = text.strip()
+    if stripped.isupper() and stripped.replace(" ", "").replace(".", "").isalpha():
+        return False
+
+    # R34 fix: query is a KNOWN VN abbreviation (in acronym_map) → not noise
+    # Catches lowercase forms như "rlll", "btmv", "bptnmt" → allow.
+    if hasattr(_KNOWN_VN_ABBR_LOOKUP, "_initialized") is False:
+        _init_known_abbrs()
+    if stripped.lower() in _KNOWN_VN_ABBR_LOOKUP:
+        return False
+
+    t = text.lower().strip()
+    tokens = _re.findall(r"[a-z0-9]+", t)
+    if not tokens:
+        return False
+    # Reject nếu có ÍT NHẤT 1 token "garbled" (vd 'xyz', 'asdfgh')
+    # Real medical terms có vowel pattern; noise là consonant cluster.
+    for w in tokens:
+        if _is_likely_garbled(w):
+            return True
+    return False
+
+
+_KNOWN_VN_ABBR_LOOKUP: set[str] = set()
+
+
+def _init_known_abbrs() -> None:
+    """Lazy-load known VN abbreviations from _VN_ABBREVIATIONS dict."""
+    global _KNOWN_VN_ABBR_LOOKUP
+    if _KNOWN_VN_ABBR_LOOKUP:
+        return
+    _KNOWN_VN_ABBR_LOOKUP = set(_VN_ABBREVIATIONS.keys())
+    _KNOWN_VN_ABBR_LOOKUP |= {
+        "btmv", "bptnmt", "vgb", "vgc", "rlntn", "nttn", "nttt",
+        "đtrđ", "vpmpccđ", "st chênh",  # from acronym_map in lookup()
+        "rlll",  # rối loạn lipid máu (from acronym_map)
+        "nkh",  # nhiễm khuẩn huyết
+    }
+    _KNOWN_VN_ABBR_LOOKUP.add("_initialized")
+
+
+def _is_likely_garbled(word: str) -> bool:
+    """Heuristic: word có vẻ ngẫu nhiên.
+
+    Real clinical terms (parkinson, copd) có vowel density ~0.3-0.5.
+    Noise ('asdfgh', 'xyz') có density ~0.
+
+    R34 (2026-07-13): Sửa để KHÔNG reject valid medical terms có consecutive
+    consonants (vd 'parkinson' có 'rk', 'ns' → trước đây bị reject).
+    """
+    import re as _re
+    if not word or len(word) < 3:
+        return False
+    word_low = word.lower()
+    vowels = _re.findall(r"[aeiouăâđêôơư]+", word_low)
+    density = len(vowels) / len(word_low)
+    # Real VN/EN word has at least 20% vowel density
+    if density < 0.20:
+        return True
+    return False
+
+
+def _is_drug_class_term_icd(text: str) -> bool:
+    """True nếu text là drug-class term thuần (không phải diagnosis cụ thể)."""
+    return text.lower().strip() in _ICD_DRUG_CLASS_BLACKLIST
+
+
+# R34 (2026-07-13): Generic/uninformative VN phrases nên return []
+# "không xác định được" → chung chung, không phải diagnosis cụ thể.
+# Random tokens → noise, không match ICD.
+_UNINFORMATIVE_VN_TERMS = frozenset({
+    "không xác định được", "không rõ", "chưa rõ", "cần xác định",
+    "cần làm rõ", "không xác định", "chưa xác định",
+})
+
+
+def _is_uninformative_vn_term(text: str) -> bool:
+    """True nếu text là generic phrase không phải diagnosis (vd 'không xác định được')."""
+    t = text.lower().strip()
+    return t in _UNINFORMATIVE_VN_TERMS
+
+
+# ════════════════════════════════════════════════════════════════════════════════
 # VN medical abbreviations / synonyms (R27.6 mới 2026-07-10)
-# ---------------------------------------------------------------------- #
+# ════════════════════════════════════════════════════════════════════════════════
 
 # Map abbreviation VN → full term trước khi vào lookup chain.
 # LLM hay output viết tắt (THA, NMCT, ĐTĐ, COPD, OSA, ...) mà ICD desc_vi
@@ -159,6 +397,57 @@ _VN_SYNONYM_TO_CANONICAL = {
     "nhiễm trùng": "nhiễm khuẩn",
     "nhiễm khuẩn": "nhiễm khuẩn",  # canonical
 }
+
+
+def _get_alias_key_for_lookup(query: str) -> str | None:
+    """R30 (2026-07-13): Anti-pollution guard cho L0 short-circuit.
+
+    Trả về alias key nếu QUERY nên dùng key đó để exact-match L0.
+    Returns None nếu query là COMPOUND text có chứa short alias bên trong.
+
+    Logic:
+    - key == query: returns query (exact match → always use)
+    - len(query) >= 6 OR len(query) <= 3 (compound diagnosis phổ biến): returns query
+    - SHORT alias (len 4-5) inside longer compound query (len >= 6):
+        Returns None — let lower tiers (L1.5/L1.7) try specific compound.
+
+    Examples:
+        'sốt' → 'sốt'                          (key == query)
+        'phù phổi' → None                       (len 8, contains short 'phù' 3 chars)
+                                                  actually len(query) >= 6 → 'phù phổi' is acceptable
+        'phù chân' → None → falls to L1+        (auto-mined 'phù' could pollute)
+        'phù gai thị' → 'phù gai thị'           (NEW HARD-CODED entry exact match)
+        'viêm gan b' → 'viêm gan b'             (6+ chars)
+    """
+    if not query:
+        return None
+    q = query.strip()
+    if not q:
+        return None
+    # The bound match: query itself must equal the alias (no substring)
+    # To allow "phù" alias to match "phù phổi" we'd need to require
+    # word-boundary on LEFT and RIGHT of alias in query.
+    # Simple heuristic: only allow short aliases if query IS short
+    # OR query has at least 1 word boundary on both sides.
+    # Conservative: short (<=5 char) aliases only match when query is the
+    # whole short alias OR query is longer with whitespace/word boundaries.
+    alias_like_keys = [
+        "sốt", "ho", "phù", "hen", "nôn", "lao", "u", "ib", "ibs",
+        "os", "osa", "sau", "hc", "pe",
+        # R34 (2026-07-13): bổ sung short diagnoses (4-5 char) để không bị skip
+        # trong L0 short-circuit. Trước đây các VN→code mappings cho 'ngất', 'btmv'
+        # etc. bị miss do 4-5 char không có trong allowlist.
+        "ngất", "ngừng", "hôn", "viêm", "gút", "bướu", "u ác", "ung",
+        "btmv", "bptnmt", "vgb", "vgc", "rlntn", "nttn", "nttt", "đtrđ", "vpmpccđ", "st chênh",
+    ]
+    # If query is a known-short alias used standalone → return query
+    if q in alias_like_keys:
+        return q
+    # Long-enough query (≥ 6 chars) → fine to return
+    if len(q) >= 6:
+        return q
+    # 4-5 char short query that's NOT in our allowlist → suspect
+    return None
 
 
 def _normalize_vn_term(text: str) -> str:
@@ -641,6 +930,15 @@ class ICDRetriever:
         """Mặc định 1 code để tối ưu Jaccard. Chỉ giữ thêm nếu cùng 3-char prefix."""
         if not codes:
             return []
+
+        # R28 (2026-07-13): PRECISION GUARD — drop uninformative ICD codes trước khi pick top.
+        # Catch-all codes (R69, T45.xx, Y5x.xx, Z00.xx, 3-char chapters) làm giảm J_candidates
+        # precision rất nặng. Pattern load từ data/generic_class_stoplist.json để dễ mở rộng.
+        filtered = [c for c in codes if not _is_uninformative_icd_code(c)]
+        if not filtered:
+            return []  # tất cả catch-all → KHÔNG trả candidate gì (precision > recall)
+        codes = filtered
+
         if len(codes) == 1:
             return codes
         out = [codes[0]]
@@ -660,9 +958,32 @@ class ICDRetriever:
                         break
         return out
 
+    def _cap_single_for_icd(self, codes: list[str]) -> list[str]:
+        """R29 (spec round 2): CAP ≥1 cho single ICD lookup.
+
+        User rule: "Ưu tiên candidate đơn. Không ném nhiều mã 'để chắc', vì Jaccard phạt candidate dư."
+
+        Khi caller KHÔNG opt-in (max_k implicit = 1), return list ≤1 code.
+        Caller có thể bypass bằng cách explicit max_k > 1 nếu thực sự cần multi-candidate
+        (vd compound diagnosis).
+
+        Args:
+            codes: candidate list từ _select_adaptive_top_k
+
+        Returns:
+            codes capped to length 1 if non-empty.
+        """
+        if not codes:
+            return codes
+        return codes[:1]  # Section 8: cap=1 for single ICD call
+
     def _split_compound_diagnosis(self, text: str) -> list[str]:
-        """Tách chẩn đoán kép (Multi-hop / Conjunction splitting) thành các chẩn đoán riêng lẻ."""
-        parts = re.split(r'\s+trên\s+nền\s+|\s+kèm\s+theo\s+|\s+kèm\s+|\s+biến\s+chứng\s+|\s+đồng\s+thời\s+|\s+hoặc\s+|\s+hay\s+', text, flags=re.IGNORECASE)
+        """Tách chẩn đoán kép (Multi-hop / Conjunction splitting) thành các chẩn đoán riêng lẻ.
+
+        R34 (2026-07-13): bổ sung 'và' (AND conjunction) — trước đây chỉ có
+        'hoặc'/'hay' (OR). Cho phép split 'đau ngực và khó thở' → ['đau ngực', 'khó thở'].
+        """
+        parts = re.split(r'\s+trên\s+nền\s+|\s+kèm\s+theo\s+|\s+kèm\s+|\s+biến\s+chứng\s+|\s+đồng\s+thời\s+|\s+hoặc\s+|\s+hay\s+|\s+và\s+', text, flags=re.IGNORECASE)
         if len(parts) == 1 and (' - ' in text or ' / ' in text):
             sub = re.split(r'\s+-\s+|\s+/\s+', text)
             if all(len(p.strip()) >= 4 for p in sub):
@@ -679,6 +1000,19 @@ class ICDRetriever:
     ) -> list[str]:
         """Tra ICD-10 cho 1 cụm chẩn đoán tiếng Việt (có tự động tách chẩn đoán kép)."""
         if not vn_text:
+            return []
+        # R34: L_filter_context — reject resistance mentions + drug-class blacklisted terms
+        if _has_resistance_context_icd(vn_text):
+            logger.debug("R34: resistance context rejected: '%s'", vn_text)
+            return []
+        if _is_drug_class_term_icd(vn_text):
+            logger.debug("R34: drug-class blacklist rejected: '%s'", vn_text)
+            return []
+        if _is_uninformative_vn_term(vn_text):
+            logger.debug("R34: uninformative VN term rejected: '%s'", vn_text)
+            return []
+        if _looks_like_noise_tokens(vn_text):
+            logger.debug("R34: noise tokens rejected: '%s'", vn_text)
             return []
         # Universal Vietnamese Clinical Acronym Resolution Map (Zero Hardcoding to specific files, covering standard Vietnamese clinical abbreviations):
         clean_norm = vn_text.strip().lower()
@@ -719,6 +1053,30 @@ class ICDRetriever:
         if cache_key in self._cache:
             return list(self._cache[cache_key])
 
+        # R34 (2026-07-13): check full text against VN dict FIRST (before split).
+        # Compound forms như 'mất kiểm soát đại tiện hoặc tiểu tiện' có direct
+        # mapping → ['R15', 'R32']. Nếu split trước, mỗi part resolve độc lập và
+        # có thể miss codes (vd 'tiểu tiện' alone → R30.9 thay vì R32).
+        if hasattr(self, '_icd_vn_to_codes'):
+            full_key = vn_text.lower().strip()
+            if full_key in self._icd_vn_to_codes:
+                resolved = self._icd_vn_to_codes[full_key]
+                filtered = self._filter_and_sort_codes(
+                    list(resolved), vn_text,
+                    other_entities=other_entities, entity_type=entity_type,
+                )
+                if not filtered:
+                    filtered = list(resolved)
+                # R34: BYPASS _select_adaptive_top_k (chỉ giữ same-prefix siblings)
+                # cho full-compound → trả ALL resolved codes. User rule: "nếu có các từ
+                # hoặc/và/kèm/trên nền phải in ra đủ ICD".
+                logger.debug("R34: full-compound direct: '%s' → %s", vn_text, filtered)
+                result = filtered
+                if len(self._cache) > 4096:
+                    self._cache.clear()
+                self._cache[cache_key] = result
+                return list(result)
+
         parts = self._split_compound_diagnosis(vn_text)
         if len(parts) > 1 and len(parts) <= 5:
             logger.debug("Multi-hop splitting '%s' → %s", vn_text, parts)
@@ -728,7 +1086,10 @@ class ICDRetriever:
                 for c in codes:
                     if c not in out:
                         out.append(c)
-            result = out[:2]
+            # R34 (2026-07-13): REMOVED cap `out[:2]`. Compound diagnoses với "hoặc" /
+            # "và" / "kèm" / "trên nền" nên trả về TẤT CẢ codes (mỗi part một code).
+            # User rule: "nếu có các từ đó phải in ra đủ ICD" — không cap 2 nữa.
+            result = out
         else:
             result = self._lookup_single(vn_text, context_query, other_entities, entity_type=entity_type)
 
@@ -752,12 +1113,22 @@ class ICDRetriever:
         text = _normalize_vn_term(text)
 
         # R27.7 mới 2026-07-10: short-circuit khi có direct match trong _icd_vn_to_codes
+        # R30 (2026-07-13): ANTI-POLLUTION GUARD — short aliases (< 6 chars) require
+        # word-boundary match OR exact equality. Otherwise the L0 short-circuit
+        # would over-fire on substrings (vd "phù" alias matching "phù chân" → R60
+        # instead of leaving the L1.5/L1.7 chain find specific R60.0).
         if hasattr(self, '_icd_vn_to_codes'):
             key_lower = text.lower().strip()
             if key_lower in self._icd_vn_to_codes:
-                logger.debug("L0 short-circuit direct match: '%s' → %s", text, self._icd_vn_to_codes[key_lower])
-                filtered = self._filter_and_sort_codes(self._icd_vn_to_codes[key_lower], text, other_entities=other_entities, entity_type=entity_type)
-                return self._rerank_and_select(filtered if filtered else self._icd_vn_to_codes[key_lower], max_k=1, text=text)
+                # Word-boundary check for short aliases only
+                alias_key = _get_alias_key_for_lookup(key_lower)
+                if alias_key is None:
+                    pass  # short alias but no word-boundary match → skip L0, let chain find right code
+                else:
+                    logger.debug("L0 short-circuit direct match: '%s' → %s", text, self._icd_vn_to_codes[alias_key])
+                    resolved_codes = self._icd_vn_to_codes[alias_key]
+                    filtered = self._filter_and_sort_codes(resolved_codes, text, other_entities=other_entities, entity_type=entity_type)
+                    return self._rerank_and_select(filtered if filtered else resolved_codes, max_k=1, text=text)
 
             # Tier-1b: Prefix & Word-containment fallback trong _icd_vn_to_codes (Fix 1.3)
             for key, codes in self._icd_vn_to_codes.items():
@@ -886,7 +1257,7 @@ class ICDRetriever:
                 codes = _re.findall(r'\b([A-TV-Z]\d{2}(?:\.\d{1,2})?)\b', response.upper())
                 valid_codes = []
                 for c in codes:
-                    if not c.startswith(('U', 'V', 'W', 'X', 'Y')) and (c in self.idx.codes or c[:3] in [code[:3] for code in self.idx.codes[:500]]):
+                    if not c.startswith(('U', 'V', 'W', 'X', 'Y')) and c in self.idx.codes:
                         valid_codes.append(c)
                 if valid_codes:
                     logger.info("L7 LLM fallback ICD: '%s' → %s", vn_text, valid_codes[:1])
@@ -1015,6 +1386,9 @@ class ICDRetriever:
     def _init_icd_vn_to_codes(self) -> None:
         # ICD direct mapping (R27.5): VN → exact ICD codes.
         # desc_en BYT không exact-match bản dịch EN nên cần map trực tiếp.
+        # R28 (2026-07-13): MERGE auto-mined aliases từ data/icd_aliases.json
+        # (build_mining_index.py) để exact match VN synonyms (bệnh Hansen, EHEC, ...)
+        # — KHÔNG phải hand-curate.
         self._icd_vn_to_codes = {
             "ung thư phổi": ["C34", "C34.9"],
             "ung thư phổi không tế bào nhỏ": ["C34", "C34.9"],
@@ -1073,6 +1447,23 @@ class ICDRetriever:
             "đột quỵ": ["I63", "I64"],
             "tai biến mạch máu não": ["I63", "I64"],
             "thiếu máu": ["D50", "D50.9"],
+            "bệnh tim mạch vành": ["I25", "I25.1"],  # R34: add for btmv abbr expansion
+            "bệnh mạch vành": ["I25", "I25.1"],
+            # === R34: Fecal/Urinary incontinence compound forms ===
+            "mất kiểm soát đại tiện": ["R15", "F98.1"],  # R15 (organic) + F98.1 (non-organic encopresis)
+            "mất kiểm soát tiểu tiện": ["R32", "N39.3", "N39.4"],  # R32 (unspecified) + N39.3/4 (stress/urge incontinence)
+            "đại tiện không tự chủ": ["R15", "F98.1"],
+            "tiểu tiện không tự chủ": ["R32", "N39"],
+            "đái không tự chủ": ["R32", "N39"],
+            "tiểu són": ["N39.3", "N39.4"],  # stress/urge
+            "đại tiện són": ["R15"],
+            # Full compound forms (lookup trước split để có codes đúng)
+            "mất kiểm soát đại tiện hoặc tiểu tiện": ["R15", "R32"],
+            "mất kiểm soát tiểu tiện hoặc đại tiện": ["R32", "R15"],
+            "tiểu tiện hoặc đại tiện không tự chủ": ["R32", "R15"],
+            "đại tiện hoặc tiểu tiện không tự chủ": ["R15", "R32"],
+            "mất kiểm soát đại tiện và tiểu tiện": ["R15", "R32"],
+            "mất kiểm soát tiểu tiện và đại tiện": ["R32", "R15"],
 
             # === MỚI 2026-07-10 — abbreviations VN (R27.6) ===
             "tha": ["I10"],  # Tăng huyết áp
@@ -1481,6 +1872,10 @@ class ICDRetriever:
             "sa sút trí tuệ": ["F03"],
             "trầm cảm": ["F32"],
             "rối loạn lo âu": ["F41"],
+            # Opthalmology / Eye (R29 user spec round 2 — WHO ICD-10 ONLY, KHÔNG dùng ICD-10-CM 5th-digit)
+            "phù gai thị": ["H47.1"],
+            # Liver / Lab-as-diagnosis (R29 user spec round 2 — capture full phrase, modifier "máu" preserved)
+            "tăng bilirubin máu": ["R17"],
             # Respiratory
             "viêm phổi thùy": ["J18.1"],
             "viêm phổi không điển hình": ["J18.9"],
@@ -1596,6 +1991,50 @@ class ICDRetriever:
             "sụt cân": ["R63.4"],
             "tăng cân": ["R63.5"],
         }
+        # R34: MERGE auto-mined aliases từ data/icd_aliases.json (build_mining_index.py).
+        _load_mined_icd_aliases(self._icd_vn_to_codes)
+
+        # R34 (2026-07-13): Fix duplicate keys in dict literal (Python dict literal
+        # OVERWRITES earlier entries on duplicate keys → some codes get lost).
+        # Source file has 66 duplicate keys; 15 of them have meaningful extras
+        # (e.g., 'tiêu chảy' first defined as ['A09', 'K52.9'], then re-defined
+        # as ['R19.7'] → A09/K52.9 are LOST). Re-merge lost codes here.
+        self._merge_lost_duplicate_entries()
+
+    def _merge_lost_duplicate_entries(self) -> None:
+        """R34: Re-add codes bị mất do Python dict literal override duplicate keys.
+
+        Source có 66 keys xuất hiện ≥2 lần. Mỗi key, dict giữ lần cuối — các
+        lần trước bị mất. Helper này merge back các codes bị mất (chỉ thêm code
+        mới, KHÔNG đè).
+        """
+        # Extras captured từ source analysis (R34 spec round 3 — 2026-07-13).
+        # Format: {key: [codes_to_add_back]}
+        _LOST_EXTRAS: dict[str, list[str]] = {
+            "ung thư gan": ["C22.9"],
+            "ung thư dạ dày": ["C16.9"],
+            "ung thư đại tràng": ["C18.9"],
+            "viêm nội tâm mạc": ["I33.9"],
+            "viêm cơ tim": ["I40.9"],
+            "viêm tụy": ["K85"],
+            "viêm phế quản": ["J20", "J21"],
+            "lao phổi": ["A15.0"],
+            "động kinh": ["G40.9"],
+            "parkinson": ["G21"],
+            "alzheimer": ["G30.9"],
+            "trầm cảm": ["F32.9"],
+            "rối loạn lo âu": ["F41.9"],
+            "đau nửa đầu": ["G43.9"],
+            "tiêu chảy": ["A09", "K52.9"],
+        }
+        for key, codes in _LOST_EXTRAS.items():
+            existing = self._icd_vn_to_codes.get(key, [])
+            for c in codes:
+                if c not in existing:
+                    existing.append(c)
+            if existing:
+                self._icd_vn_to_codes[key] = existing
+        logger.info("[R34] Merged %d lost entries from duplicate keys", len(_LOST_EXTRAS))
 
     def _chapter_codes_lookup(self, text: str) -> list[str]:
         """Lookup codes thuộc chapter cụ thể dựa trên keyword match.

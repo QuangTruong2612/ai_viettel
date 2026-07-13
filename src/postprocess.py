@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from src.icd_rag import ICDRetriever
-from src.rxnorm_rag import RxNormRetriever
+from src.rxnorm_rag import RxNormRetriever, _DRUG_INN_WHITELIST as _RXNORM_INN_CACHE
 
 # Đảm bảo có thể chạy trực tiếp `python src/postprocess.py`
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +33,24 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 logger = logging.getLogger(__name__)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# R28 (2026-07-13): Unified drug name whitelist — hardcoded legacy 13 entries
+# UNION với auto-mined RxNorm INN (~63k entries từ rxnorm.jsonl).
+# Set lookup O(1); cập nhật whitelist bằng cách rerun scripts/build_mining_index.py.
+# ════════════════════════════════════════════════════════════════════════════════
+
+_BASE_DRUG_NAMES: set[str] = {
+    "aspirin", "atenolol", "metoprolol", "amlodipine", "bisoprolol",
+    "furosemide", "paracetamol", "doxycycline", "clopidogrel",
+    "atorvastatin", "losartan", "enoxaparin", "nitroglycerin",
+}
+_DRUG_NAMES_UNIONED: frozenset[str] = frozenset(_BASE_DRUG_NAMES | _RXNORM_INN_CACHE)
+logger.info(
+    "[R28] drug_names whitelist: %d entries (base 13 + INN %d)",
+    len(_DRUG_NAMES_UNIONED), len(_RXNORM_INN_CACHE),
+)
 
 
 # ---------------------------------------------------------------------- #
@@ -145,29 +163,107 @@ def preprocess_input_for_llm(
 
 
 def _find_span(text: str, snippet: str, start: int = 0) -> tuple[int, int] | None:
-    """Tìm vị trí đầu tiên của snippet trong text (từ start); trả [start, end) hoặc None.
+    """Tìm vị trí ĐẦU TIÊN của snippet trong text với WORD-BOUNDARY check (R28 2026-07-13).
 
     Args:
         text: full input text.
         snippet: text cần tìm.
         start: vị trí bắt đầu tìm (default 0).
+
+    Returns:
+        (start, end) tuple hoặc None nếu không tìm được tại word boundary.
+
+    R28 NOTE: Trước đây chỉ dùng `text.find()` mà KHÔNG enforce word boundary
+    → match nhầm "giác" bên trong "ảo giácxuất hiện". Nay enforce boundary.
     """
     if not snippet:
         return None
-    idx = text.find(snippet, start)
-    if idx >= 0:
-        return idx, idx + len(snippet)
-    # Fallback: lowercase (từ start)
-    idx = text.lower().find(snippet.lower(), start)
-    if idx >= 0:
-        return idx, idx + len(snippet)
-    # Fallback: bỏ khoảng trắng thừa ở hai đầu
+    n_text = len(text)
+    n_snip = len(snippet)
+    # Case-sensitive pass
+    idx = start - 1
+    while True:
+        idx = text.find(snippet, idx + 1)
+        if idx < 0:
+            break
+        end_idx = idx + n_snip
+        # Word boundary: char trước/sau phải là non-alnum hoặc là đầu/cuối text
+        prev_ok = idx == 0 or not text[idx - 1].isalnum()
+        next_ok = end_idx >= n_text or not text[end_idx].isalnum()
+        if prev_ok and next_ok:
+            return idx, end_idx
+    # Case-insensitive pass (fallback)
+    tl = text.lower()
+    sl = snippet.lower()
+    idx = start - 1
+    while True:
+        idx = tl.find(sl, idx + 1)
+        if idx < 0:
+            break
+        end_idx = idx + len(sl)
+        if end_idx > n_text:
+            end_idx = n_text
+        prev_ok = idx == 0 or not text[idx - 1].isalnum()
+        next_ok = end_idx >= n_text or not text[end_idx].isalnum()
+        if prev_ok and next_ok:
+            return idx, end_idx
+    # Fallback 3: bỏ khoảng trắng thừa ở hai đầu
     stripped = snippet.strip()
     if stripped != snippet:
-        idx = text.find(stripped, start)
-        if idx >= 0:
-            return idx, idx + len(stripped)
+        idx = start - 1
+        while True:
+            idx = text.find(stripped, idx + 1)
+            if idx < 0:
+                break
+            end_idx = idx + len(stripped)
+            prev_ok = idx == 0 or not text[idx - 1].isalnum()
+            next_ok = end_idx >= n_text or not text[end_idx].isalnum()
+            if prev_ok and next_ok:
+                return idx, end_idx
     return None
+
+
+def _validate_span_or_drop(input_text: str, ent: dict[str, Any]) -> dict[str, Any] | None:
+    """R28 (2026-07-13): Post-alignment validator cho 1 entity.
+
+    Drops entity nếu:
+    1. input_text[span_start:span_end] != entity_text (case-insensitive)
+       → span không trỏ vào đúng text được claim
+    2. Span boundaries nằm giữa từ (char trước/sau là alnum)
+       → span cắt giữa từ, làm scorer match sai
+
+    Args:
+        input_text: original input
+        ent: entity dict với 'text' + 'position'
+
+    Returns:
+        ent nếu OK, None nếu cần drop.
+    """
+    if not isinstance(ent, dict):
+        return None
+    pos = ent.get("position", [])
+    if not (isinstance(pos, list) and len(pos) == 2):
+        return None
+    try:
+        s, e = int(pos[0]), int(pos[1])
+    except (ValueError, TypeError):
+        return None
+    n = len(input_text)
+    if not (0 <= s < e <= n):
+        return None
+    actual = input_text[s:e]
+    expected = str(ent.get("text", "")).strip()
+    if not expected:
+        return None
+    # Check 1: extracted text khớp substring (case-insensitive)
+    if actual.lower() != expected.lower():
+        return None
+    # Check 2: word-boundary (cả 2 phía)
+    if s > 0 and input_text[s - 1].isalnum():
+        return None
+    if e < n and input_text[e].isalnum():
+        return None
+    return ent
 
 
 def validate_positions(
@@ -408,7 +504,7 @@ def _refine_stage2_results(input_text: str, stage2_entities: list[dict[str, Any]
     refined: list[dict[str, Any]] = []
     
     drug_endings = re.compile(r"\d+\s*(?:mg|mcg|g|ml|iu|viên|ống|gói|po|bid|tid|daily|prn)$", re.IGNORECASE)
-    drug_names = {"aspirin", "atenolol", "metoprolol", "amlodipine", "bisoprolol", "furosemide", "paracetamol", "doxycycline", "clopidogrel", "atorvastatin", "losartan", "enoxaparin", "nitroglycerin"}
+    drug_names = _DRUG_NAMES_UNIONED  # R28: 13 → ~63k entries auto-extended
     normal_patterns = re.compile(r"^(?:bình\s+thường|không\s+ghi\s+nhận.*|nhịp\s+xoang.*|không\s+có\s+gì\s+đáng\s+chú\s+ý)$", re.IGNORECASE)
     vital_patterns = re.compile(r"^(?:\d{2,3}/\d{2,3}\s*(?:mmHg)?|SpO2.*|\d{2,3}\s*%|VS\d+\.\d+.*|\d{2,3}\s*(?:lần/phút|nhịp/phút|\s*°C))$", re.IGNORECASE)
     test_names = {"điện tâm đồ", "ecg", "x-quang ngực", "siêu âm tim", "siêu âm tim qua thành ngực", "phân tích nước tiểu", "công thức máu", "monitor holter", "chụp x-quang"}
@@ -421,9 +517,12 @@ def _refine_stage2_results(input_text: str, stage2_entities: list[dict[str, Any]
         etype = str(ent.get("type", "")).strip()
         assertions = list(ent.get("assertions", [])) if isinstance(ent.get("assertions"), list) else []
 
-        # A. Auto-Type Correction
+        # A. Auto-Type Correction (R28: order matters)
         if normal_patterns.match(text) or vital_patterns.match(text):
             etype = "KẾT_QUẢ_XÉT_NGHIỆM"
+        elif _is_procedure(text):
+            # R28: Kiểm tra TRƯỚC drug để tránh "truyền dịch yếu tố IX" → THUỐC
+            etype = "TÊN_XÉT_NGHIỆM"
         elif drug_endings.search(text) or any(text.lower().startswith(dn) for dn in drug_names):
             etype = "THUỐC"
         elif text.lower() in test_names:
@@ -475,7 +574,7 @@ def _stage2_fallback_classify(mentions: list[dict[str, Any]]) -> list[dict[str, 
     """Smart Fallback Classifier cho Stage 2 (dùng khi LLM trả về lô rỗng hoặc timeout)."""
     fallback_list: list[dict[str, Any]] = []
     drug_endings = re.compile(r"\d+\s*(?:mg|mcg|g|ml|iu|viên|ống|gói|po|bid|tid|daily|prn)$", re.IGNORECASE)
-    drug_names = {"aspirin", "atenolol", "metoprolol", "amlodipine", "bisoprolol", "furosemide", "paracetamol", "doxycycline", "clopidogrel", "atorvastatin", "losartan", "enoxaparin", "nitroglycerin"}
+    drug_names = _DRUG_NAMES_UNIONED  # R28: 13 → ~63k entries auto-extended
     normal_patterns = re.compile(r"^(?:bình\s+thường|không\s+ghi\s+nhận.*|nhịp\s+xoang.*|không\s+có\s+gì\s+đáng\s+chú\s+ý)$", re.IGNORECASE)
     vital_patterns = re.compile(r"^(?:\d{2,3}/\d{2,3}\s*(?:mmHg)?|SpO2.*|\d{2,3}\s*%|VS\d+\.\d+.*|\d{2,3}\s*(?:lần/phút|nhịp/phút|\s*°C))$", re.IGNORECASE)
     test_names = {"điện tâm đồ", "ecg", "x-quang ngực", "siêu âm tim", "siêu âm tim qua thành ngực", "phân tích nước tiểu", "công thức máu", "monitor holter", "chụp x-quang"}
@@ -489,9 +588,12 @@ def _stage2_fallback_classify(mentions: list[dict[str, Any]]) -> list[dict[str, 
         if not text:
             continue
         tl = text.lower()
-        
+
         if normal_patterns.match(text) or vital_patterns.match(text):
             etype = "KẾT_QUẢ_XÉT_NGHIỆM"
+        elif _is_procedure(text):
+            # R28: ưu tiên procedure trước drug (vd "truyền dịch yếu tố IX" → procedure)
+            etype = "TÊN_XÉT_NGHIỆM"
         elif drug_endings.search(text) or any(tl.startswith(dn) for dn in drug_names):
             etype = "THUỐC"
         elif tl in test_names or "xét nghiệm" in tl or "chụp" in tl or "siêu âm" in tl:
@@ -987,7 +1089,7 @@ def _detect_assertions_from_context(
 
     # isFamily: sử dụng re.UNICODE và patterns đầy đủ cho tiếng Việt
     family_patterns = [
-        r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú|bác)(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ|bệnh\s+nhân))?\s+(?:bệnh\s+nhân|bị|mắc|có|từng|tiền\s+sử|mất\s+vì|chết\s+vì|đã|chiếm|đang|\b)",
+        r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú|bác)(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ))?\s+(?:bị|mắc|có|từng|tiền\s+sử|mất\s+vì|chết\s+vì)\b",
         r"gia\s+đình\s+(?:có|bị|từng|tiền\s+sử|ghi\s+nhận|ai|mắc)",
         r"ti[eề]n\s+s[ử]?\s*gia\s+[đd][ìi]nh",
         r"\bhọ\s+hàng\b",
@@ -1236,6 +1338,111 @@ _PURE_DURATION_RE = re.compile(
 )
 
 
+# ════════════════════════════════════════════════════════════════════════════════
+# R29 (2026-07-13 spec round 2): Drop symptom if diagnosis dupe
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _is_non_treatment_drug_context(text: str, input_text: str = "") -> bool:
+    """R29 (spec round 2): Detect drugs mentioned in non-treatment contexts.
+
+    Cases phải return True:
+    - 'Enterococcus kháng vancomycin' (resistance mention)
+    - lab tokens: 'bicarbonate', 'creatinine', 'urea', 'sodium', ... (lab test results)
+    - exposure events
+
+    Cases phải return False:
+    - 'vancomycin đã được dùng để điều trị' (actual treatment)
+    - 'metoprolol 25mg po bid' (medication order)
+
+    Logic:
+        1. Check LAB_TOKENS whitelist (drugs used as lab panel measurements, NOT Rx)
+        2. Check 30-char window BEFORE entity in input_text:
+           - 'kháng vancomycin', 'đề kháng vancomycin', 'resistance vancomycin'
+             → resistance mention, no Rx candidate
+        3. Trailing 'kháng sinh nhóm X' same drug mentioned as class → conservative,
+           do NOT count as resistance (we only flag "kháng [specific_drug]")
+
+    Args:
+        text: entity text đang check (vd 'vancomycin')
+        input_text: original input text để check context (optional, có thể empty)
+    """
+    if not text:
+        return False
+    tl = text.lower().strip()
+    if len(tl) < 3:
+        return False
+
+    # 1. LAB_TOKENS — các chất hay xuất hiện trong lab test panels (không phải thuốc ordered)
+    lab_only = frozenset({
+        "bicarbonate", "creatinine", "urea", "sodium", "potassium",
+        "chloride", "magnesium", "phosphate", "calcium", "glucose",
+        "albumin", "bilirubin", "hemoglobin", "haemoglobin",
+    })
+    if tl in lab_only:
+        return True
+
+    # 2. Resistance context: preceding chars có "kháng", "đề kháng", "resistance"
+    # QUAN TRỌNG: phải theo sau bởi WHITESPACE để tránh match "kháng sinh"
+    if input_text and len(tl) >= 4:
+        s = input_text.lower().find(tl)
+        if s > 0:
+            # Window 30 chars BEFORE entity
+            pre = input_text[max(0, s - 30):s]
+            # Check "kháng " (với space) hoặc "đề kháng" / "resistance"
+            pre_lower = pre.lower()
+            if re.search(r"\b(?:đề\s+)?kháng\s+$", pre_lower) or re.search(r"\bresistance\s+$", pre_lower):
+                return True
+
+    return False
+
+
+def _drop_symptom_when_diagnosis_present(entities: list[dict]) -> list[dict]:
+    """Cross-type drop: nếu 1 diagnosis span bao trùm symptom span → drop symptom.
+
+    Spec examples:
+        'rối loạn lo âu'  (CHẨN_ĐOÁN) contains 'lo âu'  (TRIỆU_CHỨNG) → drop
+        'áp xe/viêm khớp nhiễm trùng' (CHẨN_ĐOÁN) contains 'nhiễm trùng' → drop
+        'bệnh huyết áp cao' (CHẨN_ĐOÁN) does NOT contain 'huyết áp cao' (different entity)
+
+    Logic:
+        - For each TRIỆU_CHỨNG, check if its text appears as a substring of ANY CHẨN_ĐOÁN
+          (case-insensitive, normalized whitespace).
+        - If yes → drop the TRIỆU_CHỨNG.
+        - Reverse direction also checked (small diagnosis prefix in longer symptom).
+
+    Strict: only drops when text is genuine substring match — không match các
+    TRIỆU_CHỨNG độc lập (vd 'đau ngực' không phải substring của 'viêm phổi').
+    """
+    if len(entities) < 2:
+        return entities
+    diagnoses = [
+        str(e.get("text", "")).lower().strip()
+        for e in entities
+        if e.get("type") == "CHẨN_ĐOÁN"
+    ]
+    if not diagnoses:
+        return entities
+    # Chỉ drop khi diagnosis.span bao trùm symptom.text (substring)
+    # và không drop unrelated symptoms.
+    drop_idx = set()
+    for i, ent in enumerate(entities):
+        if ent.get("type") != "TRIỆU_CHỨNG":
+            continue
+        s_text = str(ent.get("text", "")).lower().strip()
+        if len(s_text) < 4:  # too short — tránh drop 'đau', 'mệt', ...
+            continue
+        for d_text in diagnoses:
+            if len(d_text) < 4:
+                continue
+            # symptom là substring của diagnosis → drop
+            if s_text in d_text:
+                drop_idx.add(i)
+                break
+    if not drop_idx:
+        return entities
+    return [e for i, e in enumerate(entities) if i not in drop_idx]
+
+
 def _filter_lifestyle_entities(entities: list[dict]) -> list[dict]:
     """Drop entities khớp lifestyle/social/psychology, sinh hiệu gộp, và thời gian độc lập.
 
@@ -1340,9 +1547,11 @@ _LEADING_VERB_QUALIFIER_RE = re.compile(
 # Canonical CHẨN_ĐOÁN names chứa "tăng"/"giảm" prefix - KHÔNG strip
 _CANONICAL_KEEP_PREFIX = {
     "tăng huyết áp", "tăng đường huyết", "tăng cholesterol",
-    "tăng lipid máu", "tăng triglyceride máu",
+    "tăng lipid máu", "tăng triglyceride máu", "tăng bilirubin máu",
     "giảm tiểu cầu", "giảm bạch cầu", "giảm dung nạp gắng sức",
     "rối loạn lipid máu", "rối loạn chuyển hóa",
+    # Opthalmology (Section 2 spec round 2)
+    "phù gai thị",
 }
 
 # Verb prefix cần STRIP khỏi TÊN_XÉT_NGHIỆM (DẠNG A - verb NGOÀI tên)
@@ -1552,6 +1761,8 @@ _ABNORMAL_FINDING_TO_CHAN_DOAN = re.compile(
 )
 
 # Procedures/surgeries → TÊN_XÉT_NGHIỆM (không phải THUỐC)
+# R28 (2026-07-13): CHUYỂN từ hardcoded regex → data-driven load từ data/procedure_patterns.json.
+# Cho phép mở rộng mà không cần sửa code.
 _PROCEDURE_TO_TEN_XN = re.compile(
     r"^(phẫu thuật|nội soi|chọc dò|đặt stent|đặt ống|"
     r"thủ thuật|nội soi|can thiệp|cắt \w+|"
@@ -1560,6 +1771,83 @@ _PROCEDURE_TO_TEN_XN = re.compile(
     r"đo \w+|test \w+ \w+)$",
     re.IGNORECASE | re.UNICODE,
 )
+
+# ════════════════════════════════════════════════════════════════════════════════
+# R28 (2026-07-13): Load procedure patterns + drug INN từ data-driven files.
+# ════════════════════════════════════════════════════════════════════════════════
+
+_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
+
+def _load_procedure_patterns() -> tuple[list[re.Pattern], list[str], list[str]]:
+    """Load procedure regex patterns + exclusion lists từ data/procedure_patterns.json.
+
+    Returns (compiled_patterns, exclude_if_contains, exclude_if_startswith).
+    Nếu file không tồn tại → fallback dùng _PROCEDURE_TO_TEN_XN cũ + excludes trống.
+    """
+    path = _DATA_DIR / "procedure_patterns.json"
+    if not path.exists():
+        logger.warning(
+            "[R28] procedure_patterns.json missing → fall back to _PROCEDURE_TO_TEN_XN cũ"
+        )
+        return [_PROCEDURE_TO_TEN_XN], [], []
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+        patterns = [
+            re.compile(p, re.IGNORECASE | re.UNICODE)
+            for p in cfg.get("vn_verbs", [])
+        ]
+        return patterns, cfg.get("exclude_if_contains", []), cfg.get("exclude_if_startswith", [])
+    except Exception as exc:
+        logger.warning("[R28] Failed to load procedure_patterns.json: %s", exc)
+        return [_PROCEDURE_TO_TEN_XN], [], []
+
+
+_PROC_PATTERNS, _PROC_EXCLUDE_CONTAINS, _PROC_EXCLUDE_STARTS = _load_procedure_patterns()
+logger.info(
+    "[R28] Loaded %d procedure patterns + %d/%d exclude lists",
+    len(_PROC_PATTERNS), len(_PROC_EXCLUDE_CONTAINS), len(_PROC_EXCLUDE_STARTS),
+)
+
+
+def _is_procedure(text: str) -> bool:
+    """R28: Detect procedure text bằng data-driven regex + exclude lists.
+
+    Args:
+        text: entity text cần classify
+
+    Returns:
+        True nếu text match 1 procedure pattern VÀ không chứa drug keywords.
+
+    Examples:
+        >>> _is_procedure("Truyền dịch yếu tố IX đậm đặc")
+        True   # "truyền dịch" match
+        >>> _is_procedure("truyền máu")
+        True
+        >>> _is_procedure("aspirin 500mg")
+        False  # drug, not procedure
+        >>> _is_procedure("MRI cột sống")
+        True   # could match imaging test (in exclude_if_startswith handled below)
+    """
+    if not text or len(text) > 200:
+        return False
+    tl = text.lower().strip()
+    if not tl:
+        return False
+    # Exclude if starts with test/imaging prefix (those are TÊN_XÉT_NGHIỆM via different path)
+    for prefix in _PROC_EXCLUDE_STARTS:
+        if tl.startswith(prefix):
+            return False
+    # Exclude if contains drug keywords (priority drug > procedure)
+    for kw in _PROC_EXCLUDE_CONTAINS:
+        if kw in tl:
+            return False
+    # Match procedure verb patterns
+    for pat in _PROC_PATTERNS:
+        if pat.search(tl):
+            return True
+    return False
+
 
 # Treatment modalities → CHẨN_ĐOÁN (không phải THUỐC cụ thể)
 _TREATMENT_MODALITY_TO_CHAN_DOAN = re.compile(
@@ -1734,7 +2022,14 @@ def _split_long_imaging_result(
     for finding in findings:
         finding_pos = _find_span(input_text, finding, start=search_start)
         if finding_pos is None:
-            finding_pos = (search_start, search_start + len(finding))
+            # R28 (2026-07-13): Bỏ entity thay vì tạo span rác giữa từ.
+            # Trước đây: (search_start, search_start + len(finding)) — có thể
+            # land giữa từ nếu finding text không khớp verbatim.
+            logger.debug(
+                "[R28] Drop finding '%s' — không tìm được word-boundary span sau test name",
+                finding[:60],
+            )
+            continue
         finding_type = _retype_entity(finding, "KẾT_QUẢ_XÉT_NGHIỆM")
         result.append({
             "text": finding,
@@ -1902,28 +2197,21 @@ def _expand_duplicates(entities, input_text):
     Post-process aggressive: tự scan input text, tìm TẤT CẢ occurrences của mỗi
     entity text, tạo thêm entities cho các positions khác.
 
+    R34 FIX (2026-07-13): Hàm trước chỉ lưu FIRST position về entity — không
+    expand thực sự. Sửa: emit 1 entity riêng cho MỖI occurrence (R10 STRICT),
+    deduplicate by (text, type) để tránh nhân đôi khi LLM trùng text nhiều lần.
+
     Args:
         entities: list entities từ LLM (đã validate position).
         input_text: raw input text.
 
     Returns:
-        list entities đã expand (có thể tăng số lượng nếu có duplicate).
-
-    Rules:
-    - Mỗi entity text xuất hiện N lần ở N vị trí khác nhau → giữ N entities
-      (giữ entity gốc của LLM + tạo thêm N-1 entities cho các vị trí còn lại).
-    - Exact match: text từ LLM khớp 100% với substring trong input.
-    - Substring match: text LLM là CON trong input (vd "đánh trống ngực" trong "tăng đánh trống ngực").
-    - Modifiers strip: bỏ "tăng", "giảm", "có", "không" trước khi match.
-    - Mỗi entity text chỉ xuất hiện 1 lần → giữ nguyên.
-    - Min text length = 4 chars để tránh false positive.
+        list entities đã expand (MỖI occurrence = 1 entity riêng, mỗi (text,type) chỉ xử lý 1 lần).
     """
     if not entities or not input_text:
         return entities
 
     # Modifiers VN cần strip trước khi match (R14/R25)
-    # PREFIX modifiers: tăng, giảm, có, không, ...
-    # SUFFIX qualifiers: nhẹ, nặng, vừa, ... (R6 cũng drop duration/intensity)
     _MODIFIERS_PREFIX = re.compile(
         r"^(tăng|giảm|có|không|đang|bị|bị\s+|rõ|rõ\s+rệt|ít|nhiều|hơi|khoảng|có\s+thể)\s+",
         re.IGNORECASE | re.UNICODE,
@@ -1933,50 +2221,79 @@ def _expand_duplicates(entities, input_text):
         re.IGNORECASE | re.UNICODE,
     )
 
-    expanded = list(entities)
+    expanded: list[dict[str, Any]] = []
+    input_lower = input_text.lower()
+    seen_text_types: set[tuple[str, str]] = set()  # (text_lower, type) đã xử lý
 
     for ent in entities:
         text = str(ent.get("text", "")).strip()
+        etype = str(ent.get("type", ""))
         if len(text) < 4:
+            # Quá ngắn (vd "M", "T") → giữ nguyên entity gốc
+            expanded.append(ent)
             continue
 
-        # Tìm TẤT CẢ occurrences của text trong input (case-insensitive)
         text_lower = text.lower()
-        input_lower = input_text.lower()
+        key = (text_lower, etype)
+        if key in seen_text_types:
+            # Đã xử lý text+type này rồi (LLM có nhiều ents cùng text) → skip duplicate work
+            continue
+        seen_text_types.add(key)
 
-        # UNION exact + stripped match (lấy tất cả vị trí)
-        # Set để tránh duplicate positions giữa exact và stripped
-        all_positions_set = set()
+        # UNION exact + stripped match (R10 STRICT: 1 entity / occurrence)
+        all_positions: list[tuple[int, int]] = []
+        seen_starts: set[int] = set()
 
-        # Cách 1: exact substring match
+        # Cách 1: exact substring match (case-insensitive)
         start = 0
         while True:
             idx = input_lower.find(text_lower, start)
             if idx < 0:
                 break
-            all_positions_set.add((idx, idx + len(text)))
+            end_idx = idx + len(text)
+            # Word-boundary check (R28) — tránh "nôn" khớp trong "buồn nôn"
+            if (idx > 0 and input_text[idx - 1].isalnum()) or (
+                end_idx < len(input_text) and input_text[end_idx].isalnum()
+            ):
+                start = idx + 1
+                continue
+            if idx not in seen_starts:
+                all_positions.append((idx, end_idx))
+                seen_starts.add(idx)
             start = idx + 1
 
-        # Cách 2: stripped match (bỏ modifier "tăng", "giảm"...)
-        text_stripped = _MODIFIERS_PREFIX.sub("", text_lower).strip()
-        # Also strip SUFFIX qualifiers (nhẹ, nặng, vừa)
-        text_stripped = _MODIFIERS_SUFFIX.sub("", text_stripped).strip()
-        if text_stripped and text_stripped != text_lower and len(text_stripped) >= 4:
-            start = 0
-            while True:
-                idx = input_lower.find(text_stripped, start)
-                if idx < 0:
-                    break
-                all_positions_set.add((idx, idx + len(text_stripped)))
-                start = idx + 1
+        # Cách 2: stripped match (bỏ modifier "tăng", "giảm"...) — CHỈ khi exact chưa match.
+        # ĐÃ CÓ exact match → không thêm stripped variants (gây trùng).
+        if not all_positions:
+            text_stripped = _MODIFIERS_PREFIX.sub("", text_lower).strip()
+            text_stripped = _MODIFIERS_SUFFIX.sub("", text_stripped).strip()
+            if text_stripped and text_stripped != text_lower and len(text_stripped) >= 4:
+                start = 0
+                while True:
+                    idx = input_lower.find(text_stripped, start)
+                    if idx < 0:
+                        break
+                    end_idx = idx + len(text_stripped)
+                    # Word-boundary check
+                    if (idx > 0 and input_text[idx - 1].isalnum()) or (
+                        end_idx < len(input_text) and input_text[end_idx].isalnum()
+                    ):
+                        start = idx + 1
+                        continue
+                    if idx not in seen_starts:
+                        all_positions.append((idx, end_idx))
+                        seen_starts.add(idx)
+                    start = idx + 1
 
-        all_positions = [list(p) for p in sorted(all_positions_set)]
-
-        # Nếu chỉ có 1 occurrence hoặc không muốn tạo thêm entities ảo → giữ nguyên
-        pos = ent.get("position", [0, 0])
-        if not (isinstance(pos, list) and len(pos) == 2 and 0 <= pos[0] < pos[1] <= len(input_text)):
-            if all_positions:
-                ent["position"] = all_positions[0]
+        # R34 FIX: Emit 1 entity riêng cho MỖI occurrence (R10 STRICT)
+        if all_positions:
+            for s, e in all_positions:
+                actual_text = input_text[s:e]
+                new_ent = {**ent, "text": actual_text, "position": [s, e]}
+                expanded.append(new_ent)
+        else:
+            # No positions found → giữ entity gốc (có thể match fuzzy ở layer sau)
+            expanded.append(ent)
 
     # Sort theo position
     expanded.sort(key=lambda e: e.get("position", [0, 0])[0])
@@ -2208,6 +2525,16 @@ def align_and_expand_entities(
             fuzzy_res = _fuzzy_locate_in_text(base_text, input_text, hint_pos=hint_pos)
             if fuzzy_res is not None:
                 rs, re_ = fuzzy_res
+                # R28 (2026-07-13): Reject if span boundaries fall mid-word.
+                # _fuzzy_locate_in_text không enforce boundary, có thể match giữa từ.
+                boundary_ok = (
+                    (rs == 0 or not input_text[rs - 1].isalnum())
+                    and (re_ >= len(input_text) or not input_text[re_].isalnum())
+                )
+                if not boundary_ok:
+                    fuzzy_res = None
+            if fuzzy_res is not None:
+                rs, re_ = fuzzy_res
                 all_spans.add((rs, re_))
                 for ent in ents:
                     ent["text"] = input_text[rs:re_]
@@ -2253,41 +2580,21 @@ def align_and_expand_entities(
                         all_spans.add(span)
                     start = idx + 1
 
+        # R34 (2026-07-13): Emit 1 entity riêng cho MỖI occurrence (R10 STRICT).
+        # Trước đây chỉ emit len(LLM_ents) entities → MISS tất cả duplicate occurrences.
+        # Mỗi span trong all_spans = 1 entity, sharing assertions từ LLM.
         if not all_spans:
             logger.debug("Align: không tìm được span cho '%s' (%s) → bỏ", base_text, etype)
             continue
 
-        # Gán từng ent in ents với span gần nhất trong all_spans (KHÔNG auto-expand mù quáng để tránh WER cao)
-        available_spans = sorted(list(all_spans))
-        for ent in ents:
-            if not available_spans:
-                pos_field = ent.get("position", [0, 0])
-                if isinstance(pos_field, list) and len(pos_field) == 2 and pos_field[1] > pos_field[0] >= 0:
-                    aligned.append(ent)
-                continue
-
-            hint_pos = 0
-            pos_field = ent.get("position", [0, 0])
-            if isinstance(pos_field, list) and len(pos_field) == 2:
-                try:
-                    hint_pos = int(pos_field[0])
-                except (ValueError, TypeError):
-                    hint_pos = 0
-
-            best_idx = 0
-            best_dist = abs(available_spans[0][0] - hint_pos)
-            for i, span in enumerate(available_spans):
-                dist = abs(span[0] - hint_pos)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_idx = i
-
-            chosen_span = available_spans.pop(best_idx)
-            span_start, span_end = chosen_span
+        # Use FIRST ent's assertions (LLM-provided) for ALL emitted entities.
+        # Nếu có nhiều ent (nhiều spans với assertions khác nhau → cẩn thận).
+        # Hầu hết LLM chỉ trả 1 ent → dùng assertions của nó.
+        ref_ent = ents[0]
+        for span_start, span_end in sorted(all_spans):
             actual_text = input_text[span_start:span_end]
-
             new_ent = {
-                **ent,
+                **ref_ent,
                 "text": actual_text,
                 "position": [span_start, span_end],
             }
@@ -2302,8 +2609,16 @@ def align_and_expand_entities(
     # ── Drop substring entities ─────────────────────────────────────────────────────
     aligned = _drop_substring_entities(aligned)
 
+    # R29 (2026-07-13): Cross-type drop — symptom khi diagnosis duplicate span.
+    # 'rối loạn lo âu' (CHẨN_ĐOÁN) chứa 'lo âu' (TRIỆU_CHỨNG) → drop symptom.
+    aligned = _drop_symptom_when_diagnosis_present(aligned)
+
     # ── Filter lifestyle/duration noise ──────────────────────────────────────────
     aligned = _filter_lifestyle_entities(aligned)
+
+    # R28 (2026-07-13): Final word-boundary + text-claim validator.
+    # Span phải: input_text[s:e] == entity.text (case-insensitive) VÀ boundaries thuộc word boundary.
+    aligned = [e for e in (_validate_span_or_drop(input_text, e) for e in aligned) if e]
 
     return aligned
 
@@ -2482,6 +2797,7 @@ def _attach_candidates(
     validated: list[dict[str, Any]],
     retriever: RxNormRetriever,
     icd_retriever: Optional[ICDRetriever],
+    input_text: str = "",  # R29: passed in for non-treatment context check
 ) -> None:
     """Gán candidates cho record theo type (RxNorm cho THUỐC, ICD cho CHẨN_ĐOÁN).
 
@@ -2493,6 +2809,15 @@ def _attach_candidates(
             record["candidates"] = []
             return
     if etype == "THUỐC" and retriever is not None:
+        # R28 (2026-07-13): Generic drug-class term → SKIP lookup, return [].
+        if _is_generic_drug_class(text):
+            record["candidates"] = []
+            return
+        # R29 (2026-07-13 spec round 2): Non-treatment context (resistance, lab token)
+        # → SKIP lookup, return []. "kháng vancomycin" không phải Rx order.
+        if _is_non_treatment_drug_context(text, input_text):
+            record["candidates"] = []
+            return
         drug_query = sanitize_drug_text(text)
         if drug_query:
             try:
@@ -2601,7 +2926,7 @@ def _emit_entity_record(
     if not skip_attach:
         _attach_candidates(
             record, text, etype, ent, validated,
-            retriever, icd_retriever,
+            retriever, icd_retriever, input_text,  # R29: thread input_text through for context check
         )
     return record
 

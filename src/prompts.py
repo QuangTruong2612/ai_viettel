@@ -16,7 +16,7 @@ You are an expert Vietnamese Clinical NER Specialist with 20+ years of experienc
 
 🔥 5 NGUYÊN TẮC TRÍCH XUẤT LÂM SÀNG CỐT LÕI VÀ TINH GỌN (BẮT BUỘC TUÂN THỦ TỪNG CHỮ):
 1. **CHỈ LẤY TRIỆU CHỨNG LÕI NGẮN GỌN**: Khi gặp cụm dài như `"mệt mỏi nhiều khi gắng sức"`, `"còn cảm giác đánh trống ngực khi nhập viện"`, `"xuất hiện đau đầu liên tục"`, bạn BẮT BUỘC chỉ được trích xuất triệu chứng lõi: `"mệt mỏi"`, `"đánh trống ngực"`, `"đau đầu"`. TUYỆT ĐỐI KHÔNG lấy các từ dẫn tự sự (`còn cảm giác`, `xuất hiện`, `bệnh nhân thấy`) hoặc mệnh đề hoàn cảnh phía sau (`nhiều khi gắng sức`, `khi leo tầng`).
-2. **TÁCH CỤM VỊ TRÍ KÉP**: Nếu bệnh án ghi `"cảm giác thắt chặt ngực vùng trước tim"`, `"tình trạng đau thắt ngực sau xương ức"`, bạn PHẢI bóc tách thành 2 spans riêng biệt: Entity 1=`"cảm giác thắt chặt ngực"` VÀ Entity 2=`"thắt chặt ngực vùng trước tim"`. KHÔNG gộp chung thành 1 dải.
+2. **GIỮ NGUYÊN 1 SPAN DUY NHẤT CHO CỤM VỊ TRÍ KÉP**: Nếu bệnh án ghi `"cảm giác thắt chặt ngực vùng trước tim"`, `"tình trạng đau thắt ngực sau xương ức"`, đây là **1 entity duy nhất** (1 triệu chứng, có mô tả kèm vị trí giải phẫu) — bạn PHẢI giữ nguyên trọn vẹn thành 1 span duy nhất: `"cảm giác thắt chặt ngực vùng trước tim"`. TUYỆT ĐỐI KHÔNG tách thành 2 spans chồng lấn nhau (không được vừa xuất `"cảm giác thắt chặt ngực"` vừa xuất `"thắt chặt ngực vùng trước tim"` cho cùng 1 vị trí).
 3. **CHUẨN HÓA TÊN XÉT NGHIỆM (BỎ ĐỘNG TỪ CHỈ ĐỊNH)**: Khi lấy TÊN_XÉT_NGHIỆM, TUYỆT ĐỐI KHÔNG lấy động từ chỉ định phía trước (`chụp`, `đo`, `làm`, `thực hiện`, `tiến hành`). Ví dụ: `chụp X-quang ngực` -> CHỈ lấy `X-quang ngực`; `đo điện tâm đồ` -> CHỈ lấy `điện tâm đồ`. LƯU Ý: Các cụm danh từ xét nghiệm toàn phần như `phân tích nước tiểu`, `siêu âm tim`, `nội soi dạ dày` PHẢI GIỮ NGUYÊN TRỌN VẸN (`phân tích nước tiểu`).
 4. **GIỮ TRỌN VẸN ĐUÔI LIỀU LƯỢNG THUỐC (`x N`)**: Khi gặp `"aspirin 325mg x 1"`, `"metoprolol 25mg po bid"`, PHẢI trích xuất đầy đủ từ đầu đến đuôi liều/tần suất (`aspirin 325mg x 1`). Tuyệt đối không được bỏ rơi đuôi `x 1` phía sau!
 5. **QUÉT ĐẦY ĐỦ TỪNG LẦN LẶP LẠI (EXHAUSTIVE RECALL)**: Nếu một triệu chứng (`đánh trống ngực`, `khó thở`, `mệt mỏi`) hay thuốc (`atenolol`, `aspirin`) xuất hiện 3-4 lần ở các câu khác nhau từ Tiền sử đến Cấp cứu đến Khám lâm sàng, BẮT BUỘC trích xuất đủ 3-4 lần thành các entities riêng biệt với vị trí tương ứng!
@@ -373,7 +373,7 @@ Học cách SUY LUẬN thay vì memorize:
 4. **3 Assertions chuẩn (max 3, có thể kết hợp)**:
    - `isHistorical`: Tiền sử bệnh xa (`Tiền sử: THA 5 năm`), hoặc thuốc đang dùng TRƯỚC nhập viện (`Thuốc đang dùng: amlodipine`, `Thuốc trước khi nhập viện:`). *(Lưu ý: "Lý do nhập viện", "Triệu chứng hiện tại", "Khám lâm sàng" là đợt bệnh hiện tại → `assertions: []`, KHÔNG phải isHistorical)*.
    - `isNegated`: Bệnh/triệu chứng bị phủ định bởi từ `không`, `chưa`, `âm tính`, `không có`, `không xuất hiện` **ngay phía trước** entity đó. Chỉ entity đó bị negate, KHÔNG áp dụng hàng loạt cho các entity sau!
-   - `isFamily`: Bệnh của người nhà (`Bố bệnh nhân bị THA` → `["isFamily", "isHistorical"]`).
+   - `isFamily`: CHỈ khi người thân là CHỦ THỂ mắc bệnh (`Bố bệnh nhân bị THA` → `["isFamily", "isHistorical"]`). KHÔNG gán khi "bác sĩ" (nhân viên y tế) hoặc gia đình chỉ kể/quan sát hộ bệnh nhân (`"bác sĩ chăm sóc chính kê đơn..."`, `"Gia đình nhận thấy bệnh nhân..."` → đây là bệnh/thuốc của bệnh nhân, KHÔNG `isFamily`).
 </splitting_and_context>
 
 <duplicate_and_position>
@@ -432,15 +432,8 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                     "CHẨN_ĐOÁN",
                 ],
             },
-            # position là optional — Python sẽ tự align chính xác 100%
-            # LLM không cần đếm character offset nữa (2-Step Architecture)
-            "position": {
-                "type": "array",
-                "minItems": 2,
-                "maxItems": 2,
-                "items": {"type": "integer", "minimum": 0},
-                "default": [0, 0],
-            },
+            # R34 (2026-07-13): position BỎ khỏi schema. Python tự tính character offset
+            # chính xác 100% trong align_and_expand_entities — không cần LLM đếm.
             "assertions": {
                 "type": "array",
                 "items": {
@@ -545,13 +538,8 @@ def format_few_shot_stage2_messages(examples: list[dict]) -> list[dict[str, str]
 def build_user_prompt(input_text: str) -> str:
     """Build user prompt với input text.
 
-    Format mạnh và sắc bén: Yêu cầu trích xuất kiệt để 100% entities trong 5 loại + alert + input text.
-
-    Args:
-        input_text: input clinical note nguyên bản.
-
-    Returns:
-        prompt string sẵn sàng gửi làm user message.
+    R34 (2026-07-13): compact hơn, focus duplicate handling. Bỏ phần vital signs
+    40-dòng (Python validate sẽ lo). Thêm nhắc nhở R10 STRICT duplicates.
     """
     try:
         from src.postprocess import _get_duplicate_alert
@@ -562,17 +550,14 @@ def build_user_prompt(input_text: str) -> str:
     alert_part = f"{alert}\n\n" if alert else ""
 
     return (
-        "🎯 NHIỆM VỤ CẤP BÁCH: Quét kiệt để và trích xuất TOÀN BỘ thực thể y khoa từ hồ sơ bệnh án tiếng Việt dưới đây vào đúng 5 loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM).\n\n"
-        "🔥 QUY TẮC QUÉT KHÔNG ĐƯỢC BỎ SÓT BẤT KỲ ENTITY NÀO:\n"
-        "1. Quét từ chữ đầu tiên đến chữ cuối cùng (Lý do vào viện, Tiền sử, Khám, CLS, Chẩn đoán, Điều trị).\n"
-        "2. Đảm bảo thu thập ĐỦ 5 TYPE:\n"
-        "   - 💊 THUỐC: Lấy cả thuốc đang dùng, thuốc tiền sử lẫn thuốc mới kê (giữ liều lượng, pattern `x 1`, `x 2`).\n"
-        "   - 🩺 CHẨN_ĐOÁN: Lấy bệnh tiền căn, chẩn đoán xác định/ra viện và TẤT CẢ bất thường trên tim mạch/hình ảnh (`ngoại tâm thu`, `ST chênh lên`, `tim to`, `tràn dịch`), ĐẶC BIỆT KHÔNG ĐƯỢC BỎ SÓT CÁC TỪ VIẾT TẮT (`THA`, `ĐTĐ` / `ĐTĐ tuýp 2`, `NMCT`, `RLLL`, `COPD`, `CKD`, `BTMV`, `TBMMN`...).\n"
-        "   - 🤒 TRIỆU_CHỨNG: Lấy đủ mọi than phiền (`đau ngực`, `khó thở`, `khó thở nhẹ`, `đánh trống ngực`, `mệt mỏi nhiều khi gắng sức`), lặp lại ở N câu thì lấy đủ N entities (R10 STRICT).\n"
-        "   - 🔬 TÊN_XÉT_NGHIỆM: Lấy đủ chỉ định/thủ thuật (`X-quang ngực`, `ECG`, `nước tiểu`, `siêu âm tim`, `monitor holter`).\n"
-        "   - 📊 KẾT_QUẢ_XÉT_NGHIỆM: Lấy đủ chỉ số định lượng (`160/90 mmHg`, `96%`, `38.5°C`) và kết quả định tính/bình thường (`nhịp xoang chiếm ưu thế`, `bình thường`, `không ghi nhận gì bất thường`).\n"
-        "3. Tách bạch rõ ràng: Cắt sạch động từ dẫn (`cảm thấy`, `chụp`) & thời lượng rác (`trong tuần qua`).\n"
-        "4. ⚠️ KHÔNG CẦN ghi `position` — chỉ cần ghi đúng `text`, `type`, `assertions`. Python sẽ tự tính offset chính xác.\n\n"
+        "🎯 NHIỆM VỤ: Trích xuất TOÀN BỘ thực thể y khoa từ hồ sơ bệnh án tiếng Việt dưới đây vào 5 loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM).\n\n"
+        "🔥 QUY TẮC QUÉT (R10 STRICT — DUPLICATE HANDLING QUAN TRỌNG NHẤT):\n"
+        "1. MỖI LẦN XUẤT HIỆN = 1 ENTITY RIÊNG: Nếu triệu chứng/thuốc (`đau ngực`, `aspirin`) xuất hiện 3-4 lần ở Tiền sử → Khám → CLS → Điều trị, BẮT BUỘC lấy đủ 3-4 entities.\n"
+        "2. ĐỪNG gộp các vị trí khác nhau thành 1 entity. Mỗi position = 1 span riêng.\n"
+        "3. Đảm bảo đủ 5 TYPE: THUỐC (giữ liều lượng `x 1`, `x 2`), CHẨN_ĐOÁN (kể cả viết tắt `THA`, `ĐTĐ`, `NMCT`, `COPD`, `RLLL`), TRIỆU_CHỨNG, TÊN_XN, KQ_XN (kể cả normal findings `nhịp xoang đều`).\n"
+        "4. Cắt sạch động từ dẫn (`cảm thấy`, `chụp`) & thời lượng rác (`trong tuần qua`).\n"
+        "5. KHÔNG CẦN ghi `position` — Python tự tính offset chính xác 100%.\n\n"
+        "⚠️ CẤM: trích xuất thời gian độc lập (`3 ngày`, `20 giây`), lối sống (`rượu bia`), label header (`Tiền sử:`, `Chẩn đoán:`).\n\n"
         f"{alert_part}"
         f"INPUT:\n{input_text}\n\n"
         "OUTPUT JSON ARRAY (chỉ các trường text, type, assertions — không cần position, không kèm lời giải thích):"
@@ -646,9 +631,9 @@ Danh sách mentions cần phân loại (kèm đoạn ngữ cảnh trích xuất 
 {mentions_list}
 
 # ĐẦU RA
-Trả về JSON array chứa đầy đủ các mentions đã phân loại:
+Trả về JSON array chứa đầy đủ các mentions đã phân loại. **BỎ field `position`** (Python sẽ tự align offset chính xác 100% trong align_and_expand_entities — LLM không cần đếm character):
 [
-  {{"text": "...", "position": [start, end], "type": "THUỐC|CHẨN_ĐOÁN|TRIỆU_CHỨNG|TÊN_XÉT_NGHIỆM|KẾT_QUẢ_XÉT_NGHIỆM", "assertions": ["isNegated", "isHistorical", "isFamily"]}},
+  {{"text": "...", "type": "THUỐC|CHẨN_ĐOÁN|TRIỆU_CHỨNG|TÊN_XÉT_NGHIỆM|KẾT_QUẢ_XÉT_NGHIỆM", "assertions": ["isNegated", "isHistorical", "isFamily"]}},
   ...
 ]
 

@@ -6,3 +6,4 @@ output/
 .claude/*
 output_by_AI
 .pytest_cache
+tests/*

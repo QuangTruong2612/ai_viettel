@@ -59,6 +59,84 @@ def _strip_parens(name: str) -> str:
     return cleaned.strip()
 
 
+# ════════════════════════════════════════════════════════════════════════════════
+# R28 (2026-07-13): Auto-mine VN aliases từ bracket/paren notation trong desc_vi.
+# Background: icd10.jsonl có ~1035 bracket + ~972 paren aliases đang bị LỜ đi
+# vì _strip_parens chỉ strip trailing → exact lookup miss ~2000 entries tiếng Việt.
+# ════════════════════════════════════════════════════════════════════════════════
+
+# Minimum length (chars) cho bracket alias — tránh noise ("AB", "v1", ...)
+_MIN_ALIAS_LEN = 3
+# Maximum length (chars) để tránh alias quá dài không phải "tên bệnh"
+_MAX_ALIAS_LEN = 80
+# Pattern match nếu bracket content thuần số/ký tự đặc biệt (vd "[10%]", "(2023)")
+_NON_NAME_PATTERN = re.compile(r"^[\d.,%/*\s\-]+$")
+# Các từ stop bên trong bracket — thường là footnote/metadata không phải alias
+_BRACKET_STOPWORDS = frozenset({
+    "xem", "xem thêm", "xem chú thích", "chú thích",
+    "draft", "draft only", "deprecated", "xóa", "xóa bỏ",
+    "mới", "cũ", "xác định", "tạm thời",
+})
+
+
+def _mine_vi_aliases(name: str) -> list[str]:
+    """Mine TẤT CẢ VN aliases (canonical + bracket + paren) từ 1 desc_vi string.
+
+    Trả về danh sách UNIQUE, thứ tự: canonical trước, alias sau.
+
+    VD:
+        'Bệnh phong [bệnh Hansen]' → ['Bệnh phong', 'bệnh Hansen']
+        'Bệnh Melioidosis [bệnh Whitmore] cấp tính' → ['Bệnh Melioidosis cấp tính', 'bệnh Whitmore']
+        'Nhiễm khuẩn E. coli (EHEC)' → ['Nhiễm khuẩn E. coli', 'EHEC']
+
+    Args:
+        name: desc_vi string từ icd10.jsonl
+
+    Returns:
+        list of unique alias strings (lowercased sẽ ở caller)
+    """
+    if not name:
+        return []
+    aliases: list[str] = [name]
+
+    # 1. Bracket aliases: 'X [alias1, alias2, hoặc alias3]'
+    for m in re.finditer(r"\[([^\]]+)\]", name):
+        inner = m.group(1)
+        # Tách theo comma/semicolon/"hoặc" — chú ý "và/hoặc" đặc biệt
+        pieces = re.split(r"[,;]|hoặc|và/hoặc", inner)
+        for piece in pieces:
+            piece = piece.strip()
+            # Skip "và" stand-alone (Chinese "and" trong 'A và B' = 'A and B')
+            if not piece or piece.lower() in {"và"}:
+                continue
+            # Strip leading "và " nếu có
+            piece = re.sub(r"^và\s+", "", piece).strip()
+            if (
+                _MIN_ALIAS_LEN <= len(piece) <= _MAX_ALIAS_LEN
+                and not _NON_NAME_PATTERN.match(piece)
+                and piece.lower() not in _BRACKET_STOPWORDS
+                and not piece.startswith(("http", "www", "xem"))
+            ):
+                aliases.append(piece)
+
+    # 2. Paren aliases: 'X (alias)' — VN parenthetical clarification
+    # Filter: skip nếu paren chỉ chứa cross-reference như '(K77.0*)', '(G07*)'
+    for m in re.finditer(r"\(([^)]+)\)", name):
+        inner = m.group(1).strip()
+        if (
+            _MIN_ALIAS_LEN <= len(inner) <= _MAX_ALIAS_LEN
+            and not _NON_NAME_PATTERN.match(inner)
+            # Cross-reference ICD codes vd '(K77.0*)', '(G07*)'
+            and not re.match(r"^[A-Z]\d{2}(\.\d+)?\*?$", inner)
+            # Time/measurement annotations vd "(cấp tính)", "(mạn tính)" thường KHÔNG phải alias riêng
+            and not re.match(r"^(cấp|mạn|cấp tính|mạn tính|nặng|nhẹ)$", inner, re.IGNORECASE)
+            and inner.lower() not in _BRACKET_STOPWORDS
+        ):
+            aliases.append(inner)
+
+    return list(dict.fromkeys(aliases))  # dedup preserve order
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build ICD-10 structured index từ JSON → JSON"
@@ -90,7 +168,7 @@ def main() -> int:
     codes: list[str] = []
     name_to_idx: dict[str, int] = {}
 
-    n_total, n_kept, n_stripped = 0, 0, 0
+    n_total, n_kept, n_aliases = 0, 0, 0
     rows: list[dict] = []
     suffix = args.input.suffix.lower()
 
@@ -151,13 +229,20 @@ def main() -> int:
         key = name.lower()
         exact.setdefault(key, []).append(code)
 
-        # Cleaned key (no parens) — secondary cho "Hen [suyễn]" → "Hen"
+        # R28 (2026-07-13): Mine bracket/paren aliases — exact-match cho nhiều VN synonyms
+        # Trước đây chỉ strip trailing → mất ~1000 bracket aliases + ~970 paren aliases.
+        for alias in _mine_vi_aliases(name):
+            alias_key = alias.lower()
+            if alias_key != key and alias_key not in exact:
+                exact.setdefault(alias_key, []).append(code)
+                n_aliases += 1
+
+        # Legacy: Cleaned key (no parens) — vẫn giữ cho backward compat
         name_clean = _strip_parens(name)
         if name_clean and name_clean != name:
             clean_key = name_clean.lower()
             if clean_key not in exact:
                 exact.setdefault(clean_key, []).append(code)
-                n_stripped += 1
 
         # Names list (parallel với codes) — cho fuzzy
         if name not in name_to_idx:
@@ -177,9 +262,9 @@ def main() -> int:
 
     elapsed = time.time() - t0
     logger.info(
-        "Done! %d/%d rows → %d unique names, %d exact keys (%d cleaned) "
+        "Done! %d/%d rows → %d unique names, %d exact keys (%d bracketed aliases) "
         "(%.1fs) → %s",
-        n_kept, n_total, len(names), len(exact), n_stripped,
+        n_kept, n_total, len(names), len(exact), n_aliases,
         elapsed, args.output.name,
     )
     return 0
