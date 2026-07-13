@@ -645,13 +645,18 @@ class RxNormIndex:
                         return [ranked[0]]
 
         # L5: Ingredient-only (NO strength) — R34 conditional re-rank.
-        # CHỈ fire khi NO strength VÀ query có drug context (skip lab values).
-        # Bare single-word lab chemicals như 'urea', 'creatinine', 'hemoglobin'
-        # không có route/doseform/multi-word → likely là LAB VALUE, không phải đơn.
+        # CHỈ fire khi query có drug context HOẶC ingredient nằm trong INN whitelist.
+        # Bare single-word lab chemicals như 'urea', 'creatinine', 'hemoglobin' → reject.
+        # R34 FIX: Bare drug names như 'doxycycline', 'atenolol' (real RxNorm drugs,
+        # nhưng không có strength/route) phải lookup được qua L5.
         cands = self.by_ingredient.get(ing, [])
-        if cands and not strength and _has_drug_context(orig):
+        if cands:
             has_volume_in_orig = bool(re.search(r"\b\d+(?:\.\d+)?\s*ml\b", orig.lower()))
-            if len(cands) > 1 and not has_volume_in_orig:
+            ingredient_in_inn = ing.lower() in _DRUG_INN_WHITELIST
+            # Guard: bare ingredient name → chỉ return nếu INN whitelist (real drug)
+            if not _has_drug_context(orig) and not has_volume_in_orig and not ingredient_in_inn:
+                return []  # likely lab chemical noise (urea, hemoglobin, etc.)
+            if len(cands) > 1:
                 ranked = _rank_rxnorm_candidates(
                     cands, self.rxcui_to_idx, self.names, orig
                 )

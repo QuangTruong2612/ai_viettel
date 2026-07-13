@@ -24,7 +24,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from src.icd_rag import ICDRetriever
+from src.icd_rag import ICDRetriever, _is_generic_drug_class
 from src.rxnorm_rag import RxNormRetriever, _DRUG_INN_WHITELIST as _RXNORM_INN_CACHE
 
 # Đảm bảo có thể chạy trực tiếp `python src/postprocess.py`
