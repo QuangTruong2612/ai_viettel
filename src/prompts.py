@@ -21,8 +21,9 @@ You are an expert Vietnamese Clinical NER Specialist with 20+ years of experienc
 4. **GIỮ TRỌN VẸN ĐUÔI LIỀU LƯỢNG THUỐC (`x N`)**: Khi gặp `"aspirin 325mg x 1"`, `"metoprolol 25mg po bid"`, PHẢI trích xuất đầy đủ từ đầu đến đuôi liều/tần suất (`aspirin 325mg x 1`). Tuyệt đối không được bỏ rơi đuôi `x 1` phía sau!
 5. **QUÉT ĐẦY ĐỦ TỪNG LẦN LẶP LẠI (EXHAUSTIVE RECALL)**: Nếu một triệu chứng (`đánh trống ngực`, `khó thở`, `mệt mỏi`) hay thuốc (`atenolol`, `aspirin`) xuất hiện 3-4 lần ở các câu khác nhau từ Tiền sử đến Cấp cứu đến Khám lâm sàng, BẮT BUỘC trích xuất đủ 3-4 lần thành các entities riêng biệt với vị trí tương ứng!
 6. **LOẠI TRỪ RÁC PHI Y KHOA (NOISE REJECTION)**: TUYỆT ĐỐI KHÔNG trích xuất các cụm mốc thời gian độc lập (`trong tuần qua`, `cách đây 3 ngày`, `20 giây`, `từ sáng hôm nay`) hoặc thói quen sinh hoạt phi lâm sàng (`rượu bia`, `thuốc lá`, `ăn uống bình thường`).
+7. **BẮT BUỘC TRÍCH XUẤT TỪ VIẾT TẮT Y KHOA (MANDATORY ACRONYM EXTRACTION)**: Bệnh án Việt Nam viết tắt rất nhiều. Bạn BẮT BUỘC phải trích xuất đầy đủ và chính xác tất cả các từ viết tắt bệnh lý/xét nghiệm (`THA` = Tăng huyết áp, `ĐTĐ` / `ĐTĐ tuýp 2` = Đái tháo đường, `NMCT` = Nhồi máu cơ tim, `RLLL` = Rối loạn lipid máu, `COPD` = Bệnh phổi tắc nghẽn mạn tính, `CKD` = Bệnh thận mạn, `BTMV`, `TBMMN`, `ECG`...) như những thực thể y khoa độc lập!
 
-🎯 **NGUYÊN TẮC CỐT LÕI**: Chỉ trích xuất THỰC THỂ Y KHOA LÂM SÀNG CỐT LÕI. Tuyệt đối KHÔNG trích xuất rác phi y khoa (sinh hiệu gộp, thời gian độc lập `trong tuần qua`/`20 giây`, lối sống `rượu bia`/`thuốc lá`, động từ dẫn `cảm thấy`/`chụp`).
+🎯 **NGUYÊN TẮC CỐT LÕI**: Chỉ trích xuất THỰC THỂ Y KHOA LÂM SÀNG CỐT LÕI (bao gồm đầy đủ các từ viết tắt `THA`, `ĐTĐ`, `NMCT`, `COPD`...). Tuyệt đối KHÔNG trích xuất rác phi y khoa (sinh hiệu gộp, thời gian độc lập `trong tuần qua`/`20 giây`, lối sống `rượu bia`/`thuốc lá`, động từ dẫn `cảm thấy`/`chụp`).
 </role>
 
 <clinical_definitions>
@@ -565,7 +566,7 @@ def build_user_prompt(input_text: str) -> str:
         "1. Quét từ chữ đầu tiên đến chữ cuối cùng (Lý do vào viện, Tiền sử, Khám, CLS, Chẩn đoán, Điều trị).\n"
         "2. Đảm bảo thu thập ĐỦ 5 TYPE:\n"
         "   - 💊 THUỐC: Lấy cả thuốc đang dùng, thuốc tiền sử lẫn thuốc mới kê (giữ liều lượng, pattern `x 1`, `x 2`).\n"
-        "   - 🩺 CHẨN_ĐOÁN: Lấy bệnh tiền căn, chẩn đoán xác định/ra viện và TẤT CẢ bất thường trên tim mạch/hình ảnh (`ngoại tâm thu`, `ST chênh lên`, `tim to`, `tràn dịch`).\n"
+        "   - 🩺 CHẨN_ĐOÁN: Lấy bệnh tiền căn, chẩn đoán xác định/ra viện và TẤT CẢ bất thường trên tim mạch/hình ảnh (`ngoại tâm thu`, `ST chênh lên`, `tim to`, `tràn dịch`), ĐẶC BIỆT KHÔNG ĐƯỢC BỎ SÓT CÁC TỪ VIẾT TẮT (`THA`, `ĐTĐ` / `ĐTĐ tuýp 2`, `NMCT`, `RLLL`, `COPD`, `CKD`, `BTMV`, `TBMMN`...).\n"
         "   - 🤒 TRIỆU_CHỨNG: Lấy đủ mọi than phiền (`đau ngực`, `khó thở`, `khó thở nhẹ`, `đánh trống ngực`, `mệt mỏi nhiều khi gắng sức`), lặp lại ở N câu thì lấy đủ N entities (R10 STRICT).\n"
         "   - 🔬 TÊN_XÉT_NGHIỆM: Lấy đủ chỉ định/thủ thuật (`X-quang ngực`, `ECG`, `nước tiểu`, `siêu âm tim`, `monitor holter`).\n"
         "   - 📊 KẾT_QUẢ_XÉT_NGHIỆM: Lấy đủ chỉ số định lượng (`160/90 mmHg`, `96%`, `38.5°C`) và kết quả định tính/bình thường (`nhịp xoang chiếm ưu thế`, `bình thường`, `không ghi nhận gì bất thường`).\n"
@@ -665,7 +666,8 @@ def build_stage1_user_prompt(input_text: str) -> str:
         "3. CHUẨN HÓA TÊN XÉT NGHIỆM (BỎ ĐỘNG TỪ CHỈ ĐỊNH): Khi lấy TÊN_XÉT_NGHIỆM, TUYỆT ĐỐI KHÔNG lấy động từ chỉ định phía trước (`chụp`, `đo`, `làm`, `thực hiện`, `tiến hành`). Ví dụ: `chụp X-quang ngực` -> CHỈ lấy `X-quang ngực`; `đo điện tâm đồ` -> CHỈ lấy `điện tâm đồ`. LƯU Ý: Các cụm danh từ xét nghiệm toàn phần như `phân tích nước tiểu`, `siêu âm tim`, `nội soi dạ dày` PHẢI GIỮ NGUYÊN TRỌN VẸN (`phân tích nước tiểu`).\n"
         "4. THUỐC PHẢI ĐỦ ĐUÔI LIỀU LƯỢNG (`x N`): Khi có `aspirin 325mg x 1`, `paracetamol 500mg po bid`, PHẢI lấy trọn vẹn đến hết đuôi liều/tần suất (`aspirin 325mg x 1`), không được bỏ rơi chữ `x 1` phía sau.\n"
         "5. QUÉT HẾT TỪNG LẦN LẶP LẠI: Nếu một triệu chứng hay thuốc xuất hiện 3-4 lần ở các câu khác nhau từ Tiền sử đến Cấp cứu đến Khám, PHẢI xuất đủ 3-4 lần với positions tương ứng!\n"
-        "6. LOẠI TRỪ RÁC PHI Y KHOA (NOISE REJECTION): TUYỆT ĐỐI KHÔNG trích xuất các cụm mốc thời gian độc lập (`trong tuần qua`, `cách đây 3 ngày`, `20 giây`, `từ sáng hôm nay`) hoặc thói quen sinh hoạt phi lâm sàng (`rượu bia`, `thuốc lá`, `ăn uống bình thường`).\n\n"
+        "6. LOẠI TRỪ RÁC PHI Y KHOA (NOISE REJECTION): TUYỆT ĐỐI KHÔNG trích xuất các cụm mốc thời gian độc lập (`trong tuần qua`, `cách đây 3 ngày`, `20 giây`, `từ sáng hôm nay`) hoặc thói quen sinh hoạt phi lâm sàng (`rượu bia`, `thuốc lá`, `ăn uống bình thường`).\n"
+        "7. BẮT BUỘC TRÍCH XUẤT TỪ VIẾT TẮT Y KHOA (MANDATORY ACRONYM EXTRACTION): Hồ sơ bệnh án Việt Nam viết tắt rất nhiều. Bạn BẮT BUỘC phải trích xuất đầy đủ và chính xác tất cả các từ viết tắt bệnh lý/xét nghiệm (`THA` = Tăng huyết áp, `ĐTĐ` / `ĐTĐ tuýp 2` = Đái tháo đường, `NMCT` = Nhồi máu cơ tim, `RLLL` = Rối loạn lipid máu, `COPD` = Bệnh phổi tắc nghẽn mạn tính, `CKD` = Bệnh thận mạn, `BTMV`, `TBMMN`, `ECG`...) như những thực thể y khoa độc lập!\n\n"
         f"INPUT:\n{input_text}\n\n"
         "OUTPUT JSON ARRAY (chỉ trả về [{'text': '...', 'position': [start, end]}], không kèm lời giải thích):"
     )

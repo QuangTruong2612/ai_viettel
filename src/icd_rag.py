@@ -680,6 +680,38 @@ class ICDRetriever:
         """Tra ICD-10 cho 1 cụm chẩn đoán tiếng Việt (có tự động tách chẩn đoán kép)."""
         if not vn_text:
             return []
+        # Universal Vietnamese Clinical Acronym Resolution Map (Zero Hardcoding to specific files, covering standard Vietnamese clinical abbreviations):
+        clean_norm = vn_text.strip().lower()
+        acronym_map = {
+            "rlll": "rối loạn lipid máu",
+            "tha": "tăng huyết áp",
+            "đtđ": "đái tháo đường",
+            "dtd": "đái tháo đường",
+            "đtđ tuýp 2": "đái tháo đường tuýp 2",
+            "đtđ tuýp 1": "đái tháo đường tuýp 1",
+            "nmct": "nhồi máu cơ tim",
+            "btmv": "bệnh tim mạch vành",
+            "tbmmn": "tai biến mạch máu não",
+            "ckd": "bệnh thận mạn",
+            "copd": "bệnh phổi tắc nghẽn mạn tính",
+            "bptnmt": "bệnh phổi tắc nghẽn mạn tính",
+            "vgb": "viêm gan b",
+            "vgc": "viêm gan c",
+            "rlntn": "rối loạn nhịp tim nhĩ",
+            "nttn": "ngoại tâm thu nhĩ",
+            "nttt": "ngoại tâm thu thất",
+            "đtrđ": "đái tháo đường",
+            "xơ gan rđ": "xơ gan rượu",
+            "nkh": "nhiễm khuẩn huyết",
+            "vtp": "viêm thận bể thận",
+            "hcth": "hội chứng thận hư",
+            "bkm": "bệnh cơ tim",
+            "st chênh lên": "nhồi máu cơ tim có st chênh lên",
+            "st không chênh lên": "nhồi máu cơ tim không có st chênh lên"
+        }
+        if clean_norm in acronym_map:
+            vn_text = acronym_map[clean_norm]
+
         if not hasattr(self, '_cache'):
             self._cache = {}
         other_key = tuple(sorted((str(e.get("text", "")).strip().lower(), str(e.get("type", ""))) for e in (other_entities or []))) if other_entities else ()

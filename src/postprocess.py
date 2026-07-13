@@ -987,16 +987,12 @@ def _detect_assertions_from_context(
 
     # isFamily: sử dụng re.UNICODE và patterns đầy đủ cho tiếng Việt
     family_patterns = [
-        r"(?:bố|cha)(?:\s+(?:bệnh|nhân|em|cô|dì|chú|bác))?\s+(?:bệnh\s+)?nhân",
-        r"(?:mẹ|me)(?:\s+(?:bệnh|nhân|em|cô|dì|chú|bác))?\s+(?:bệnh\s+)?nhân",
-        r"(?:anh|chị|em)(?:\s+(?:trai|gái))?\s+(?:bệnh\s+)?nhân",
-        r"(?:con)(?:\s+(?:trai|gái))?\s+(?:bệnh\s+)?nhân",
-        r"(?:ông|bà)(?:\s+(?:bệnh|nhân|em|cô|dì|chú|bác))?\s+(?:bệnh\s+)?nhân",
-        r"gia\s+đình\s+có",
+        r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú|bác)(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ|bệnh\s+nhân))?\s+(?:bệnh\s+nhân|bị|mắc|có|từng|tiền\s+sử|mất\s+vì|chết\s+vì|đã|chiếm|đang|\b)",
+        r"gia\s+đình\s+(?:có|bị|từng|tiền\s+sử|ghi\s+nhận|ai|mắc)",
         r"ti[eề]n\s+s[ử]?\s*gia\s+[đd][ìi]nh",
-        r"họ\s+hàng",
-        r"người\s+thân",
-        r"di\s+truyền",
+        r"\bhọ\s+hàng\b",
+        r"\bngười\s+thân\b",
+        r"\bdi\s+truyền\b",
     ]
     # Window 200 chars quanh entity cho family, NHƯNG cắt theo ranh giới câu (Clause Boundary Barriers - Super-Upgrade 3)
     family_win_start = max(0, pos - 160)

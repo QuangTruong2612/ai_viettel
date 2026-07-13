@@ -666,6 +666,9 @@ class RxNormRetriever:
                                         # - 0.7 quá thoáng → trả nhiều candidates noise
                                         # - 0.78 precision cao hơn, chỉ match rõ ràng
     ) -> None:
+        if isinstance(index, (str, Path)):
+            index_path = Path(index)
+            index = None
         if index is not None:
             self.index = index
         else:
