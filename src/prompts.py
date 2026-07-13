@@ -510,7 +510,21 @@ def select_dynamic_few_shot(examples: list[dict], input_text: str, k: int) -> li
         overlap = len(in_tokens & ex_tokens)
         union = len(in_tokens | ex_tokens) or 1
         score = overlap / union
+        scored.append((score, idx, ex))
+    scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+    return [ex for _, _, ex in scored[:k]]
 
+
+def format_few_shot_messages(examples: list[dict]) -> list[dict[str, str]]:
+    """Chuyển few-shot examples (Stage 1 / End-to-end) sang OpenAI chat messages."""
+    msgs: list[dict[str, str]] = []
+    for ex in examples:
+        inp = ex.get("input", "")
+        out = ex.get("output", [])
+        user_content = build_stage1_user_prompt(inp)
+        msgs.append({"role": "user", "content": user_content})
+        msgs.append({"role": "assistant", "content": json.dumps(out, ensure_ascii=False)})
+    return msgs
 
 
 def format_few_shot_stage2_messages(examples: list[dict]) -> list[dict[str, str]]:
