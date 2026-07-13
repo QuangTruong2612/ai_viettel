@@ -22,6 +22,7 @@ You are an expert Vietnamese Clinical NER Specialist with 20+ years of experienc
 5. **QUÉT ĐẦY ĐỦ TỪNG LẦN LẶP LẠI (EXHAUSTIVE RECALL)**: Nếu một triệu chứng (`đánh trống ngực`, `khó thở`, `mệt mỏi`) hay thuốc (`atenolol`, `aspirin`) xuất hiện 3-4 lần ở các câu khác nhau từ Tiền sử đến Cấp cứu đến Khám lâm sàng, BẮT BUỘC trích xuất đủ 3-4 lần thành các entities riêng biệt với vị trí tương ứng!
 6. **LOẠI TRỪ RÁC PHI Y KHOA (NOISE REJECTION)**: TUYỆT ĐỐI KHÔNG trích xuất các cụm mốc thời gian độc lập (`trong tuần qua`, `cách đây 3 ngày`, `20 giây`, `từ sáng hôm nay`) hoặc thói quen sinh hoạt phi lâm sàng (`rượu bia`, `thuốc lá`, `ăn uống bình thường`).
 7. **BẮT BUỘC TRÍCH XUẤT TỪ VIẾT TẮT Y KHOA (MANDATORY ACRONYM EXTRACTION)**: Bệnh án Việt Nam viết tắt rất nhiều. Bạn BẮT BUỘC phải trích xuất đầy đủ và chính xác tất cả các từ viết tắt bệnh lý/xét nghiệm (`THA` = Tăng huyết áp, `ĐTĐ` / `ĐTĐ tuýp 2` = Đái tháo đường, `NMCT` = Nhồi máu cơ tim, `RLLL` = Rối loạn lipid máu, `COPD` = Bệnh phổi tắc nghẽn mạn tính, `CKD` = Bệnh thận mạn, `BTMV`, `TBMMN`, `ECG`...) như những thực thể y khoa độc lập!
+8. **QUÉT KIỆT ĐỂ 7 PHẦN BỆNH ÁN (EXHAUSTIVE SECTION COVERAGE)**: Bạn PHẢI quét tuần tự qua 7 phần (Lý do vào viện, Tiền sử, Diễn biến, Khám lâm sàng, Cận lâm sàng/ECG/Holter, Chẩn đoán xác định, Điều trị/Thuốc ra viện). Mọi thuốc, chẩn đoán, triệu chứng, tên xét nghiệm và chỉ số/kết quả bình thường đều phải được lấy đủ 100%! Không được bỏ sót các entities ở phần giữa và cuối hồ sơ.
 
 🎯 **NGUYÊN TẮC CỐT LÕI**: Chỉ trích xuất THỰC THỂ Y KHOA LÂM SÀNG CỐT LÕI (bao gồm đầy đủ các từ viết tắt `THA`, `ĐTĐ`, `NMCT`, `COPD`...). Tuyệt đối KHÔNG trích xuất rác phi y khoa (sinh hiệu gộp, thời gian độc lập `trong tuần qua`/`20 giây`, lối sống `rượu bia`/`thuốc lá`, động từ dẫn `cảm thấy`/`chụp`).
 </role>
@@ -591,9 +592,9 @@ CHỈ trả về text + position[start, end]. KHÔNG cần phân loại type hay
 
 # NÊN TRÍCH (medical mentions)
 - Tên thuốc: "aspirin 325mg x 1", "metoprolol 25mg po bid", "doxycycline"
-- Tên bệnh/chẩn đoán/bất thường: "tăng huyết áp", "viêm tuyến mồ hôi", "nhồi máu cơ tim vùng dưới cũ", "ngoại tâm thu nhĩ", "ST chênh lên"
+- Tên bệnh/chẩn đoán/bất thường & từ viết tắt y khoa: "tăng huyết áp", "THA", "đái tháo đường", "ĐTĐ", "ĐTĐ tuýp 2", "nhồi máu cơ tim vùng dưới cũ", "NMCT", "RLLL", "COPD", "CKD", "BTMV", "TBMMN", "ngoại tâm thu nhĩ", "ST chênh lên"
 - Triệu chứng: "đau ngực", "khó thở", "khó thở nhẹ", "cảm giác đánh trống ngực", "mệt mỏi nhiều khi gắng sức", "thắt chặt ngực vùng trước tim"
-- Tên xét nghiệm: "điện tâm đồ", "x-quang ngực", "siêu âm tim qua thành ngực", "phân tích nước tiểu", "monitor holter"
+- Tên xét nghiệm & thăm dò: "điện tâm đồ", "ECG", "x-quang ngực", "siêu âm tim qua thành ngực", "phân tích nước tiểu", "monitor holter"
 - Kết quả xét nghiệm/sinh hiệu: "bình thường", "không ghi nhận gì bất thường", "nhịp xoang chiếm ưu thế", "160/90 mmHg", "VS98.3 12987 56 18 99RA"
 
 # KHÔNG ĐƯỢC TRÍCH (false positives / noise)
@@ -604,6 +605,7 @@ CHỈ trả về text + position[start, end]. KHÔNG cần phân loại type hay
 
 # QUY TẮC BOUNDARY CỐT LÕI
 - Giữ chính xác text trong input, không thêm/bớt từ hoặc tự viết lại.
+- BẮT BUỘC TRÍCH XUẤT TỪ VIẾT TẮT Y KHOA: Hồ sơ bệnh án Việt Nam viết tắt rất nhiều. Bạn BẮT BUỘC phải trích xuất đầy đủ tất cả các từ viết tắt bệnh lý/xét nghiệm (`THA`, `ĐTĐ` / `ĐTĐ tuýp 2`, `NMCT`, `RLLL`, `COPD`, `CKD`, `BTMV`, `TBMMN`, `ECG`...) như những thực thể y khoa độc lập!
 - KHÔNG gộp chỉ định vào chẩn đoán: "nhồi máu cơ tim vùng dưới cũ (điện tâm đồ (ecg))" → TÁCH thành các mentions riêng biệt: "nhồi máu cơ tim vùng dưới cũ", "điện tâm đồ", "ecg".
 - Nếu một cụm từ xuất hiện lặp lại ở nhiều vị trí khác nhau trong văn bản → BẮT BUỘC trích xuất tất cả các lần xuất hiện với các position khác nhau.
 - Khi gặp câu phủ định liệt kê nhiều triệu chứng ngăn cách bởi dấu phẩy/từ nối (ví dụ: "Không buồn nôn, hay nôn, đổ mồ hôi") → BẮT BUỘC trích xuất TẤT CẢ các từ triệu chứng riêng biệt ("buồn nôn", "nôn", "đổ mồ hôi"). KHÔNG ĐƯỢC chỉ lấy từ cuối cùng.
@@ -624,9 +626,9 @@ STAGE2_PROMPT = """Bạn là chuyên gia phân loại thực thể y tế tiến
 Cho một danh sách các cụm từ y tế (đã được trích xuất từ văn bản gốc kèm vị trí character position), hãy phân loại cho mỗi cụm từ:
 - type: BẮT BUỘC chọn đúng 1 trong 5 loại:
   - THUỐC: Tên thuốc, hoạt chất, liều lượng (`aspirin 325mg po bid`).
-  - CHẨN_ĐOÁN: Tên bệnh lý, hội chứng, tổn thương hình ảnh, bất thường ECG (`tăng huyết áp`, `ngoại tâm thu nhĩ`, `ST chênh lên`).
+  - CHẨN_ĐOÁN: Tên bệnh lý, hội chứng, tổn thương hình ảnh, bất thường ECG & từ viết tắt (`tăng huyết áp`, `THA`, `đái tháo đường`, `ĐTĐ`, `ĐTĐ tuýp 2`, `nhồi máu cơ tim`, `NMCT`, `RLLL`, `COPD`, `CKD`, `TBMMN`, `ngoại tâm thu nhĩ`, `ST chênh lên`).
   - TRIỆU_CHỨNG: Biểu hiện cơ năng/thực thể, cảm giác lâm sàng (`đau ngực`, `khó thở`, `cảm giác đánh trống ngực`).
-  - TÊN_XÉT_NGHIỆM: Chỉ định cận lâm sàng, thăm dò, thủ thuật (`điện tâm đồ`, `x-quang ngực`, `siêu âm tim`).
+  - TÊN_XÉT_NGHIỆM: Chỉ định cận lâm sàng, thăm dò, thủ thuật (`điện tâm đồ`, `ECG`, `x-quang ngực`, `siêu âm tim`).
   - KẾT_QUẢ_XÉT_NGHIỆM: Chỉ số định lượng (`160/90 mmHg`, `96%`), chuỗi sinh hiệu (`VS98.3 12987...`) hoặc kết quả bình thường (`nhịp xoang chiếm ưu thế`, `bình thường`, `không ghi nhận gì bất thường`).
 - assertions: Mảng chuỗi các nhãn ngữ cảnh lâm sàng, BẮT BUỘC kiểm tra kỹ từng nhãn (có thể kết hợp nhiều nhãn nếu phù hợp):
   - "isNegated": Nếu mention bị phủ định bởi các từ khóa `không`, `chưa`, `âm tính`, `chưa ghi nhận`, `không thấy`, `loại trừ`. LƯU Ý QUAN TRỌNG: Nếu một câu có chuỗi nhiều triệu chứng phủ định ngăn cách bởi dấu phẩy (`không ho, sốt, hay khó thở`), thì CẢ 3 entity `ho`, `sốt`, `khó thở` ĐỀU BẮT BUỘC gán `["isNegated"]`. Tuy nhiên, các kết quả xét nghiệm bình thường (`ECG bình thường`, `nhịp xoang đều`) KHÔNG bị phủ định (để mảng rỗng `[]`).
@@ -667,7 +669,8 @@ def build_stage1_user_prompt(input_text: str) -> str:
         "4. THUỐC PHẢI ĐỦ ĐUÔI LIỀU LƯỢNG (`x N`): Khi có `aspirin 325mg x 1`, `paracetamol 500mg po bid`, PHẢI lấy trọn vẹn đến hết đuôi liều/tần suất (`aspirin 325mg x 1`), không được bỏ rơi chữ `x 1` phía sau.\n"
         "5. QUÉT HẾT TỪNG LẦN LẶP LẠI: Nếu một triệu chứng hay thuốc xuất hiện 3-4 lần ở các câu khác nhau từ Tiền sử đến Cấp cứu đến Khám, PHẢI xuất đủ 3-4 lần với positions tương ứng!\n"
         "6. LOẠI TRỪ RÁC PHI Y KHOA (NOISE REJECTION): TUYỆT ĐỐI KHÔNG trích xuất các cụm mốc thời gian độc lập (`trong tuần qua`, `cách đây 3 ngày`, `20 giây`, `từ sáng hôm nay`) hoặc thói quen sinh hoạt phi lâm sàng (`rượu bia`, `thuốc lá`, `ăn uống bình thường`).\n"
-        "7. BẮT BUỘC TRÍCH XUẤT TỪ VIẾT TẮT Y KHOA (MANDATORY ACRONYM EXTRACTION): Hồ sơ bệnh án Việt Nam viết tắt rất nhiều. Bạn BẮT BUỘC phải trích xuất đầy đủ và chính xác tất cả các từ viết tắt bệnh lý/xét nghiệm (`THA` = Tăng huyết áp, `ĐTĐ` / `ĐTĐ tuýp 2` = Đái tháo đường, `NMCT` = Nhồi máu cơ tim, `RLLL` = Rối loạn lipid máu, `COPD` = Bệnh phổi tắc nghẽn mạn tính, `CKD` = Bệnh thận mạn, `BTMV`, `TBMMN`, `ECG`...) như những thực thể y khoa độc lập!\n\n"
+        "7. BẮT BUỘC TRÍCH XUẤT TỪ VIẾT TẮT Y KHOA (MANDATORY ACRONYM EXTRACTION): Hồ sơ bệnh án Việt Nam viết tắt rất nhiều. Bạn BẮT BUỘC phải trích xuất đầy đủ và chính xác tất cả các từ viết tắt bệnh lý/xét nghiệm (`THA` = Tăng huyết áp, `ĐTĐ` / `ĐTĐ tuýp 2` = Đái tháo đường, `NMCT` = Nhồi máu cơ tim, `RLLL` = Rối loạn lipid máu, `COPD` = Bệnh phổi tắc nghẽn mạn tính, `CKD` = Bệnh thận mạn, `BTMV`, `TBMMN`, `ECG`...) như những thực thể y khoa độc lập!\n"
+        "8. QUÉT KIỆT ĐỂ 7 PHẦN BỆNH ÁN (EXHAUSTIVE SECTION COVERAGE): Bạn PHẢI quét tuần tự qua 7 phần (Lý do vào viện, Tiền sử, Diễn biến, Khám lâm sàng, Cận lâm sàng/ECG/Holter, Chẩn đoán xác định, Điều trị/Thuốc ra viện). Mọi thuốc, chẩn đoán, triệu chứng, tên xét nghiệm và chỉ số/kết quả bình thường đều phải được lấy đủ 100%! Không được lười biếng hay bỏ sót các entities ở phần giữa và cuối hồ sơ.\n\n"
         f"INPUT:\n{input_text}\n\n"
         "OUTPUT JSON ARRAY (chỉ trả về [{'text': '...', 'position': [start, end]}], không kèm lời giải thích):"
     )
