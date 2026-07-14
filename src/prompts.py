@@ -230,7 +230,7 @@ You are an expert Vietnamese Clinical NER Specialist with 20+ years of experienc
 - `tiền sử gia đình X` → X là CHẨN_ĐOÁN/TRIỆU_CHỨNG + assertions=`["isFamily"]`
 - `bố/mẹ/anh/chị/em ruột bị/đã từng/mắc X` → X + assertions=`["isFamily"]`
 - `gia đình có người X` → X + assertions=`["isFamily"]`
-- Pattern matching: `(bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú|bác)\s+(?:đã\s+)?(?:bị|mắc|có|từng|mất\s+vì)\s+([A-ZÀ-Ỹ][\w\s]+)`
+- Pattern matching: `(bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú|bác)\\s+(?:đã\\s+)?(?:bị|mắc|có|từng|mất\\s+vì)\\s+([A-ZÀ-Ỹ][\\w\\s]+)`
 - Ngược lại: `gia đình KHÔNG ai bị X` → X + assertions=`["isFamily", "isNegated"]`
 
 **G. CHIA LIỀU THUỐC — BẮT BUỘC GIỮ NGUYÊN ĐUÔI `x N` (R37 KEEP)**:
