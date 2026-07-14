@@ -847,100 +847,273 @@ def _is_semantic_overlap(text_a: str, text_b: str) -> bool:
     return jaccard >= 0.80
 
 
-def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Bỏ trùng entities dựa trên (text, type, position overlap) - R10 STRICT + R22 OVERLAP (2026-07-10).
+def dedupe_entities(
+    entities: Iterable[dict[str, Any]],
+    *,
+    mode: str = "merge",
+) -> list[dict[str, Any]]:
+    """Merge / drop / report overlap giữa các entities cùng type + position overlap.
 
-    R10 STRICT (đổi từ R10 LOOSE theo user feedback 2026-07-09):
-    - Cùng text + type + cùng position → 1 entity (R22 dedup)
-    - Cùng text + type + khác position → giữ cả N entities (R10 STRICT theo position)
-    - **MỚI 2026-07-10 — OVERLAP DEDUP**: cùng text + type + positions OVERLAP (intersect)
-      → giữ span DÀI HƠN, drop span ngắn hơn (vd [97,110] và [102,110] cùng "tăng huyết áp"
-      → giữ [97,110], drop [102,110] vì span thứ 2 nằm trong span thứ 1).
-    - Áp dụng cho TẤT CẢ loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XN, KQ_XN).
+    R10 STRICT + R22 OVERLAP (2026-07-10) → refactored 2026-07-14 với 3 modes:
 
-    Lý do R10 STRICT (đổi từ LOOSE):
-    - LLM có position → extract đầy đủ duplicate ở các vị trí khác nhau
-    - Postprocess giữ N entities để khớp với ground truth (48-51 entities/file)
-    - Trade-off: tăng recall tuyệt đối, có thể tăng false positive nếu LLM extract duplicate giả
+    3 MODES (chọn bằng `mode=`):
 
-    Lý do OVERLAP DEDUP (mới 2026-07-10):
-    - LLM 7B hay output duplicate VỚI POSITION LỆCH vài ký tự (vd "tăng huyết áp" [97,110] vs [102,110])
-    - Hai span overlap nhưng khác start → start-only dedup miss cả hai
-    - Ground truth KHÔNG có duplicate trùng text ở vị trí overlap
-    - Fix: detect overlap, giữ span dài hơn (chứa span kia)
+    1. **mode="merge" (DEFAULT MỚI, 2026-07-14)**:
+       - Với mỗi CLUSTER entities cùng type + position overlap:
+         → Merge thành 1 entity duy nhất (giữ span DÀI NHẤT).
+         → Union `assertions` từ tất cả members.
+         → Union `candidates` từ tất cả members.
+         → Mark `_merged_from: list[int]` (sorted indices) trên entity đại diện.
+       - KHÔNG drop entities. Khác với logic cũ.
+       - Lý do đổi (user feedback 2026-07-14): "xem overlap chứ ko phải bỏ bớt
+         entities giống nhau" + tránh mất entities khi có nhiều cluster overlap.
+
+    2. **mode="drop" (LEGACY R10/R22)**:
+       - Cùng text + type + position overlap → drop shorter span (giữ span dài hơn).
+       - Backward compat với code cũ.
+
+    3. **mode="report"**:
+       - KHÔNG merge / KHÔNG drop. Chỉ mark `_overlap_with: list[int]` (sorted)
+         trên mỗi entity có overlap với peer.
+
+    Args:
+        entities: list entities (cần có 'text', 'type', 'position' [s,e]).
+        mode: 'merge' (default) | 'drop' | 'report'.
+
+    Returns:
+        list[dict] các entities. Mỗi entity có thể có:
+        - `_merged_from: list[int]` (mode='merge') — indices bị merge vào đây.
+        - `_overlap_with: list[int]` (mode='report') — indices của peer overlap.
+        - (mode='drop') — không có mark.
     """
-    out: list[dict[str, Any]] = []
-    # Track: (text_lower, type, [start, end]) đã thấy
-    # Khi check mới: nếu cùng text+type VÀ (cùng start HOẶC overlap) → drop span ngắn hơn.
-
-    # Sort theo start ASC, length DESC (span dài xử lý trước)
-    def _sort_key(e: dict[str, Any]) -> tuple[int, int]:
+    # 1. Validate entities (giữ format đồng nhất)
+    valid: list[dict[str, Any]] = []
+    for e in entities:
+        if not e.get("text"):
+            continue
         pos = e.get("position", [0, 0])
-        if isinstance(pos, list) and len(pos) >= 2:
-            try:
-                start = int(pos[0])
-                end = int(pos[1])
-            except (TypeError, ValueError):
-                return (0, 0)
-            return (start, -(end - start))  # start asc, length desc
-        return (0, 0)
-
-    sorted_ents = sorted(
-        [e for e in entities if e.get("text")],
-        key=_sort_key,
-    )
-
-    for ent in sorted_ents:
-        etype = ent.get("type", "")
-        text = str(ent.get("text", "")).strip()
-        pos = ent.get("position", [0, 0])
-        if not (isinstance(pos, list) and len(pos) == 2 and all(isinstance(p, int) for p in pos)):
+        if not (isinstance(pos, list) and len(pos) == 2):
             continue
-        start, end = int(pos[0]), int(pos[1])
-        if start < 0 or end <= start:
+        try:
+            s, end = int(pos[0]), int(pos[1])
+        except (TypeError, ValueError):
             continue
+        if s < 0 or end <= s:
+            continue
+        valid.append({**e, "position": [s, end]})
 
-        # Check overlap với existing entities cùng text+type
-        is_duplicate = False
-        to_remove: list[int] = []
-        for idx, existing in enumerate(out):
-            if existing.get("type", "") != etype:
-                continue
-            ex_text = str(existing.get("text", "")).strip()
-            ex_pos = existing.get("position", [0, 0])
-            if not (isinstance(ex_pos, list) and len(ex_pos) == 2):
-                continue
-            e_start, e_end = int(ex_pos[0]), int(ex_pos[1])
+    if mode == "drop":
+        # LEGACY: drop shorter span khi overlap (giữ logic cũ)
+        out: list[dict[str, Any]] = []
+        # Sort theo start ASC, length DESC (span dài xử lý trước)
+        def _sort_key(e: dict[str, Any]) -> tuple[int, int]:
+            s, e_end = e["position"]
+            return (s, -(e_end - s))
 
-            is_exact_text = (ex_text.lower() == text.lower())
-            is_pos_overlap = (max(start, e_start) < min(end, e_end))
-
-            if not is_exact_text:
-                if not is_pos_overlap or not _is_semantic_overlap(ex_text, text):
+        sorted_ents = sorted(valid, key=_sort_key)
+        for ent in sorted_ents:
+            etype = ent.get("type", "")
+            text = str(ent.get("text", "")).strip()
+            start, end = ent["position"]
+            is_duplicate = False
+            to_remove: list[int] = []
+            for idx, existing in enumerate(out):
+                if existing.get("type", "") != etype:
                     continue
-
-            # Same exact span → drop current (R22)
-            if start == e_start and end == e_end:
-                is_duplicate = True
-                break
-
-            # OVERLAP check: max(start, e_start) < min(end, e_end) → intersect
-            if is_pos_overlap:
-                ex_len = e_end - e_start
-                cur_len = end - start
-                if ex_len >= cur_len:
+                ex_text = str(existing.get("text", "")).strip()
+                ex_pos = existing["position"]
+                e_start, e_end = ex_pos
+                is_exact_text = (ex_text.lower() == text.lower())
+                is_pos_overlap = (max(start, e_start) < min(end, e_end))
+                if not is_exact_text:
+                    if not is_pos_overlap or not _is_semantic_overlap(ex_text, text):
+                        continue
+                # Same exact span → drop current (R22)
+                if start == e_start and end == e_end:
                     is_duplicate = True
                     break
-                else:
-                    to_remove.append(idx)
+                if is_pos_overlap:
+                    ex_len = e_end - e_start
+                    cur_len = end - start
+                    if ex_len >= cur_len:
+                        is_duplicate = True
+                        break
+                    else:
+                        to_remove.append(idx)
+            for idx in reversed(to_remove):
+                out.pop(idx)
+            if not is_duplicate:
+                out.append(ent)
+        out.sort(key=lambda e: e["position"][0])
+        return out
 
-        for idx in reversed(to_remove):
-            out.pop(idx)
+    if mode == "report":
+        # Report-only: KHÔNG merge / KHÔNG drop, chỉ mark _overlap_with
+        # Sort by start ASC cho indices ổn định
+        sorted_ents = sorted(valid, key=lambda e: e["position"][0])
+        pairs = _find_position_overlap_pairs(sorted_ents)
+        overlap_map: dict[int, list[int]] = {}
+        for p in pairs:
+            i, j = p["idx_a"], p["idx_b"]
+            overlap_map.setdefault(i, []).append(j)
+            overlap_map.setdefault(j, []).append(i)
+        annotated: list[dict[str, Any]] = []
+        for i, ent in enumerate(sorted_ents):
+            if i in overlap_map:
+                ent = {**ent, "_overlap_with": sorted(set(overlap_map[i]))}
+            annotated.append(ent)
+        return annotated
 
-        if not is_duplicate:
-            out.append(ent)
+    # mode == "merge" (DEFAULT): Union-find clusters + merge into longest
+    # Sort by start ASC để cluster indices ổn định + dễ debug
+    sorted_ents = sorted(valid, key=lambda e: e["position"][0])
+    n = len(sorted_ents)
+    if n == 0:
+        return []
+
+    # Union-Find structure
+    parent: list[int] = list(range(n))
+    rank: list[int] = [0] * n
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]  # path compression
+            x = parent[x]
+        return x
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra == rb:
+            return
+        if rank[ra] < rank[rb]:
+            ra, rb = rb, ra
+        parent[rb] = ra
+        if rank[ra] == rank[rb]:
+            rank[ra] += 1
+
+    # Build clusters: 2 entities merge-connected nếu cùng type AND position overlap
+    positions: list[tuple[int, int]] = [e["position"] for e in sorted_ents]
+    types: list[str] = [str(e.get("type", "")) for e in sorted_ents]
+    for i in range(n):
+        si, ei = positions[i]
+        ti = types[i]
+        for j in range(i + 1, n):
+            sj, ej = positions[j]
+            if ti != types[j]:
+                continue
+            if max(si, sj) < min(ei, ej):
+                _union(i, j)
+
+    # Group entities by root
+    clusters: dict[int, list[int]] = {}
+    for i in range(n):
+        root = _find(i)
+        clusters.setdefault(root, []).append(i)
+
+    # Build output: 1 representative per cluster
+    out: list[dict[str, Any]] = []
+    for root, members in clusters.items():
+        if len(members) == 1:
+            # Singleton: giữ nguyên, không có mark
+            out.append(sorted_ents[members[0]])
+            continue
+        # Pick representative: entity có span dài nhất (tie-break: start ASC)
+        def _rep_score(idx: int) -> tuple[int, int]:
+            s, e = sorted_ents[idx]["position"]
+            return (e - s, -s)  # length desc, start asc (negate for asc)
+
+        rep_idx = max(members, key=_rep_score)
+        rep = sorted_ents[rep_idx]
+        # Union assertions + candidates từ tất cả members
+        all_assertions: set[str] = set()
+        all_candidates: list[str] = []
+        seen_candidates: set[str] = set()
+        for m_idx in members:
+            ent = sorted_ents[m_idx]
+            for a in ent.get("assertions", []) or []:
+                if a in ("isNegated", "isFamily", "isHistorical"):
+                    all_assertions.add(a)
+            for c in ent.get("candidates", []) or []:
+                if c not in seen_candidates:
+                    seen_candidates.add(c)
+                    all_candidates.append(c)
+        merged: dict[str, Any] = {
+            **rep,
+            "assertions": sorted(all_assertions),
+            "candidates": all_candidates,
+            "_merged_from": sorted([i for i in members if i != rep_idx]),
+        }
+        out.append(merged)
 
     out.sort(key=lambda e: e["position"][0])
+    return out
+
+
+def _find_position_overlap_pairs(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Detect position overlap pairs giữa các entities (pure span-based).
+
+    "Position overlap" = max(s_a, s_b) < min(e_a, e_b). KHÔNG check text/type —
+    để caller tự quyết định semantics (vd dedupe_entities chỉ merge cùng type).
+
+    Args:
+        entities: list entities (cần có 'position' [s, e] hợp lệ).
+
+    Returns:
+        list các pair dicts (sorted theo (idx_a, idx_a)):
+        {
+            "idx_a": int, "idx_b": int,
+            "text_a": str, "text_b": str,
+            "type_a": str, "type_b": str,
+            "position_a": [s, e], "position_b": [s, e],
+            "overlap_chars": int,      # min(e_a, e_b) - max(s_a, s_b)
+            "same_text": bool,         # text_a.lower() == text_b.lower()
+            "same_type": bool,         # type_a == type_b
+        }
+    """
+    out: list[dict[str, Any]] = []
+    n = len(entities)
+    for i in range(n):
+        ei = entities[i]
+        pi = ei.get("position", [0, 0])
+        if not (isinstance(pi, list) and len(pi) == 2):
+            continue
+        try:
+            si, ei_end = int(pi[0]), int(pi[1])
+        except (TypeError, ValueError):
+            continue
+        if si < 0 or ei_end <= si:
+            continue
+        ti = str(ei.get("text", "")).strip()
+        typi = str(ei.get("type", ""))
+        for j in range(i + 1, n):
+            ej = entities[j]
+            pj = ej.get("position", [0, 0])
+            if not (isinstance(pj, list) and len(pj) == 2):
+                continue
+            try:
+                sj, ej_end = int(pj[0]), int(pj[1])
+            except (TypeError, ValueError):
+                continue
+            if sj < 0 or ej_end <= sj:
+                continue
+            overlap_chars = min(ei_end, ej_end) - max(si, sj)
+            if overlap_chars <= 0:
+                continue
+            tj = str(ej.get("text", "")).strip()
+            typj = str(ej.get("type", ""))
+            out.append({
+                "idx_a": i,
+                "idx_b": j,
+                "text_a": ti,
+                "text_b": tj,
+                "type_a": typi,
+                "type_b": typj,
+                "position_a": [si, ei_end],
+                "position_b": [sj, ej_end],
+                "overlap_chars": overlap_chars,
+                "same_text": ti.lower() == tj.lower(),
+                "same_type": typi == typj,
+            })
     return out
 
 
