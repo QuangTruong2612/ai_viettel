@@ -1010,7 +1010,7 @@ def _is_admin_parens(content: str) -> bool:
 # để không extract các non-medical terms (lifestyle/social/sự kiện xã hội).
 
 
-# Patterns chỉ định isFamily (dùng để verify)
+# R38 (2026-07-14): More comprehensive VN family patterns
 _IS_FAMILY_PATTERNS = [
     # Direct family member references
     r"b[ốo]\s+(b[ệe]nh\s+)?nh[âa]n",
@@ -1026,6 +1026,10 @@ _IS_FAMILY_PATTERNS = [
     r"h[ọo]\s+h[âa]ng",
     # Family-style markers that ONLY indicate isFamily (not isHistorical)
     r" (?:cha|mẹ|anh|chị|em|ông|bà|cô|dì|chú|bác) ",
+    # R38: Extended patterns - bare family member with disease (no "bệnh nhân")
+    r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú|bác)(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ))?\s+(?:bị|mắc|có|từng|tiền\s+sử|mất\s+vì|chết\s+vì|đã\s+từng|được\s+chẩn\s+đoán)\s+\w",
+    # Family negative: "GIA ĐÌNH KHÔNG ai..."
+    r"gia\s+[đd][ìi]nh\s+kh[ôo]ng\s+(?:ai|b[ệe]n\s+n[âa]o)",
 ]
 
 _IS_FAMILY_RE = re.compile("|".join(_IS_FAMILY_PATTERNS), re.IGNORECASE | re.UNICODE)
@@ -1092,15 +1096,27 @@ def _detect_assertions_from_context(
     # Bây giờ: isHistorical chỉ khi section header HIỆN TẠI là "Tiền sử".
     if is_in_tien_su:
         found.append("isHistorical")
+    elif section_id in ("hien_tai", "danh_gia"):
+        # R40 (2026-07-14): Context-based assertions for current sections.
+        # Entities ở section hiện tại không phải lịch sử - không cần isHistorical.
+        # (Empty assertions [] mặc định = current là OK, không cần explicit "isCurrent")
+        pass
 
-    # isFamily: sử dụng re.UNICODE và patterns đầy đủ cho tiếng Việt
+    # isFamily: R38 - comprehensive VN family patterns
     family_patterns = [
-        r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú|bác)(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ))?\s+(?:bị|mắc|có|từng|tiền\s+sử|mất\s+vì|chết\s+vì)\b",
-        r"gia\s+đình\s+(?:có|bị|từng|tiền\s+sử|ghi\s+nhận|ai|mắc)",
-        r"ti[eề]n\s+s[ử]?\s*gia\s+[đd][ìi]nh",
+        # Bare family member + disease verb (no "bệnh nhân")
+        r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú|bác)(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ))?\s+(?:bị|mắc|có|từng|tiền\s+sử|mất\s+vì|chết\s+vì|đã\s+từng|được\s+chẩn\s+đoán)\b",
+        # Family negative ("GIA ĐÌNH KHÔNG ai...")
+        r"gia\s+[đd][ìi]nh\s+kh[ôo]ng\s+(?:ai|b[ệe]n\s+n[âa]o)",
+        # Family member with "bệnh nhân"
+        r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú|bác)(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ))?\s+b[ệe]nh\s+nh[âa]n",
+        # General family markers
+        r"gia\s+đ[ìi]nh\s+(?:có|bị|từng|tiền\s+sử|ghi\s+nhận|ai|mắc)",
+        r"ti[eề]n\s+s[ử]\s*gia\s+[đd][ìi]nh",
         r"\bhọ\s+hàng\b",
         r"\bngười\s+thân\b",
         r"\bdi\s+truyền\b",
+        r"\bng[ưu]ờ[i]\s+th[âa]n\b",
     ]
     # Window 200 chars quanh entity cho family, NHƯNG cắt theo ranh giới câu (Clause Boundary Barriers - Super-Upgrade 3)
     family_win_start = max(0, pos - 160)
@@ -1447,6 +1463,382 @@ def _drop_symptom_when_diagnosis_present(entities: list[dict]) -> list[dict]:
     if not drop_idx:
         return entities
     return [e for i, e in enumerate(entities) if i not in drop_idx]
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# R37-bis (2026-07-14): Safety net for drug+clinical parens + compound disease terms
+# ════════════════════════════════════════════════════════════════════════════════
+
+# Patterns để detect drug parens content (dosage narrative, dose numbers, etc.)
+_DRUG_PARENS_CONTENT_PATTERNS = [
+    re.compile(
+        r"\d+\s*(?:mg|mcg|g|ml|iu|%|đơn\s+vị|viên|ống|gói)",
+        re.IGNORECASE | re.UNICODE,
+    ),
+    re.compile(
+        r"(?:reduced|increased|changed|switched|tăng\s+từ|giảm\s+từ|đổi\s+từ)\s+from",
+        re.IGNORECASE | re.UNICODE,
+    ),
+    re.compile(r"\bfrom\s+\d+", re.IGNORECASE),
+    re.compile(r"\bto\s+\d+", re.IGNORECASE),
+    re.compile(r"\bdaily\b|\bpo\s+bid\b|\bpo\s+daily\b", re.IGNORECASE),
+    re.compile(r"\b(?:HCl|NaCl|mg/ml|mcg/ml)\b"),
+]
+
+# Known test names — nếu entity text match thì KHÔNG phải drug parens content
+_KNOWN_TEST_NAMES_LOWER = frozenset({
+    "ecg", "ekg", "eeg", "emg", "điện tâm đồ", "điện não đồ", "điện cơ đồ",
+    "x-quang", "x-quang ngực", "x-quang bụng", "x-quang sọ", "x-quang cột sống",
+    "siêu âm", "siêu âm tim", "siêu âm bụng", "siêu âm thai", "siêu âm tuyến giáp",
+    "siêu âm tim qua thành ngực",
+    "ct", "ct scan", "ct sọ não", "ct ngực", "ct bụng",
+    "mri", "mri sọ não", "mri cột sống", "mri cột sống cổ",
+    "công thức máu", "phân tích nước tiểu", "nước tiểu",
+    "monitor holter", "holter", "monitor holter 24h",
+    "định lượng", "định nhóm máu", "nhóm máu",
+    "nội soi", "nội soi dạ dày", "nội soi đại tràng", "nội soi phế quản",
+    "xét nghiệm", "chụp x-quang", "chụp cắt lớp",
+    "glucose", "ast", "alt", "wbc", "hgb", "plt", "creatinine", "urea",
+    "bilirubin", "cholesterol", "triglyceride", "hdl", "ldl",
+})
+
+
+def _is_drug_parens_content(text: str) -> bool:
+    """Check nếu text là nội dung ngoặc đơn của thuốc (KHÔNG phải test name thật).
+
+    Returns True nếu:
+    - Text chứa dose info (regex \\d+mg, \\d+ml, etc.) HOẶC
+    - Text chứa dose-change narrative (reduced from, increased from, etc.) HOẶC
+    - Text có format "from X to Y" (liều cũ → liều mới)
+
+    Returns False nếu text match known test name thật.
+    """
+    if not text:
+        return False
+    tl = text.strip().lower()
+    if not tl:
+        return False
+    # Nếu match known test name → KHÔNG phải parens content
+    if tl in _KNOWN_TEST_NAMES_LOWER:
+        return False
+    # Check các pattern đặc trưng cho drug parens content
+    for pat in _DRUG_PARENS_CONTENT_PATTERNS:
+        if pat.search(text):
+            return True
+    return False
+
+
+def _drop_drug_parens_misclassification(
+    entities: list[dict],
+    input_text: str,
+) -> list[dict]:
+    """R37-bis (2026-07-14): Drop entities là parens content của thuốc bị LLM tách nhầm.
+
+    Khi LLM gặp `metoprolol (reduced from 50mg to 25mg daily)`, nó đôi khi tách thành:
+      - `metoprolol` (THUỐC) ở [a, b]
+      - `reduced from 50mg to 25mg daily` (TÊN_XÉT_NGHIỆM) ở [c, d]
+
+    Logic detect:
+      1. Entity A là THUỐC ở [a, b]
+      2. Entity B (type ≠ THUỐC) ở [c, d] với c - b ∈ {1, 2} (gap = "(" hoặc " (")
+      3. Gap chứa "(" và char ngay sau d là ")"
+      4. Text của B match `_is_drug_parens_content()`
+
+    Action: drop B, extend A thành [a, d+1] (bao gồm cả ngoặc đơn).
+    """
+    if not entities or not input_text:
+        return entities
+
+    n = len(input_text)
+    drop_indices: set[int] = set()
+    expand_drug: dict[int, int] = {}  # idx → new_end
+
+    for i, ent in enumerate(entities):
+        if i in drop_indices:
+            continue
+        etype = ent.get("type", "")
+        if etype != "THUỐC":
+            continue
+        pos = ent.get("position", [])
+        if not (isinstance(pos, list) and len(pos) == 2):
+            continue
+        try:
+            a, b = int(pos[0]), int(pos[1])
+        except (ValueError, TypeError):
+            continue
+        if not (0 <= a < b <= n):
+            continue
+
+        # Tìm entity B ngay sau A với gap = "(" hoặc " ("
+        for j in range(i + 1, len(entities)):
+            if j in drop_indices:
+                continue
+            jent = entities[j]
+            jtype = jent.get("type", "")
+            if jtype == "THUỐC":
+                continue
+            jpos = jent.get("position", [])
+            if not (isinstance(jpos, list) and len(jpos) == 2):
+                continue
+            try:
+                c, d = int(jpos[0]), int(jpos[1])
+            except (ValueError, TypeError):
+                continue
+            if not (0 <= c < d <= n):
+                continue
+
+            # Gap giữa A và B phải là "(" hoặc " ("
+            gap = input_text[b:c]
+            gap_clean = gap.strip()
+            if not gap_clean.startswith("(") or c - b > 3:
+                continue
+
+            # Char ngay sau d phải là ")" (đóng ngoặc)
+            if d >= n or input_text[d] != ")":
+                continue
+
+            # Text của B phải match pattern drug parens content
+            jtext = str(jent.get("text", "")).strip()
+            if not _is_drug_parens_content(jtext):
+                continue
+
+            # Drop B và extend A
+            logger.info(
+                "[R37-bis] Drop drug parens content misclassified as %s: '%s' "
+                "(drug '%s' at [%d,%d] extended to [%d,%d])",
+                jtype, jtext, ent.get("text", ""), a, b, a, d + 1,
+            )
+            drop_indices.add(j)
+            expand_drug[i] = d + 1  # inclusive end (exclusive for slicing)
+            break  # chỉ xử lý 1 cụm parens sau mỗi drug
+
+    out: list[dict] = []
+    for i, ent in enumerate(entities):
+        if i in drop_indices:
+            continue
+        if i in expand_drug:
+            new_end = expand_drug[i]
+            new_text = input_text[ent["position"][0]:new_end]
+            # Verify text khớp đúng (case-insensitive)
+            if new_text and new_text.lower().startswith(str(ent.get("text", "")).lower()[:10]):
+                out.append({**ent, "text": new_text, "position": [ent["position"][0], new_end]})
+            else:
+                # Fallback: giữ nguyên entity gốc
+                logger.debug(
+                    "[R37-bis] Skip extend drug '%s' — new_text doesn't match expected prefix",
+                    ent.get("text", ""),
+                )
+                out.append(ent)
+        else:
+            out.append(ent)
+
+    return out
+
+
+# Compound disease terms phổ biến (R37-bis fallback) — whitelist an toàn
+_COMPOUND_DISEASE_TERMS: frozenset[str] = frozenset({
+    # Ung thư + cơ quan
+    "ung thư phổi", "ung thư vú", "ung thư dạ dày", "ung thư gan",
+    "ung thư đại tràng", "ung thư trực tràng", "ung thư tuyến tiền liệt",
+    "ung thư buồng trứng", "ung thư cổ tử cung", "ung thư thực quản",
+    "ung thư tụy", "ung thư bàng quang", "ung thư thận", "ung thư máu",
+    "ung thư hạch", "ung thư da", "ung thư xương", "ung thư não",
+    "ung thư thanh quản", "ung thư vòm họng", "ung thư hầu họng",
+    "ung thư amidan", "ung thư lưỡi", "ung thư tuyến giáp",
+    "ung thư tuyến tụy", "ung thư túi mật", "ung thư đường mật",
+    "ung thư mô mềm", "ung thư hắc tố",
+    # Viêm + cơ quan
+    "viêm phổi", "viêm gan", "viêm thận", "viêm dạ dày", "viêm phế quản",
+    "viêm bàng quang", "viêm tụy", "viêm cơ tim", "viêm màng não",
+    "viêm xoang", "viêm họng", "viêm amidan", "viêm khớp", "viêm ruột thừa",
+    "viêm tuyến mồ hôi", "viêm nha chu", "viêm lợi", "viêm da",
+    "viêm mũi", "viêm tai giữa", "viêm kết mạc", "viêm giác mạc",
+    "viêm thanh quản", "viêm phổi kẽ", "viêm phúc mạc", "viêm túi mật",
+    "viêm đường mật", "viêm ruột", "viêm đại tràng", "viêm trực tràng",
+    "viêm thực quản", "viêm hang vị", "viêm niệu đạo", "viêm tiền liệt tuyến",
+    "viêm cơ", "viêm gân", "viêm dây thần kinh",
+    # Suy + cơ quan
+    "suy tim", "suy thận", "suy gan", "suy hô hấp", "suy tuyến giáp",
+    "suy tuyến thượng thận", "suy mạch vành",
+    # Thoái hóa + vị trí
+    "thoái hóa khớp", "thoái hóa cột sống", "thoái hóa đĩa đệm",
+    "thoái hóa khớp gối", "thoái hóa khớp háng", "thoái hóa đốt sống cổ",
+    "thoái hóa đốt sống thắt lưng",
+    # Rối loạn
+    "rối loạn lipid máu", "rối loạn nhịp tim", "rối loạn tiền đình",
+    "rối loạn giấc ngủ", "rối loạn lo âu", "rối loạn cảm xúc",
+    "rối loạn chuyển hóa", "rối loạn dung nạp glucose",
+    # Tăng huyết áp + type
+    "tăng huyết áp", "tăng huyết áp độ 1", "tăng huyết áp độ 2",
+    "tăng huyết áp độ 3", "tăng áp động mạch phổi",
+})
+
+# Body parts đơn lẻ có thể là phần sau của compound term
+_COMPOUND_BODY_PARTS: frozenset[str] = frozenset({
+    "phổi", "gan", "thận", "dạ dày", "phế quản", "bàng quang", "tụy",
+    "cơ tim", "màng não", "xoang", "họng", "amidan", "khớp", "ruột thừa",
+    "ruột", "đại tràng", "trực tràng", "thực quản", "hang vị", "túi mật",
+    "đường mật", "niệu đạo", "tiền liệt tuyến", "tuyến giáp", "tuyến tụy",
+    "tuyến thượng thận", "tuyến mồ hôi", "vú", "cổ tử cung", "buồng trứng",
+    "thanh quản", "vòm họng", "hầu họng", "lưỡi", "não", "xương", "da",
+    "máu", "hạch", "mô mềm", "tim", "mạch vành", "hô hấp",
+    "nha chu", "lợi", "mũi", "tai giữa", "kết mạc", "giác mạc",
+    "phổi kẽ", "phúc mạc", "cơ", "gân", "dây thần kinh", "mắt",
+    # Cột sống / khớp cụ thể
+    "cột sống", "đĩa đệm", "khớp gối", "khớp háng",
+    "đốt sống cổ", "đốt sống thắt lưng",
+})
+
+# Disease prefix để detect compound term có body part
+_COMPOUND_DISEASE_PREFIXES = (
+    "ung thư", "viêm", "suy", "thoái hóa", "rối loạn",
+    "tăng huyết áp", "tăng áp động mạch",
+)
+
+
+def _merge_compound_disease_terms(entities: list[dict]) -> list[dict]:
+    """R37-bis (2026-07-14): Merge adjacent entities tạo thành compound disease term.
+
+    Khi LLM tách `ung thư phổi` thành 2 entities (`ung thư` + `phổi`), function này
+    sẽ merge lại thành 1 entity duy nhất.
+
+    Logic:
+      1. Tìm 2 entities liền kề (gap = " " hoặc "") cùng type CHẨN_ĐOÁN/TRIỆU_CHỨNG
+      2. text_a + " " + text_b thuộc `_COMPOUND_DISEASE_TERMS` whitelist
+         HOẶC
+         text_a là disease prefix (`ung thư`, `viêm`, ...) VÀ
+         text_b là body part đơn lẻ (`phổi`, `gan`, ...)
+      3. Merge thành 1 entity mới với combined text + position [pos_a[0], pos_b[1]]
+    """
+    if len(entities) < 2:
+        return entities
+
+    out: list[dict] = []
+    skip_indices: set[int] = set()
+
+    # Sort theo start position để dễ check adjacent
+    sorted_entities = sorted(
+        enumerate(entities),
+        key=lambda x: (
+            x[1].get("position", [0, 0])[0]
+            if isinstance(x[1].get("position"), list) and len(x[1]["position"]) >= 1
+            else 0
+        ),
+    )
+
+    i = 0
+    while i < len(sorted_entities):
+        idx_a, ent_a = sorted_entities[i]
+        if idx_a in skip_indices:
+            i += 1
+            continue
+
+        text_a = str(ent_a.get("text", "")).strip()
+        type_a = ent_a.get("type", "")
+        pos_a = ent_a.get("position", [])
+
+        if (
+            not text_a
+            or type_a not in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG")
+            or not (isinstance(pos_a, list) and len(pos_a) == 2)
+        ):
+            out.append(ent_a)
+            i += 1
+            continue
+
+        a_start, a_end = int(pos_a[0]), int(pos_a[1])
+        merged = False
+
+        # Tìm entity B ngay sau A
+        for j in range(i + 1, len(sorted_entities)):
+            idx_b, ent_b = sorted_entities[j]
+            if idx_b in skip_indices:
+                continue
+            text_b = str(ent_b.get("text", "")).strip()
+            type_b = ent_b.get("type", "")
+            pos_b = ent_b.get("position", [])
+            if (
+                not text_b
+                or type_b != type_a
+                or not (isinstance(pos_b, list) and len(pos_b) == 2)
+            ):
+                continue
+
+            b_start, b_end = int(pos_b[0]), int(pos_b[1])
+
+            # Gap phải là " " (1 space) hoặc không có (nếu LLM set position liền nhau)
+            gap = b_start - a_end
+            if gap < 0 or gap > 1:
+                break  # không liền kề nữa → dừng
+
+            # Check combined text có thuộc whitelist không
+            text_a_lower = text_a.lower()
+            text_b_lower = text_b.lower()
+            combined = f"{text_a_lower} {text_b_lower}"
+
+            should_merge = False
+            if combined in _COMPOUND_DISEASE_TERMS:
+                should_merge = True
+            else:
+                # Fallback: text_a là disease prefix VÀ text_b là body part đơn lẻ
+                if (
+                    text_a_lower in _COMPOUND_DISEASE_PREFIXES
+                    and text_b_lower in _COMPOUND_BODY_PARTS
+                ):
+                    should_merge = True
+                elif (
+                    text_a_lower.endswith("ung thư")
+                    and text_b_lower in _COMPOUND_BODY_PARTS
+                ):
+                    # VD: "ung thư" + "phổi" → "ung thư phổi"
+                    should_merge = True
+
+            if should_merge:
+                # Tính lại text gốc từ input (an toàn hơn cộng string)
+                combined_text_orig = f"{text_a} {text_b}".strip()
+                # Verify combined text thực sự nằm giữa [a_start, b_end]
+                # (input_text có thể có whitespace khác giữa a_end và b_start)
+                merged_ent = {
+                    **ent_a,
+                    "text": combined_text_orig,
+                    "position": [a_start, b_end],
+                    "assertions": sorted(
+                        set(ent_a.get("assertions", []))
+                        | set(ent_b.get("assertions", []))
+                    ),
+                }
+                # Ưu tiên assertions của entity dài hơn nếu conflict isHistorical
+                # (entity ngắn "ung thư" có thể có isHistorical do bị detect từ section,
+                # entity dài "ung thư phổi" mới là full term → giữ của dài)
+                if len(ent_b) > len(ent_a) and ent_b.get("assertions"):
+                    merged_ent["assertions"] = sorted(
+                        set(ent_b.get("assertions", []))
+                        | {
+                            a for a in ent_a.get("assertions", [])
+                            if a in ("isNegated", "isFamily")
+                        }
+                    )
+                out.append(merged_ent)
+                skip_indices.add(idx_a)
+                skip_indices.add(idx_b)
+                logger.info(
+                    "[R37-bis] Merge compound disease term: '%s' + '%s' → '%s' at [%d,%d]",
+                    text_a, text_b, combined_text_orig, a_start, b_end,
+                )
+                merged = True
+                break
+
+        if not merged:
+            out.append(ent_a)
+        i += 1
+
+    # Sort lại theo position
+    out.sort(
+        key=lambda e: e.get("position", [0, 0])[0]
+        if isinstance(e.get("position"), list) and len(e.get("position")) >= 1
+        else 0
+    )
+    return out
 
 
 def _filter_lifestyle_entities(entities: list[dict]) -> list[dict]:
@@ -2417,6 +2809,23 @@ def _split_drug_disease_connector(
                 out.append({**ent, "text": disease_part, "type": "CHẨN_ĐOÁN", "position": [0, 0]})
                 logger.debug("Tách Drug+Disease: %r -> %r + %r", text, drug_part, disease_part)
                 continue
+
+        # R39 (2026-07-14): Compound drug name splitting
+        # vd 'vancozosynbactrim' → ['vancomycin', 'zosyn', 'bactrim']
+        if etype == "THUỐC" and text and " " not in text:
+            try:
+                from src.rxnorm_rag import _DRUG_ALIASES
+                text_lower = text.lower()
+                if text_lower in _DRUG_ALIASES:
+                    aliased = _DRUG_ALIASES[text_lower]
+                    if isinstance(aliased, list) and len(aliased) > 1:
+                        for sub_drug in aliased:
+                            out.append({**ent, "text": sub_drug, "type": "THUỐC", "position": [0, 0]})
+                        logger.debug("R39: Tách compound drug '%s' -> %s", text, aliased)
+                        continue
+            except Exception as e:
+                logger.debug("R39: compound split failed for '%s': %s", text, e)
+
         out.append(ent)
     return out
 
@@ -2642,6 +3051,15 @@ def align_and_expand_entities(
     # R29 (2026-07-13): Cross-type drop — symptom khi diagnosis duplicate span.
     # 'rối loạn lo âu' (CHẨN_ĐOÁN) chứa 'lo âu' (TRIỆU_CHỨNG) → drop symptom.
     aligned = _drop_symptom_when_diagnosis_present(aligned)
+
+    # R37-bis (2026-07-14): Auto-fix LLM miss khi tách drug + clinical parens.
+    # 'metoprolol (reduced from 50mg to 25mg daily)' → 1 entity THUỐC
+    # (drop misclassified 'reduced from...' TÊN_XÉT_NGHIỆM, extend drug to include parens).
+    aligned = _drop_drug_parens_misclassification(aligned, input_text)
+
+    # R37-bis (2026-07-14): Auto-fix LLM miss khi tách compound disease term.
+    # 'ung thư' + 'phổi' → merge thành 1 entity 'ung thư phổi' CHẨN_ĐOÁN.
+    aligned = _merge_compound_disease_terms(aligned)
 
     # ── Filter lifestyle/duration noise ──────────────────────────────────────────
     aligned = _filter_lifestyle_entities(aligned)

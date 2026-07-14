@@ -227,23 +227,28 @@ except Exception:
 
 # R34: ICD drug-class blacklist + resistance detection (R34 spec round 3)
 _ICD_DRUG_CLASS_BLACKLIST: frozenset[str] = frozenset({
-    "kháng sinh", "thuốc chống đông", "thuốc giảm đau", "thuốc hạ sốt",
-    "nsaid", "corticoid", "thuốc lợi tiểu", "thuốc an thần",
+    "kháng sinh", "kháng viêm", "kháng đông",
+    "thuốc chống đông", "thuốc giảm đau", "thuốc hạ sốt",
+    "thuốc lợi tiểu", "thuốc an thần", "thuốc chống viêm",
+    "thuốc kháng sinh", "thuốc kháng viêm",
+    "nsaid", "corticoid", "corticosteroid",
 })
 
 
 def _has_resistance_context_icd(text: str) -> bool:
     """True nếu text là resistance mention (vd 'vi khuẩn kháng thuốc',
-    'E. coli kháng vancomycin')."""
-    t = text.lower()
+    'E. coli kháng vancomycin', 'MRSA')."""
+    t = text.lower().strip()
     # Specific patterns (high precision)
     if re.search(r"\bkháng\s+thuốc\b", t):
         return True
     if re.search(r"\bkháng\s+sinh\b", t):
         return True
-    # General: 'X kháng Y' where Y is 3+ chars (drug name)
-    # Catches 'E. coli kháng vancomycin', 'Staph kháng methicillin', etc.
+    # General: 'X kháng Y' where Y is 4+ chars (drug name)
     if re.search(r"kháng\s+\w{4,}", t):
+        return True
+    # Common resistance acronyms (MRSA, VRE, ESBL, CRE, etc.)
+    if re.fullmatch(r"mrsa|vre|esbl|cre|vre|vre\.faecalis|vre\.faecium", t):
         return True
     return False
 
@@ -396,6 +401,8 @@ def _is_drug_class_term_icd(text: str) -> bool:
 _UNINFORMATIVE_VN_TERMS = frozenset({
     "không xác định được", "không rõ", "chưa rõ", "cần xác định",
     "cần làm rõ", "không xác định", "chưa xác định",
+    "không có bệnh", "không bệnh", "không có vấn đề",
+    "bình thường", "không có gì đáng chú ý",
 })
 
 
@@ -1125,24 +1132,26 @@ class ICDRetriever:
         """Tra ICD-10 cho 1 cụm chẩn đoán tiếng Việt (có tự động tách chẩn đoán kép)."""
         if not vn_text:
             return []
-        # R34: Strip resistance suffix trước (vd "...kháng thuốc" → core diagnosis).
-        # Chỉ strip khi suffix ở CUỐI text (R34: surgical precision).
+        # R42 (2026-07-14): Check resistance / drug-class / uninformative BEFORE
+        # stripping resistance suffix (otherwise "...kháng thuốc" → "...vi khuẩn"
+        # loses the resistance signal and is mis-mapped to a real disease code).
+        if _has_resistance_context_icd(vn_text):
+            logger.debug("R42: resistance context rejected: '%s'", vn_text)
+            return []
+        if _is_drug_class_term_icd(vn_text):
+            logger.debug("R42: drug-class blacklist rejected: '%s'", vn_text)
+            return []
+        if _is_uninformative_vn_term(vn_text):
+            logger.debug("R42: uninformative VN term rejected: '%s'", vn_text)
+            return []
+        if _looks_like_noise_tokens(vn_text):
+            logger.debug("R42: noise tokens rejected: '%s'", vn_text)
+            return []
+        # R34: Strip resistance suffix (vd "...kháng thuốc" → core diagnosis).
+        # Only strip when suffix ở CUỐI text (R34: surgical precision).
         stripped_vn_text = _strip_resistance_suffix(vn_text)
         if stripped_vn_text != vn_text:
             vn_text = stripped_vn_text
-        # R34: L_filter_context — reject resistance mentions + drug-class blacklisted terms
-        if _has_resistance_context_icd(vn_text):
-            logger.debug("R34: resistance context rejected: '%s'", vn_text)
-            return []
-        if _is_drug_class_term_icd(vn_text):
-            logger.debug("R34: drug-class blacklist rejected: '%s'", vn_text)
-            return []
-        if _is_uninformative_vn_term(vn_text):
-            logger.debug("R34: uninformative VN term rejected: '%s'", vn_text)
-            return []
-        if _looks_like_noise_tokens(vn_text):
-            logger.debug("R34: noise tokens rejected: '%s'", vn_text)
-            return []
         # Universal Vietnamese Clinical Acronym Resolution Map (Zero Hardcoding to specific files, covering standard Vietnamese clinical abbreviations):
         clean_norm = vn_text.strip().lower()
         acronym_map = {

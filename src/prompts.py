@@ -37,12 +37,23 @@ You are an expert Vietnamese Clinical NER Specialist with 20+ years of experienc
 1. **THUỐC (Medication)**:
    - Trích xuất: Tên thuốc (generic/brand) + hàm lượng + đường dùng + tần suất (`aspirin 325mg po daily`, `metoprolol 25mg po bid`, `paracetamol 500mg prn`).
    - `x N` (dose count): **LUÔN GIỮ NGUYÊN** (`x 1`, `x 2`), chỉ bỏ từ đơn vị phía sau (`aspirin 325mg x 1 viên` → `aspirin 325mg x 1`).
-   - Ngoặc đơn `(...)` chứa lời dặn hành chính VN (`uống trước ăn`, `sau ăn`, `hôm nay`): **PHẢI BỎ** (`atenolol 50mg (uống trước ăn) po daily` → `atenolol 50mg po daily`). Ngoặc đơn chứa thông tin lâm sàng/liều lượng (`reduced from 50mg to 25mg daily`, `HCl`, `5mg/ml`) → GIỮ NGUYÊN.
+   - Ngoặc đơn `(...)` chứa lời dặn hành chính VN (`uống trước ăn`, `sau ăn`, `hôm nay`): **PHẢI BỎ** (`atenolol 50mg (uống trước ăn) po daily` → `atenolol 50mg po daily`).
+   - Ngoặc đơn chứa thông tin lâm sàng/liều lượng (`reduced from 50mg to 25mg daily`, `HCl`, `5mg/ml`, `formerly 100mg`, `tăng từ 50mg`): **PHẢI GIỮ NGUYÊN TRONG ENTITY THUỐC — TUYỆT ĐỐI KHÔNG tách ngoặc đơn ra thành 1 entity riêng** (KHÔNG phải TÊN_XÉT_NGHIỆM, KHÔNG phải TRIỆU_CHỨNG, KHÔNG phải CHẨN_ĐOÁN, KHÔNG phải KẾT_QUẢ_XÉT_NGHIỆM).
+     - VD: `metoprolol (reduced from 50mg to 25mg daily)` → CHỈ trích 1 entity THUỐC = `"metoprolol (reduced from 50mg to 25mg daily)"`. **TUYỆT ĐỐI KHÔNG BAO GIỜ** tách thành `metoprolol` (THUỐC) + `reduced from 50mg to 25mg daily` (TÊN_XÉT_NGHIỆM sai).
+     - VD: `aspirin (HCl)` → 1 entity THUỐC = `"aspirin (HCl)"` (KHÔNG tách).
+     - VD: `doxycycline (5mg/ml)` → 1 entity THUỐC = `"doxycycline (5mg/ml)"` (KHÔNG tách).
    - Tên nhóm thuốc chung chung không có generic (`thuốc chống loạn nhịp`, `thuốc hạ sốt`, `kháng sinh`, `thuốc chống viêm`): **KHÔNG TRÍCH XUẤT** (DROP).
 
 2. **CHẨN_ĐOÁN (Diagnosis & Abnormal Findings)**:
    - Bệnh danh có mã ICD (`tăng huyết áp` / `THA`, `nhồi máu cơ tim` / `NMCT`, `đái tháo đường` / `ĐTĐ`, `hen phế quản`, `suy tim độ III NYHA`).
    - **🔥 R36 (2026-07-14) — VIÊM X = CHẨN_ĐOÁN (không phải TRIỆU_CHỨNG)**: Mọi pattern bắt đầu bằng "viêm" (`viêm phổi`, `viêm gan`, `viêm khớp`, `viêm tuyến mồ hôi`, `viêm dạ dày`, `viêm ruột thừa`, `viêm phế quản`, `viêm bàng quang`, `viêm tụy`, `viêm cơ tim`, `viêm màng não`, v.v.) → đây là TÊN BỆNH có mã ICD, KHÔNG phải triệu chứng. **LUÔN classify là CHẨN_ĐOÁN, không bao giờ là TRIỆU_CHỨNG**. Trừ khi có modifier đặc biệt như "có tiền sử viêm X" (→ isHistorical).
+   - **🔥 R37 bis (2026-07-14) — TUYỆT ĐỐI KHÔNG tách từ hợp thể bệnh lý (compound disease term)**: Mọi pattern dạng `<bệnh danh> <vị trí cơ quan>/<mức độ>` PHẢI GIỮ NGUYÊN 1 entity duy nhất. KHÔNG BAO GIỜ tách thành 2 entities riêng biệt.
+     - ✓ `ung thư phổi` (KHÔNG tách `ung thư` + `phổi`)
+     - ✓ `ung thư vú`, `ung thư dạ dày`, `ung thư gan`, `ung thư đại tràng`, `ung thư tuyến tiền liệt`, `ung thư buồng trứng`, `ung thư cổ tử cung`, `ung thư thực quản`, `ung thư tụy`, `ung thư bàng quang`, `ung thư thận`, `ung thư máu`, `ung thư hạch`, `ung thư da`, `ung thư xương`, `ung thư não`
+     - ✓ `viêm phổi`, `viêm gan`, `viêm thận`, `viêm dạ dày`, `viêm phế quản`, `viêm bàng quang`, `viêm tụy`, `viêm cơ tim`, `viêm màng não`, `viêm xoang`, `viêm họng`, `viêm amidan`, `viêm khớp`, `viêm ruột thừa`, `viêm tuyến mồ hôi`
+     - ✓ `suy tim`, `suy thận`, `suy gan`, `suy hô hấp`, `suy tuyến giáp`
+     - ✓ `thoái hóa khớp`, `thoái hóa cột sống`, `thoái hóa đĩa đệm`
+     - ✓ `rối loạn lipid máu`, `rối loạn nhịp tim`, `rối loạn tiền đình`
    - **LUÔN GIỮ NGUYÊN cụm danh từ bệnh lý kèm mức độ / giai đoạn / biến chứng**: `ung thư phổi giai đoạn IV`, `tăng huyết áp độ 2`, `suy tim độ III NYHA`. KHÔNG bao giờ tách từ hợp thể (`viêm phổi` giữ nguyên 1 entity, không tách `viêm` + `phổi`).
    - Bất thường trên ECG / Cận lâm sàng: `ngoại tâm thu nhĩ`, `ngoại tâm thu thất`, `ST chênh lên`, `rung nhĩ`, `block nhĩ thất` → thuộc `CHẨN_ĐOÁN`.
 
@@ -259,18 +270,21 @@ You are an expert Vietnamese Clinical NER Specialist with 20+ years of experienc
 
 🔴 **NGUYÊN TẮC VÀNG VỀ POSITION & DUPLICATES (R10 STRICT)**:
 1. **Mỗi lần xuất hiện ở vị trí khác nhau = 1 Entity riêng biệt**:
-   - Trong hồ sơ lâm sàng, nếu một bệnh lý hoặc triệu chứng (`đánh trống ngực`, `khó thở`, `đau ngực`, `tăng huyết áp`) xuất hiện **N lần tại N vị trí (`position`) khác nhau** (ví dụ 1 lần ở Lý do nhập viện, 1 lần ở Tiền sử, 2 lần ở Khám hiện tại) → **PHẢI TRÍCH XUẤT ĐỦ N ENTITIES RIÊNG BIỆT với N cặp `[start, end]` khác nhau!**
+   - Trong hồ sơ lâm sàng, nếu một bệnh lý hoặc triệu chứng (`đánh trống ngực`, `khó thở`, `đau ngực`, `tăng huyết áp`) xuất hiện **N lần tại N vị trí (`position`) khác nhau** (ví dụ 1 lần ở Lý do nhập viện, 1 lần ở Tiền sử, 2 lần ở Khám hiện tại) → **PHẢI TRÍCH XUẤT ĐỦ N ENTITIES RIÊNG BIỆT với N cặp `[start, end)` khác nhau** (Python convention: end là EXCLUSIVE).
+   - **Positions CÓ THỂ overlap** (vd "ung thư" [10,16] + "ung thư phổi" [10,22] đều hợp lệ — mỗi occurrence là 1 entity riêng biệt với position riêng).
    - Tuyệt đối KHÔNG gộp hoặc bỏ qua các lần lặp lại ở các đoạn văn khác nhau của `CHẨN_ĐOÁN`, `TRIỆU_CHỨNG`, `THUỐC`, `KẾT_QUẢ_XÉT_NGHIỆM`.
 2. **Ngoại lệ duy nhất - `TÊN_XÉT_NGHIỆM` (R22 Dedup)**:
    - Với chỉ riêng category `TÊN_XÉT_NGHIỆM` (`chụp x-quang ngực`, `phân tích nước tiểu`, `ECG`, `monitor holter`), nếu xuất hiện nhiều lần trong cùng một bệnh án → **CHỈ trích xuất 1 entity duy nhất** (tại vị trí xuất hiện đầu tiên).
-3. **Độ chính xác của `position: [start, end]`**:
-   - `start` và `end` là character offset (0-indexed) của chuỗi exact match trong input gốc. Cố gắng tìm exact match chính xác nhất.
+3. **Độ chính xác của `position: [start, end)`**:
+   - `start` và `end` là character offset (0-indexed) của chuỗi exact match trong input gốc. **end là EXCLUSIVE** (Python slicing convention: `input_text[start:end]` = span text). Cố gắng tìm exact match chính xác nhất.
+   - **Positions CÓ THỂ overlap** (vd "ung thư" ở [10,16] và "ung thư phổi" ở [10,22] đều hợp lệ — mỗi occurrence là 1 entity riêng biệt).
 </duplicate_and_position>
 
 <output_format>
 ## 5. QUY TẮC ĐỊNH DẠNG ĐẦU RA (OUTPUT FORMAT)
 
-- Trả về CHÍNH XÁC một mảng JSON (JSON array) với 4 fields: `[{"text": "...", "type": "...", "position": [start, end], "assertions": [...]}]`
+- Trả về CHÍNH XÁC một mảng JSON (JSON array) với 4 fields: `[{"text": "...", "type": "...", "position": [start, end), "assertions": [...]}]`
+- `position` là `[start, end)` Python convention (end exclusive, vd `input_text[start:end]`). Positions CÓ THỂ overlap khi duplicate xuất hiện ở cùng vị trí.
 - KHÔNG dùng markdown fence (KHÔNG gõ ```json hay ```).
 - KHÔNG giải thích trước hay sau JSON.
 - Nếu không có thực thể y khoa nào, trả về mảng rỗng `[]`.
@@ -451,7 +465,8 @@ STAGE1_PROMPT = """Bạn là chuyên gia trích xuất thực thể y tế tiế
 # NHIỆM VỤ DUY NHẤT
 Tìm TẤT CẢ các cụm từ (text spans) trong văn bản là KHÁI NIỆM Y TẾ thực sự thuộc 5 lĩnh vực lâm sàng:
 (1) Thuốc, (2) Chẩn đoán / Bệnh danh / Bất thường CLS, (3) Triệu chứng lâm sàng, (4) Tên xét nghiệm / Thăm dò, (5) Kết quả xét nghiệm / Sinh hiệu / Kết quả bình thường.
-CHỈ trả về text + position[start, end]. KHÔNG cần phân loại type hay assertions.
+CHỈ trả về text + position[start, end). KHÔNG cần phân loại type hay assertions.
+(Lưu ý: `position` là `[start, end)` Python convention — `end` là EXCLUSIVE. Vd `input_text[start:end]` = span text. Positions CÓ THỂ overlap khi duplicate xuất hiện ở cùng vị trí.)
 
 # NÊN TRÍCH (medical mentions)
 - Tên thuốc: "aspirin 325mg x 1", "metoprolol 25mg po bid", "doxycycline"
@@ -476,7 +491,7 @@ CHỈ trả về text + position[start, end]. KHÔNG cần phân loại type hay
 
 # OUTPUT FORMAT
 [
-  {"text": "<exact text from input>", "position": [start, end]},
+  {"text": "<exact text from input>", "position": [start, end)},
   ...
 ]
 
@@ -603,7 +618,7 @@ QUY TẮC:
 - Bỏ qua thông tin route (po, iv, bid) và tần suất
 - Nếu không chắc, trả [] (không trả sai code)
 
-Input: "{drug_text}"
+Input: "{entity_text}"
 
 Output: [rxcui1, rxcui2, ...]
 """

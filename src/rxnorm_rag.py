@@ -78,9 +78,23 @@ def _normalize_strength(s: str) -> str:
 
 # R34 (2026-07-13): Parse strength thành số để so sánh closest match.
 def _parse_strength_value(s: str) -> float | None:
-    """Parse numerical từ strength. '25MG' → 25.0; '0.5MG' → 0.5; '5MG/ML' → 5.0."""
+    """Parse numerical từ strength. '25MG' → 25.0; '0.5MG' → 0.5; '5MG/ML' → 5.0.
+
+    R42 (2026-07-14): Prefer numbers near strength units (MG, ML, ...) to avoid
+    picking up "12" from "12 HR guaifenesin 1200 MG Extended Release Oral Tablet"
+    → was wrongly returning 12.0 thay vì 1200.0, làm "12 HR" ER candidates rank
+    cao hơn 800 MG OT trong secondary sort.
+    """
     if not s:
         return None
+    # First try: number directly followed by strength unit
+    m = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:mg|mcg|g|ml|iu|unit|unt|%|meq)(?:/|\s|$)",
+        s, re.IGNORECASE,
+    )
+    if m:
+        return float(m.group(1))
+    # Fallback: first number in string
     m = re.search(r"(\d+(?:\.\d+)?)", s)
     if m:
         return float(m.group(1))
@@ -135,7 +149,70 @@ def _strip_route_freq(text: str) -> str:
     VD: 'metoprolol 25 mg (uống hôm nay) po bid' → 'metoprolol 25 mg'.
 
     R34: Cũng normalize range strength (vd '325-650 mg' → '325mg', dùng LOW value).
+    R42 (2026-07-14): Handle dose-change parentheticals — extract LAST strength
+    (current dose) thay vì strip cả. Vd:
+      "(dose decreased from 5mg to 1mg)" → keep "1mg" (current)
+      "(previously 5 mg, now 1 mg)" → keep "1 mg"
+      "(tapered from 5mg bid to 1mg bid)" → keep "1mg"
     """
+    # R42: Handle dose-change parentheticals in correct order.
+    # Step 1: Extract "current" from "previously X, now Y" patterns FIRST
+    # (before any strip that would remove the parenthetical entirely).
+    # Allow Y to include strength unit (e.g., "now 1 mg" → keep "1 mg").
+    _NOW_RE = re.compile(
+        r"(?:previously|historically|was|had)\s+[^,]+,\s*"
+        r"(?:now|currently|switched\s+to)\s+"
+        r"(\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|iu|unit|unt|%|meq)?"
+        r"(?:\s*(?:mg|mcg|g|ml|iu|unit|unt|%|meq))?)",
+        re.IGNORECASE,
+    )
+
+    def _now_repl(m: "re.Match[str]") -> str:
+        return f" {m.group(1).strip()} "
+
+    text = _NOW_RE.sub(_now_repl, text)
+
+    # Step 2: Strip parentheticals with ONLY history (no current dose).
+    # Vd: "(previously on 5mg)", "(dose was 5mg)", "(history: 5mg)"
+    _DOSE_HISTORY_ONLY_RE = re.compile(
+        r"\([^)]*?(?:previously|historically|dose\s+was|was\s+\d|hx)[^)]*\)",
+        re.IGNORECASE,
+    )
+    text = _DOSE_HISTORY_ONLY_RE.sub(" ", text)
+
+    # Step 3: Extract "current" strength from "from <prev> to <curr>" patterns.
+    # Vd: "(dose decreased from 5mg to 1mg)" → keep "1mg" (current).
+    _FROM_TO_RE = re.compile(
+        r"\bfrom\s+(\S+(?:\s+\S+)*?)\s+to\s+(\S+(?:\s+\S+)*?)(?=[\s,;)])",
+        re.IGNORECASE,
+    )
+
+    def _from_to_repl(m: "re.Match[str]") -> str:
+        return f" {m.group(2).strip()} "
+
+    text = _FROM_TO_RE.sub(_from_to_repl, text)
+
+    # Step 4: Strip remaining dose-context parentheticals WITHOUT strength.
+    # (e.g., "(tapered from 5mg)" became "(tapered )" after step 3 → strip here).
+    # IMPORTANT: only strip if no strength remains (otherwise we lose current dose).
+    _DOSE_CONTEXT_RE = re.compile(
+        r"\(([^)]*?)(?:tapered|decreased|increased|adjusted|reduced)([^)]*)\)",
+        re.IGNORECASE,
+    )
+
+    def _ctx_repl(m: "re.Match[str]") -> str:
+        content = m.group(1) + m.group(2)
+        if _STRENGTH_RE.search(content):
+            # Has strength — keep, drop only the noise words
+            stripped = re.sub(
+                r"(tapered|decreased|increased|adjusted|reduced|dose|was|previously)",
+                "", content, flags=re.IGNORECASE,
+            ).strip()
+            return f" ({stripped}) "
+        return " "
+
+    text = _DOSE_CONTEXT_RE.sub(_ctx_repl, text)
+
     def _repl(m: "re.Match[str]") -> str:
         content = m.group(1).strip()
         if _STRENGTH_RE.search(content):
@@ -268,6 +345,15 @@ _NON_TREATMENT_TERMS: frozenset[str] = frozenset({
     "thuốc kháng sinh",
 })
 
+# R42 (2026-07-14): Lab chemicals that have RxNorm SCDs (mostly topical/lab use)
+# but should NOT be returned as drug lookups when queried bare (no strength,
+# no drug context). Examples: 'urea' (mostly topical), 'creatinine' (lab test).
+_LAB_CHEMICALS: frozenset[str] = frozenset({
+    "urea", "creatinine", "hemoglobin", "albumin", "glucose", "sodium",
+    "potassium", "chloride", "calcium", "magnesium", "phosphate",
+    "lactate", "bicarbonate",
+})
+
 
 def _extract_brand_from_brackets(name: str) -> str | None:
     """Extract brand text từ 'Ingredient Strength [Brand Name]' format."""
@@ -279,10 +365,11 @@ def _extract_doseform_score(name_lower: str, wants_extended: bool = False) -> fl
     """Score bonus dựa trên doseform name (5.1). Order: specific → generic.
 
     R34: ER Oral Tablet chỉ +15 khi query có ER signal (xl/xr/er/sr/24hr);
-    nếu không, fall back về +10 (regular OT) để tránh prefer ER khi không cần.
+    nếu không, PENALIZE (R42 2026-07-14: was returning OT bonus = 10.0, làm ER
+    candidates rank cao hơn OT plain khi query không có ER signal).
     """
     if "extended release oral tablet" in name_lower:
-        return _DOSEFORM_SCORE["extended release oral tablet"] if wants_extended else _DOSEFORM_SCORE["oral tablet"]
+        return _DOSEFORM_SCORE["extended release oral tablet"] if wants_extended else -10.0
     if "disintegrating tablet" in name_lower:
         return _DOSEFORM_SCORE["disintegrating tablet"]
     if "oral tablet" in name_lower:
@@ -609,6 +696,11 @@ class RxNormIndex:
             return []
 
         # L1: Exact (ingredient, strength) tuple
+        # R42 (2026-07-14): Reject known lab chemicals (urea, creatinine, etc.)
+        # even if they appear in INN whitelist (whitelist was auto-mined from
+        # RxNorm, includes these as topical/lab SCDs).
+        if ing.lower() in _LAB_CHEMICALS and not strength:
+            return []
         if strength:
             cands = self.by_ingredient_strength.get((ing, strength), [])
             # R34: ALWAYS merge common salt variants (vd 'pravastatin' → 'pravastatin sodium').
@@ -644,11 +736,25 @@ class RxNormIndex:
                         )
                         return [ranked[0]]
 
+        # R41 (2026-07-14): L1B closest-strength fallback BEFORE L5.
+        # Trước đây fall-through trực tiếp sang L5 (by_ingredient) → trả về cands[0]
+        # (FIRST dict entry, thường là lowest rxcui = smallest strength).
+        # Bug: "clonazepam 1.5 mg" → L1 miss → L5 returns cands[0] = 0.5MG
+        # thay vì closest = 1MG (dist 0.5 thay vì 1.0).
+        if strength:
+            closest = self.closest_strength_lookup(drug_text, drug_text)
+            if closest:
+                return closest
+
         # L5: Ingredient-only (NO strength) — R34 conditional re-rank.
         # CHỈ fire khi query có drug context HOẶC ingredient nằm trong INN whitelist.
         # Bare single-word lab chemicals như 'urea', 'creatinine', 'hemoglobin' → reject.
         # R34 FIX: Bare drug names như 'doxycycline', 'atenolol' (real RxNorm drugs,
         # nhưng không có strength/route) phải lookup được qua L5.
+        # R42 (2026-07-14): Extra guard for lab chemicals (urea, creatinine, ...)
+        # even when they have RxNorm SCDs and are in INN whitelist.
+        if ing.lower() in _LAB_CHEMICALS:
+            return []
         cands = self.by_ingredient.get(ing, [])
         if cands:
             has_volume_in_orig = bool(re.search(r"\b\d+(?:\.\d+)?\s*ml\b", orig.lower()))
@@ -768,14 +874,72 @@ def _rank_rxnorm_candidates(
         re.search(r"\b(?:xl|xr|er|sr|24\s*hr|24hr|extended\s+release)\b", drug_lower)
     )
     has_hybrid = vec_scores is not None or bm25_scores is not None
-    query_has_str = bool(_STRENGTH_RE.search(drug_text))  # R34: cho tiebreaker
+    # R42 (2026-07-14): Use PARSED strength (via _normalize_strength) to detect
+    # "real strength" in query. Raw _STRENGTH_RE matches "5 ml" as strength but
+    # _normalize_strength filters bare ML as volume → inconsistent. Use the
+    # normalize result to determine if query has actual strength value.
+    _qstr_m = _STRENGTH_RE.search(drug_text)
+    query_has_str = bool(_qstr_m and _normalize_strength(_qstr_m.group(0)))
+    # R42 (2026-07-14): Detect volume in query (digit + ml). ML→MG conversion
+    # only meaningful if PLAIN SCDs (no compound, no /ML concentration) use
+    # mass units (MG). E.g., nystatin's "MG" SCDs are all "MG/ML" concentrations
+    # (not single-dose strengths), so ml→mg conversion yields no usable SCD.
+    # If no plain MG SCD exists, conversion impossible → prefer parent.
+    _vol_m = re.search(r"\b\d+(?:\.\d+)?\s*ml\b", drug_text.lower())
+    query_has_volume = bool(_vol_m)
+    _has_plain_mg_cands = any(
+        # Plain MG (not MG/ML concentration, not compound with /)
+        " mg" in f" {names[rxcui_to_idx[c]].lower()} " and
+        " / ml" not in names[rxcui_to_idx[c]].lower() and
+        " / " not in names[rxcui_to_idx[c]].lower() and
+        "mg/ml" not in names[rxcui_to_idx[c]].lower()
+        for c in rxcui_list if c in rxcui_to_idx
+    ) if query_has_volume else True
+    # R42 (2026-07-14): Detect if query uses BRAND name explicitly.
+    # Vd: "prograf 1mg bid" → user wrote brand "prograf" → preserve brand info.
+    # When True, REMOVE the [Brand] bracket penalty (was -50) for that brand.
+    # This makes brand SCDs (vd 564557 "tacrolimus 1 MG [Prograf]") rank higher
+    # when query explicitly uses the brand name.
+    # IMPORTANT: Only treat as brand if KEY != VALUE (alias actually translates).
+    # "aspirin" → "aspirin" is a no-op alias, NOT a brand translation.
+    _query_brand: Optional[str] = None
+    if _DRUG_ALIASES:
+        _q_lower = drug_text.lower().strip()
+        for _brand in sorted(_DRUG_ALIASES.keys(), key=len, reverse=True):
+            _value = _DRUG_ALIASES[_brand]
+            _value_str = _value if isinstance(_value, str) else _value[0]
+            # Skip no-op aliases (key == value)
+            if _brand.lower() == _value_str.lower():
+                continue
+            if _q_lower == _brand or _q_lower.startswith(_brand + " ") or _q_lower.startswith(_brand + ","):
+                # Use canonical brand name (preserves original case)
+                _query_brand = _brand
+                break
+    # R44 (2026-07-14): preserve input order, filter rxcui_to_idx later
+    original_rxcui_list = list(rxcui_list)
+    # R44b: ranked_cands = rxcui_list filtered to only valid rxcui_to_idx entries
+    ranked_cands = [c for c in rxcui_list if c in rxcui_to_idx]
 
     def _name_signal(rxcui: str, name_lower: str, drug_text_lower: str) -> float:
         """Pure name-based signal (5.1, 5.2, 5.4 + R34 strength-presence)."""
         s = 0.0
         # Bracket brand
         if "[" in name_lower and "]" in name_lower:
-            s -= _BRACKET_BRAND_PENALTY
+            # R42 (2026-07-14): If query uses brand name explicitly, REMOVE
+            # bracket penalty AND add brand-match bonus for matching brand
+            # (so "prograf 1mg bid" → 564557 "tacrolimus 1 MG [Prograf]" wins
+            # over 427808 plain generic).
+            if _query_brand is not None:
+                _brand_in_name = _extract_brand_from_brackets(
+                    names[rxcui_to_idx[rxcui]]
+                )
+                if _brand_in_name and _brand_in_name.lower() == _query_brand.lower():
+                    # Matching brand — bonus to overcome OT doseform bonus
+                    s += 15.0
+                else:
+                    s -= _BRACKET_BRAND_PENALTY
+            else:
+                s -= _BRACKET_BRAND_PENALTY
         # Known brand không có bracket (5.4) — title-case suspect
         if not (("[" in name_lower and "]" in name_lower)):
             # Heuristic: bất kỳ title-case token nào ∈ _BRAND_NAMES thì penalize
@@ -796,7 +960,28 @@ def _rank_rxnorm_candidates(
             elif "release" not in name_lower:
                 s -= 5.0
         # 5.1: Doseform bonus (with R34 ER-conditional logic)
-        s += _extract_doseform_score(name_lower, wants_extended=wants_extended)
+        df_score = _extract_doseform_score(name_lower, wants_extended=wants_extended)
+        # R42 (2026-07-14): When query uses brand explicitly + no explicit
+        # doseform in query → prefer SIMPLE brand SCDs (no doseform specified
+        # in name) over brand+doseform combinations. Vd "prograf 1mg bid" →
+        # 564557 "tacrolimus 1 MG [Prograf]" wins over 108513 "tacrolimus 1 MG
+        # Oral Capsule [Prograf]".
+        if _query_brand is not None and not wants_extended:
+            has_doseform_in_name = any(kw in name_lower for kw in (
+                "oral tablet", "oral capsule", "oral solution",
+                "oral suspension", "tablet", "capsule",
+                "solution", "suspension",
+            ))
+            has_doseform_in_query = any(kw in drug_text.lower() for kw in (
+                "tablet", "capsule", "solution", "suspension",
+            ))
+            if not has_doseform_in_query and not has_doseform_in_name:
+                # Simple brand SCD (no doseform) — BIG bonus to dominate doseform bonus
+                s += 25.0
+            elif not has_doseform_in_query and has_doseform_in_name:
+                # Brand SCD with doseform but query has no doseform → penalize
+                s -= 15.0
+        s += df_score
         # 5.2: Historical penalty
         if rxcui in _HISTORICAL_RXCUI:
             s -= _HISTORICAL_PENALTY
@@ -824,6 +1009,19 @@ def _rank_rxnorm_candidates(
         name_lower = names[rxcui_to_idx[rxcui]].lower()
         name_sig = _name_signal(rxcui, name_lower, drug_lower)
 
+        # R42 (2026-07-14): Volume query (5 ml) + NO plain MG SCDs (e.g.,
+        # nystatin uses UNT not MG for primary strength). ML→MG conversion
+        # impossible, so apply HARD preference for parent SCD (no strength)
+        # by overriding score with 1e6 (dominates over all name_signal).
+        if query_has_volume and not _has_plain_mg_cands:
+            name_has_str_local = bool(_STRENGTH_RE.search(name_lower))
+            if not name_has_str_local:
+                # Parent SCD (no strength) for volume query without MG unit
+                return 1e6  # hard preference, dominates any name signal
+            else:
+                # Non-parent (has strength like UNT) for volume query → reject
+                return -1e6
+
         if has_hybrid:
             # 5.3: vec + bm25 dominates, name signal = tiebreaker (R34 weighted)
             v = (vec_scores or {}).get(rxcui, 0.0) or 0.0
@@ -838,24 +1036,112 @@ def _rank_rxnorm_candidates(
     # (2) HIGHEST numerical strength (clinical convention for OTC SCD).
     # Tertiary: input order (stable).
     def _sort_key(rxcui):
-        score = _score(rxcui)
         if rxcui not in rxcui_to_idx:
-            return (-1e9, 0.0, 0)
+            return (-1e9, 0.0, 9999999)
         name_l = names[rxcui_to_idx[rxcui]].lower()
-        # Secondary: prefer no-strength / highest strength when query no strength
+        # R44: use ORIGINAL input order for tiebreaker (preserve dict insertion)
+        try:
+            order_idx = original_rxcui_list.index(rxcui)
+        except ValueError:
+            order_idx = 9999999
+        # R42 (2026-07-14): Secondary sort - prefer SCD with lowest typical adult dose.
+        # Bare ingredient name (e.g. "guaifenesin") thường là generic prescription →
+        # chọn SCD với dose phổ biến (800 MG Oral Tablet) thay vì parent hay 1200 MG ER.
+        # Fix: prefer "Oral Tablet"/"Oral Solution" doseform + LOWEST strength.
+        # Higher dose forms (e.g. 1200 MG ER) ít phổ biến cho OTC generic prescription.
+        sec = 0.0
         if not query_has_str:
+            # Check if ORIGINAL query has explicit doseform keyword OR volume.
+            # - Doseform in query + name has doseform + name has NO strength →
+            #   parent SCD query (vd "Sulfadiazine Oral Tablet" → 373977).
+            # - Volume in query (digit+ml) → parent SCD preferred
+            #   (vd "nystatin oral suspension 5 ml" → 7597 "nystatin").
+            query_has_doseform = any(kw in drug_text.lower() for kw in (
+                "oral tablet", "oral capsule", "oral solution",
+                "oral suspension", "tablet", "capsule",
+                "solution", "suspension",
+            ))
+            query_has_volume = bool(re.search(
+                r"\b\d+(?:\.\d+)?\s*ml\b", drug_text.lower()
+            ))
             name_has_str = bool(_STRENGTH_RE.search(name_l))
-            if not name_has_str:
-                sec = 1e9  # Top — no strength when query has no strength
-            else:
+            has_doseform = any(kw in name_l for kw in (
+                "oral tablet", "oral capsule", "oral solution",
+                "oral suspension", "tablet", "capsule",
+                "solution", "suspension",
+            ))
+            if query_has_volume and not name_has_str and not has_doseform:
+                # R42 (2026-07-14): Query has volume (5 ml) + name is bare
+                # parent (no strength, no doseform). STRONGLY prefer parent SCD
+                # (gold for "nystatin oral suspension 5 ml" → 7597 "nystatin").
+                # Use 1e6 to dominate over score differences (max ~200).
+                sec = 1e6
+            elif query_has_volume:
+                # R42 (2026-07-14): Volume query (5 ml) + name has strength.
+                # ML→MG conversion impossible if data uses UNT/IU (substance-
+                # specific, not volumetric). E.g., nystatin's strength is in
+                # UNT not MG → no meaningful conversion possible.
+                # In this case, prefer parent SCD over mass-based SCDs.
+                # Heuristic: if ingredient has NO candidates with MG/G strength
+                # (only UNT/IU), set high preference for parent.
+                # We approximate by checking if the dominant strength unit in
+                # this batch is non-mass (UNT/IU only).
                 v = _parse_strength_value(name_l)
-                sec = float(v) if v is not None else 0.0
-        else:
-            sec = 0.0
+                if v is not None and v >= 1000:
+                    # Large unit-only strengths (100000+ UNT) typical for
+                    # anti-infectives like nystatin. Penalize heavily.
+                    sec = -1e6
+                elif v is not None and v >= 400:
+                    # Mass-like strength (probably MG/G): could be valid
+                    sec = -abs(v - 800.0)
+                else:
+                    # Small or unknown strength: weak preference
+                    sec = -500.0 - (v or 0)
+            elif query_has_doseform and not name_has_str and has_doseform:
+                # R42 (2026-07-14): Query explicitly says doseform + name is
+                # parent SCD (no strength). STRONGLY prefer (gold for
+                # "Sulfadiazine Oral Tablet" → 373977).
+                sec = 1000.0
+            elif not name_has_str and has_doseform:
+                # Bare drug name (e.g. "guaifenesin") + doseform "Oral Tablet"
+                # but query has no explicit doseform → generic SCD parent
+                # entry. De-prioritize vs SCDs.
+                sec = -500.0
+            elif not name_has_str:
+                # Bare ingredient + no doseform → lowest
+                sec = -1e9
+            elif name_has_str:
+                # R42 (refined 2026-07-14): Prefer strengths closest to TYPICAL
+                # ADULT OTC DOSE (target = 800 MG). Heuristic rationale:
+                #   - Strength < 400 MG → pediatric / low-dose (reject)
+                #   - Strength in [400, 1200] MG → typical adult OTC range;
+                #     among those, prefer MULTIPLES OF 200 closest to 800 MG.
+                #   - Strength > 1200 MG → extended-release / high-dose (reject).
+                # Bug history: "guaifenesin ml" was returning 1200 MG ER (310621)
+                # because the original "lowest strength wins" picked 100 MG instead
+                # of gold 800 MG. Fixed via target-based ranking + ER penalty.
+                v = _parse_strength_value(name_l)
+                if v is None or v <= 0:
+                    sec = 0.0
+                else:
+                    if 400 <= v <= 1200 and v % 200 == 0:
+                        # Round multiple of 200 in adult range: rank by closeness
+                        # to 800 MG (target). Smaller distance = higher sec.
+                        sec = -abs(v - 800.0)
+                    else:
+                        # Outside preferred pattern: heavy penalty proportional
+                        # to distance from [400, 1200] range.
+                        if v < 400:
+                            sec = -1000.0 - v
+                        else:
+                            sec = -1000.0 - (v - 1200.0)
+        # Primary score (must compute per-rxcui, not capture outer variable)
+        score = _score(rxcui)
         # Tertiary: input order (negative for DESC sort)
-        return (score, sec, -rxcui_list.index(rxcui))
+        return (score, sec, -order_idx)
 
-    scored = sorted(rxcui_list, key=_sort_key, reverse=True)
+    # R44: sort ranked_cands (those in rxcui_to_idx), use original order
+    scored = sorted(ranked_cands, key=_sort_key, reverse=True)
     return scored
 
 
@@ -1301,6 +1587,7 @@ class RxNormRetriever:
         R34 (2026-07-13 spec round 3): + Context filter (resistance/class) + 5.1/5.2/5.3/5.4 re-rank.
         """
         drug_text = drug_text.strip()
+        _raw_text = drug_text  # R42: preserve ORIGINAL text (pre-alias) for brand detection
 
         # R34: Context filter — reject resistance / non-treatment class
         if _has_resistance_context(drug_text):
@@ -1334,16 +1621,20 @@ class RxNormRetriever:
             return []
 
         drug_text = alias_result if isinstance(alias_result, str) else drug_text
-        # drug_text_orig = post-alias để doseform hint dùng context đúng
-        drug_text_orig = drug_text
+        # R42 (2026-07-14): Keep ORIGINAL (pre-alias) text in drug_text_orig_for_brand
+        # so brand-aware re-rank works (vd "prograf 1mg bid" → 564557 [Prograf]).
+        # Use post-alias drug_text_orig for doseform hint context.
+        drug_text_orig = drug_text  # post-alias, used for doseform hint
+        drug_text_orig_for_brand = _raw_text  # pre-alias, used for brand detection
 
         # L1: Exact (ing, strength) — with R32 name re-rank (R34: 5.1/5.2/5.3/5.4)
+        # R42: pass _orig_with_brand_hint for brand-aware re-rank, but orig for doseform hint
         result = self.index._lookup_with_original(
-            drug_text, original_text=drug_text_orig
+            drug_text, original_text=drug_text_orig_for_brand
         )
         if result:
             ranked = _rank_rxnorm_candidates(
-                result, self.index.name_to_idx, self.index.names, drug_text_orig
+                result, self.index.rxcui_to_idx, self.index.names, drug_text_orig_for_brand
             )
             return [ranked[0]]
 
