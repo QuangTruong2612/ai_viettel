@@ -29,13 +29,13 @@ class LLMConfig:
     base_url: str = "http://127.0.0.1:11434/v1"
     api_key: str = "lm-studio"  # LM Studio chấp nhận bất kỳ; Ollama ignore
     model: str = "qwen2.5-7b-instruct"  # Ollama naming với colon (LM Studio: "qwen2.5-7b-instruct")
-    temperature: float = 0.1  # 0.1 thay vì 0.0 để LLM diverse hơn (extract duplicate tốt hơn)
+    temperature: float = 0.05  # R44 (2026-07-14): giảm từ 0.1 → 0.05 để consistent hơn (extract duplicate ít miss)
     top_p: float = 1.0
 
-    # max_tokens=6144 đủ chứa JSON ~40 entities + chain-of-thought reasoning dài.
-    # Tăng từ 4096 (2026-07-09) sau khi 4096 bị thiếu với input 1.txt (chỉ 17 entities).
-    # 6144 cho buffer thoải mái cho CoT + JSON output dài (30-40 entities).
-    max_tokens: int = 8192
+    # max_tokens=12288 đủ chứa JSON ~80+ entities + scratchpad reasoning dài.
+    # Tăng từ 8192 (2026-07-14) sau khi verify case 3.txt/4.txt cần ~50-67 entities
+    # + scratchpad reasoning trước JSON. 12288 cho buffer thoải mái.
+    max_tokens: int = 12288
     timeout: int = 900  # 15 phút/request (tăng từ 600 cho max_tokens cao + CoT reasoning)
     max_retries: int = 1  # giảm retry để fail fast
 

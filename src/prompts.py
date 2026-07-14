@@ -460,42 +460,102 @@ def build_user_prompt(input_text: str) -> str:
 # TWO-STAGE PIPELINE PROMPTS (R32 - 2026-07-12)
 # ==============================================================================
 
-STAGE1_PROMPT = """Bạn là chuyên gia trích xuất thực thể y tế tiếng Việt.
+STAGE1_PROMPT = """Bạn là chuyên gia NER y khoa tiếng Việt với 20+ năm kinh nghiệm. Nhiệm vụ: trích xuất TẤT CẢ entities từ bệnh án vào 5 loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM).
 
-# NHIỆM VỤ DUY NHẤT
-Tìm TẤT CẢ các cụm từ (text spans) trong văn bản là KHÁI NIỆM Y TẾ thực sự thuộc 5 lĩnh vực lâm sàng:
-(1) Thuốc, (2) Chẩn đoán / Bệnh danh / Bất thường CLS, (3) Triệu chứng lâm sàng, (4) Tên xét nghiệm / Thăm dò, (5) Kết quả xét nghiệm / Sinh hiệu / Kết quả bình thường.
-CHỈ trả về text + position[start, end). KHÔNG cần phân loại type hay assertions.
-(Lưu ý: `position` là `[start, end)` Python convention — `end` là EXCLUSIVE. Vd `input_text[start:end]` = span text. Positions CÓ THỂ overlap khi duplicate xuất hiện ở cùng vị trí.)
+# CÁCH LÀM (BẮT BUỘC THEO 2 BƯỚC):
 
-# NÊN TRÍCH (medical mentions)
-- Tên thuốc: "aspirin 325mg x 1", "metoprolol 25mg po bid", "doxycycline"
-- Tên bệnh/chẩn đoán/bất thường & từ viết tắt y khoa: "tăng huyết áp", "THA", "đái tháo đường", "ĐTĐ", "ĐTĐ tuýp 2", "nhồi máu cơ tim vùng dưới cũ", "NMCT", "RLLL", "COPD", "CKD", "BTMV", "TBMMN", "ngoại tâm thu nhĩ", "ST chênh lên"
-- Triệu chứng: "đau ngực", "khó thở", "khó thở nhẹ", "cảm giác đánh trống ngực", "mệt mỏi nhiều khi gắng sức", "thắt chặt ngực vùng trước tim"
-- Tên xét nghiệm & thăm dò: "điện tâm đồ", "ECG", "x-quang ngực", "siêu âm tim qua thành ngực", "phân tích nước tiểu", "monitor holter"
-- Kết quả xét nghiệm/sinh hiệu: "bình thường", "không ghi nhận gì bất thường", "nhịp xoang chiếm ưu thế", "160/90 mmHg", "VS98.3 12987 56 18 99RA"
+## BƯỚC 1 — SCRATCHPAD (reasoning NGẮN GỌN):
+Trước khi output JSON, viết reasoning theo format:
+```
+SECTION 1 (Tiền sử): tôi tìm thấy X entities: [...]
+SECTION 2 (Hiện tại): Y entities: [...]
+SECTION 3 (Đánh giá): Z entities: [...]
+TỔNG: X+Y+Z = N entities
+```
+- Mỗi entity phải có text + position
+- Đếm CHÍNH XÁC số occurrences của duplicate (vd "ngất xỉu" 4 lần → 4 entities)
+- Nếu TỔNG < 30 và bệnh án chi tiết (>2000 chars), QUAY LẠI BƯỚC 1 để scan tiếp
 
-# KHÔNG ĐƯỢC TRÍCH (false positives / noise)
-- Câu chuyện cá nhân / giao tiếp: "Tỉnh dậy thấy cháu gái hét lên", "cô ấy sẽ được phục vụ tốt hơn", "bệnh nhân đã đến khám"
-- Hành vi / đánh giá chung: "theo đó", "sau đó", "kết quả cho thấy", "quyết định rằng", "nhận thấy", "chúng tôi sẽ"
-- Từ chung chung mờ nhạt 1 từ: "bệnh", "đau", "mệt" (trừ khi là triệu chứng rõ ràng trong khám lâm sàng)
-- Đoạn văn kể chuyện dài > 40-60 ký tự không chứa thông tin định lượng thuốc hay chỉ số
-
-# QUY TẮC BOUNDARY CỐT LÕI
-- Giữ chính xác text trong input, không thêm/bớt từ hoặc tự viết lại.
-- BẮT BUỘC TRÍCH XUẤT TỪ VIẾT TẮT Y KHOA: Hồ sơ bệnh án Việt Nam viết tắt rất nhiều. Bạn BẮT BUỘC phải trích xuất đầy đủ tất cả các từ viết tắt bệnh lý/xét nghiệm (`THA`, `ĐTĐ` / `ĐTĐ tuýp 2`, `NMCT`, `RLLL`, `COPD`, `CKD`, `BTMV`, `TBMMN`, `ECG`...) như những thực thể y khoa độc lập!
-- KHÔNG gộp chỉ định vào chẩn đoán: "nhồi máu cơ tim vùng dưới cũ (điện tâm đồ (ecg))" → TÁCH thành các mentions riêng biệt: "nhồi máu cơ tim vùng dưới cũ", "điện tâm đồ", "ecg".
-- Nếu một cụm từ xuất hiện lặp lại ở nhiều vị trí khác nhau trong văn bản → BẮT BUỘC trích xuất tất cả các lần xuất hiện với các position khác nhau.
-- Khi gặp câu phủ định liệt kê nhiều triệu chứng ngăn cách bởi dấu phẩy/từ nối (ví dụ: "Không buồn nôn, hay nôn, đổ mồ hôi") → BẮT BUỘC trích xuất TẤT CẢ các từ triệu chứng riêng biệt ("buồn nôn", "nôn", "đổ mồ hôi"). KHÔNG ĐƯỢC chỉ lấy từ cuối cùng.
-- Khi gặp tên thiết bị/thăm dò đứng ở đầu câu dẫn vào kết quả (ví dụ: "monitor holter cho thấy...", "siêu âm bụng ghi nhận...") → BẮT BUỘC trích xuất riêng tên thiết bị/thăm dò đó ("monitor holter", "siêu âm bụng") trước khi trích xuất kết quả phía sau.
-
-# OUTPUT FORMAT
+## BƯỚC 2 — JSON OUTPUT (sau scratchpad):
+```json
 [
-  {"text": "<exact text from input>", "position": [start, end)},
+  {"text": "...", "position": [start, end)},
   ...
 ]
+```
+- `position` là `[start, end)` Python convention: end EXCLUSIVE (vd text "HA" ở pos [6,8] → input[6:8]="HA")
+- CHỈ trả về 2 fields: `text` + `position`. KHÔNG cần `type`/`assertions` (Stage 2 sẽ classify).
 
-QUAN TRỌNG: position tính theo CHARACTER index trong input gốc (0-indexed).
+# 7 QUY TẮC VÀNG (ĐÃ VERIFY CHO ~50 BỆNH ÁN VN):
+
+1. **MỖI OCCURRENCE = 1 ENTITY RIÊNG (R10 STRICT - QUAN TRỌNG NHẤT)**: Nếu cùng bệnh/triệu chứng (`hội chứng não gan`, `viêm phổi`, `ngất xỉu`) xuất hiện N lần trong input → trích đủ N entities ở N vị trí KHÁC NHAU. TUYỆT ĐỐI KHÔNG gộp.
+   - VD: Bệnh án ghi 4 lần "hội chứng não gan" ở 4 vị trí khác nhau → 4 CHẨN_ĐOÁN riêng biệt, mỗi cái có position riêng.
+   - Lý do: Ground truth có N entities riêng. LLM hay quên vì chỉ trả 1 cặp position đầu tiên → MISS recall.
+
+2. **CHỈ LÕI NGẮN GỌN (TRIỆU_CHỨNG)**:
+   - "mệt mỏi nhiều khi gắng sức trong tuần qua" → `"mệt mỏi"` (bỏ leading verbs, bỏ trailing time/freq).
+   - "đau ngực: vị trí sau xương ức, lan ra tay trái, kéo dài 5 phút" → `"đau ngực"` (drop sub-detail).
+   - Bỏ leading: `cảm thấy`, `có`, `bị`, `xuất hiện`, `bệnh nhân thấy`, `tỉnh dậy thấy`, `còn`.
+   - Bỏ trailing: `trong tuần qua`, `kéo dài 20 giây`, `khi leo cầu thang`, `nhiều khi gắng sức`.
+
+3. **GIỮ NGUYÊN COMPOUND DISEASE** (KHÔNG BAO GIỜ tách):
+   - `ung thư phổi` (KHÔNG tách `ung thư` + `phổi`)
+   - `viêm phổi`, `viêm gan`, `viêm thận`, `viêm dạ dày`, `viêm phế quản`, `viêm khớp`, `viêm ruột thừa`, `viêm cơ tim`, `viêm màng não`
+   - `suy tim`, `suy thận`, `suy gan`, `suy hô hấp`, `suy tuyến giáp`
+   - `thoái hóa khớp`, `thoái hóa cột sống`
+   - `rối loạn lipid máu`, `rối loạn nhịp tim`
+   - `ung thư vú`, `ung thư gan`, `ung thư dạ dày` (tất cả compound organ + disease)
+
+4. **VERB NGOÀI TÊN TEST**: Bỏ verb ở đầu tên test → giữ lại phần danh từ:
+   - `chụp X-quang ngực` → `"X-quang ngực"`
+   - `đo điện tâm đồ` → `"điện tâm đồ"`
+   - `làm công thức máu` → `"công thức máu"`
+   - **GIỮ NGUYÊN** (ngoại lệ): `siêu âm`, `nội soi`, `monitor holter`, `điện tâm đồ`, `chụp X-quang`, `chụp cắt lớp` — đây là compound names có verb là 1 phần tên.
+
+5. **DRUG FORMAT — GIỮ NGUYÊN**:
+   - `aspirin 325mg x 1`, `metoprolol 25mg po bid`, `paracetamol 500mg prn` → giữ nguyên
+   - Ngoặc đơn `(uống trước ăn)` admin → DROP. `(HCl)`, `(5mg/ml)` clinical → KEEP.
+   - Dose-change parenthetical `(reduced from 50mg to 25mg daily)` → KEEP nguyên (KHÔNG tách thành nhiều entities).
+
+6. **NOISE REJECTION (BẮT BUỘC BỎ)**:
+   - Thời lượng/mốc thời gian: `trong tuần qua`, `cách đây 3 ngày`, `20 giây`, `30 phút`, `kéo dài 5 phút`
+   - Lối sống: `rượu bia`, `thuốc lá`, `cà phê`, `ăn uống bình thường`
+   - Câu chuyện cá nhân: `Tỉnh dậy thấy cháu gái hét lên`, `Quyết định rằng cô ấy sẽ được phục vụ`
+   - Nhãn header: `Tiền sử:`, `Chẩn đoán:`, `Khám:`
+
+7. **VIẾT TẮT Y KHOA** (BẮT BUỘC trích xuất đầy đủ):
+   - `THA`, `ĐTĐ`, `ĐTĐ tuýp 2`, `NMCT`, `NMCT cũ`, `RLLL`, `COPD`, `CKD`, `BTMV`, `TBMMN`, `ECG`, `EKG`, `EEG`, `EMG`, `MRI`, `CT`, `X-quang`
+   - Nếu viết tắt + bệnh kèm theo: `NMCT cũ`, `COPD giai đoạn cuối` → giữ nguyên 1 entity.
+
+# VERIFICATION CHECKLIST (đánh dấu X trước khi output JSON):
+□ Tiền sử: có drugs + CHẨN_ĐOÁN + isHistorical (nếu có)?
+□ Triệu chứng cơ năng: đau ngực / khó thở / ho / sốt / nôn / chóng mặt / ...?
+□ Khám lâm sàng: tim to / phù / ran / thổi bệnh lý / gan to?
+□ Cận lâm sàng: ECG/Siêu âm/CT/X-quang/MRI + findings (CHẨN_ĐOÁN hoặc KQ_XN)?
+□ Điều trị: drugs mới kê (THUỐC) + procedures (TÊN_XN)?
+□ Duplicate occurrences: đếm ĐỦ số lần xuất hiện trong input (đặc biệt cho "ngất xỉu", "đau ngực", "khó thở", "hội chứng não gan")?
+□ TỔNG entities ≥ 30 (nếu bệnh án chi tiết >2000 chars)?
+
+# OUTPUT EXAMPLE (sau BƯỚC 1 scratchpad):
+```
+SECTION 1 (Tiền sử): 2 entities: ["tăng huyết áp", "đái tháo đường"]
+SECTION 2 (Hiện tại): 5 entities: ["đau ngực", "khó thở", "đau ngực", "đau ngực", "đánh trống ngực"]
+SECTION 3 (Đánh giá): 4 entities: ["điện tâm đồ", "ngoại tâm thu nhĩ", "metoprolol 25mg po bid", "aspirin 325mg x 1"]
+TỔNG: 11 entities
+```
+[
+  {"text": "tăng huyết áp", "position": [52, 65]},
+  {"text": "đái tháo đường", "position": [85, 99]},
+  {"text": "đau ngực", "position": [120, 128]},
+  {"text": "khó thở", "position": [140, 147]},
+  {"text": "đau ngực", "position": [180, 188]},
+  {"text": "đau ngực", "position": [220, 228]},
+  {"text": "đánh trống ngực", "position": [250, 265]},
+  {"text": "điện tâm đồ", "position": [300, 311]},
+  {"text": "ngoại tâm thu nhĩ", "position": [320, 336]},
+  {"text": "metoprolol 25mg po bid", "position": [400, 422]},
+  {"text": "aspirin 325mg x 1", "position": [440, 458]}
+]
 """
 
 STAGE2_PROMPT = """Bạn là chuyên gia phân loại thực thể y tế tiếng Việt lâm sàng.
