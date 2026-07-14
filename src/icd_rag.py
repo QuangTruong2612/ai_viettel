@@ -2569,7 +2569,15 @@ class ICD10VectorSearch:
                                 target_device = "cpu"
                         except Exception:
                             pass
-                    self._model = SentenceTransformer("BAAI/bge-m3", device=target_device)
+                    # R43 (2026-07-14): Support local model path via env var để tránh
+                    # download chậm từ HF khi chạy trên Kaggle (cache không persistent).
+                    import os
+                    model_path = os.environ.get("BGE_M3_PATH", "BAAI/bge-m3")
+                    if os.path.isdir(model_path):
+                        logger.info("ICD10VectorSearch: Loading BGE-M3 từ LOCAL path: %s", model_path)
+                    else:
+                        logger.info("ICD10VectorSearch: Loading BGE-M3 từ HuggingFace: %s (sẽ download ~2.3GB)", model_path)
+                    self._model = SentenceTransformer(model_path, device=target_device)
                     self._device = target_device
                     logger.info("ICD10VectorSearch: Đã tải mô hình BGE-M3 trên device=%s.", target_device)
                 except ImportError:

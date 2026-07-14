@@ -1224,7 +1224,15 @@ class RxNormVectorSearch:
         if self._model is None:
             try:
                 from sentence_transformers import SentenceTransformer  # type: ignore
-                self._model = SentenceTransformer("BAAI/bge-m3")
+                # R43 (2026-07-14): Support local model path via env var để tránh
+                # download chậm từ HF khi chạy trên Kaggle (cache không persistent).
+                import os
+                model_path = os.environ.get("BGE_M3_PATH", "BAAI/bge-m3")
+                if os.path.isdir(model_path):
+                    logger.info("RxNormVectorSearch: Loading BGE-M3 từ LOCAL path: %s", model_path)
+                else:
+                    logger.info("RxNormVectorSearch: Loading BGE-M3 từ HuggingFace: %s (sẽ download ~2.3GB)", model_path)
+                self._model = SentenceTransformer(model_path)
                 logger.info("RxNormVectorSearch: loaded BGE-M3")
             except ImportError:
                 logger.error("Sentence-transformers chưa cài!")
@@ -1270,7 +1278,10 @@ class RxNormVectorSearch:
         if self._model is None:
             try:
                 from sentence_transformers import SentenceTransformer  # type: ignore
-                self._model = SentenceTransformer("BAAI/bge-m3")
+                # R43 (2026-07-14): Support local model path via env var (consistent với search()).
+                import os
+                model_path = os.environ.get("BGE_M3_PATH", "BAAI/bge-m3")
+                self._model = SentenceTransformer(model_path)
             except ImportError:
                 return {}
         q_vec = self._model.encode(query, normalize_embeddings=True, convert_to_numpy=True)
