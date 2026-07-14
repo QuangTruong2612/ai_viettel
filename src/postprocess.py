@@ -24,7 +24,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from src.icd_rag import ICDRetriever, _is_generic_drug_class
+from src.icd_rag import ICDRetriever, _is_generic_drug_class, _strip_drug_class_prefix
 from src.rxnorm_rag import RxNormRetriever, _DRUG_INN_WHITELIST as _RXNORM_INN_CACHE
 
 # Đảm bảo có thể chạy trực tiếp `python src/postprocess.py`
@@ -948,8 +948,17 @@ def dedupe_entities(entities: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 # Drug text sanitization (R4 + R18)
 # ---------------------------------------------------------------------- #
 
+# R34 (2026-07-13): Add lab chemical / non-drug noise patterns để DROP trước lookup.
+# LLM hay extract các tokens này như THUỐC nhưng thực chất là lab values, electrolytes.
+# Pattern match với optional suffix (số, đơn vị, unit word): "lactate 1.8", "creatinine 1.5 mg/dL".
 _DRUG_NAME_BAD_PATTERNS = re.compile(
-    r"^(thuốc|drug|medication|thuoc)\s*$", re.IGNORECASE
+    r"^("
+    r"thuốc|drug|medication|thuoc"
+    r"|creatinine|lactate|bicarbonate|chloride|hemoglobin|bilirubin"
+    r"|sodium|potassium|calcium|glucose|magnesium|urea|albumin"
+    r"|protein|cholesterol|triglyceride|hdl|ldl"
+    r")(\s+\d+[\d.,/]*\s*\w*|\s+\w+)*\s*$",
+    re.IGNORECASE
 )
 
 
@@ -1077,14 +1086,11 @@ def _detect_assertions_from_context(
     section_id = _find_current_section(input_text, pos)
     is_in_tien_su = (section_id == "tien_su")
 
-    # isHistorical: Áp dụng nếu entity trong section "Tiền sử" hoặc câu lân cận có từ khóa tiền sử/quá khứ rõ ràng
-    near_hist_raw = text_lower[max(0, pos - 100):min(len(text_lower), pos + len(entity_text) + 60)]
-    hist_triggers = (
-        "tiền sử", "cách đây", "từng bị", "từng điều trị", "đã từng", "bệnh cũ", "nhồi máu cũ",
-        "năm trước", "tháng trước", "tuần trước", "tại nhà", "trước nhập viện", "đang điều trị trước",
-        "tiền căn", "bệnh sử cũ", "thuốc đang dùng trước", "thuốc trước đây"
-    )
-    if is_in_tien_su or any(re.search(r'\b' + re.escape(h) + r'\b', near_hist_raw, re.UNICODE) for h in hist_triggers):
+    # R34 FIX (2026-07-13): Chỉ dùng `_find_current_section` cho isHistorical.
+    # Trước đây dùng 100-char window quanh entity → match "Tiền sử bệnh" header
+    # ở section KHÁC, gây false isHistorical cho entities current.
+    # Bây giờ: isHistorical chỉ khi section header HIỆN TẠI là "Tiền sử".
+    if is_in_tien_su:
         found.append("isHistorical")
 
     # isFamily: sử dụng re.UNICODE và patterns đầy đủ cho tiếng Việt
@@ -1616,6 +1622,17 @@ _PURE_DURATION_ENHANCED_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+# R35 (2026-07-14): Body part đơn lẻ KHÔNG phải TRIỆU_CHỨNG (vd "ngực", "bụng", "đầu").
+# LLM hay extract these → safety net DROP trong _clean_entity_text.
+_BODY_PARTS_ALONE: frozenset[str] = frozenset({
+    "ngực", "bụng", "đầu", "lưng", "chân", "tay", "chân tay", "tay chân",
+    "bụng trên", "bụng dưới", "ngực trái", "ngực phải",
+    "cổ", "lưng trên", "lưng dưới", "đầu trước", "đầu sau",
+    "mặt", "mắt", "tai", "mũi", "miệng", "họng",
+    "ngón tay", "ngón chân", "khuỷu tay", "đầu gối", "cổ tay", "mắt cá",
+    "bẹn", "nách", "mông", "lưng giữa",
+})
+
 
 def _clean_entity_text(text: str, etype: str) -> str | None:
     """Post-fix entity text LLM hay miss (R27.7 mới 2026-07-10).
@@ -1626,24 +1643,25 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
     2. Verb prefix trong TÊN_XÉT_NGHIỆM strip ("chụp", "phân tích", "đo", ...)
     3. Parens admin trong THUỐC strip ("(uống trước ăn)" → DROP)
     4. Pure duration DROP (return None → caller drop entity)
+    5. R35 (2026-07-14): Drop TRIỆU_CHỨNG chỉ là body part đơn lẻ (vd "ngực", "bụng")
 
     Args:
         text: entity text gốc từ LLM.
         etype: entity type (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, ...).
 
     Returns:
-        Cleaned text. None nếu entity nên bị DROP (vd pure duration, noise).
+        Cleaned text. None nếu entity nên bị DROP (vd pure duration, noise, body-part-alone).
     """
     if not text:
         return text
     original = text
     text_lower = text.strip().lower()
 
-    # === BƯỚC 1: DROP noise patterns (return None để caller drop) ===
-    for pattern in _DROP_NOISE_PATTERNS:
-        if pattern.match(text_lower):
-            logger.debug("Clean: drop noise entity '%s'", original)
-            return None
+    # === BƯỚC 0: R35 (2026-07-14) — DROP TRIỆU_CHỨNG chỉ là body part đơn lẻ ===
+    # Safety net cho LLM ignore prompt rule. Body part alone ("ngực", "bụng") không phải symptom.
+    if etype == "TRIỆU_CHỨNG" and text_lower in _BODY_PARTS_ALONE:
+        logger.debug("Clean: drop body-part-alone symptom '%s'", original)
+        return None
 
     # === BƯỚC 2: Pure duration → DROP (R28.2) ===
     if etype in ("TRIỆU_CHỨNG", "CHẨN_ĐOÁN"):
@@ -1756,7 +1774,19 @@ _ABNORMAL_FINDING_TO_CHAN_DOAN = re.compile(
     r"mất vận động vùng đỉnh|rối loạn vận động vùng đỉnh|"
     r"giãn \w+ buồng tim|"
     r"u ác tính|khối u ác tính|khối u \w+|"
-    r"viêm \w+ (nặng|cấp|mạn))$",
+    r"viêm \w+ (nặng|cấp|mạn)|"
+    # R36 (2026-07-14): Disease named "viêm X" pattern → CHẨN_ĐOÁN (not TRIỆU_CHỨNG).
+    # "viêm" = inflammation = diagnosis name, không phải symptom patient kể.
+    r"viêm\s+(?:tuyến\s+mồ\s+hôi|phổi|gan|thận|dạ\s+dày|ruột|tụy|"
+    r"túi\s+mật|bàng\s+quang|phế\s+quản|thanh\s+quản|"
+    r"khớp|cơ|tim|màng\s+ngoài\s+tim|màng\s+tim|cơ\s+tim|"
+    r"não|màng\s+não|xương|tủy(?:\s+xương)?|"
+    r"bàng quang|họng|amidan|"
+    r"xoang|phổi\s+kẽ|bụng|não\s+tủy|đại\s+tràng|"
+    r"dây\s+thần\s+kinh|van\s+tim|tiết\s+niệu|"
+    r"ruột\s+non|ruột\s+thừa|thực\s+quản|hang\s+vị|"
+    r"trực\s+tràng|hậu\s+môn|tiền\s+liệt\s+tuyến|"
+    r"\w+))",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -2809,8 +2839,19 @@ def _attach_candidates(
             record["candidates"] = []
             return
     if etype == "THUỐC" and retriever is not None:
-        # R28 (2026-07-13): Generic drug-class term → SKIP lookup, return [].
-        if _is_generic_drug_class(text):
+        # R34 FIX (2026-07-13): Strip drug-class prefix nếu có drug attached
+        # (vd "Kháng sinh Cefepim" → "Cefepim"). Sau đó check class.
+        stripped_text = _strip_drug_class_prefix(text)
+        # Nếu strip trả None → pure class term (vd "kháng sinh") → skip
+        if stripped_text is None:
+            record["candidates"] = []
+            return
+        # Nếu stripped != original → có drug name attached → dùng stripped text
+        if stripped_text != text:
+            text = stripped_text
+        # Nếu stripped == original → có thể là pure drug name HOẶC pure class term.
+        # Check pure class term với INN guard (tránh "urea", "creatinine" trong whitelist).
+        elif _is_generic_drug_class(text):
             record["candidates"] = []
             return
         # R29 (2026-07-13 spec round 2): Non-treatment context (resistance, lab token)

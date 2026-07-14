@@ -114,10 +114,11 @@ def _is_uninformative_icd_code(code: str) -> bool:
 
 
 _GENERIC_DRUG_CLASS_PATTERNS: tuple[re.Pattern, ...] = (
-    re.compile(r"^thuốc\s+(chống|kháng|giảm|hạ|tăng|điều\s+trị|cầm|lợi|giúp|bổ|an\s+thần)\s+", re.IGNORECASE | re.UNICODE),
-    re.compile(r"^(kháng|chống)\s+(sinh|viêm|đông|nôn|histamin|histamine|đông\s+máu)", re.IGNORECASE | re.UNICODE),
-    re.compile(r"^(nhóm|loại|họ)\s+\w+$", re.IGNORECASE | re.UNICODE),
-    re.compile(r"^thuốc\s+\w+$", re.IGNORECASE | re.UNICODE),
+    # R34 FIX: simpler patterns match WHOLE class term (e.g., "Thuốc chống đông", "kháng sinh").
+    # Dùng `fullmatch` thay vì `match` để tránh partial match với drug attached.
+    re.compile(r"^thuốc\s+\w+(\s+\w+)*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^(kháng|chống)\s+\w+(\s+\w+)*$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^(nhóm|loại|họ)\s+\w+(\s+\w+)*$", re.IGNORECASE | re.UNICODE),
     re.compile(r"(toàn\s+thân)$", re.IGNORECASE | re.UNICODE),
     re.compile(r"^(thuốc|loại\s+thuốc|nhóm\s+thuốc)$", re.IGNORECASE | re.UNICODE),
 )
@@ -126,15 +127,80 @@ _GENERIC_DRUG_CLASS_PATTERNS: tuple[re.Pattern, ...] = (
 def _is_generic_drug_class(text: str) -> bool:
     """Detect generic drug-class terms (vd 'thuốc chống đông', 'kháng sinh').
 
-    Trả True nếu text match generic pattern — caller nên SKIP candidate lookup
-    hoặc chỉ trả về [] để tránh noise trong J_candidates scoring.
+    Trả True nếu text là pure class term (vd "kháng sinh", "Thuốc chống đông"),
+    KHÔNG phải drug name (vd "Kháng sinh Cefepim" → False, cần lookup Cefepim).
+
+    Logic:
+      - Strip drug-class prefix (kháng sinh, thuốc chống, ...).
+      - Nếu stripped empty / same → check direct fullmatch.
+      - Nếu stripped có drug name (token ∈ INN whitelist) → False (lookup drug).
+      - Còn lại → True (class term).
+    R34: Thêm `_DRUG_CLASS_ROUTE_PATTERNS` để match "kháng sinh tĩnh mạch" (class + route).
     """
     if not text:
         return False
     tl = text.lower().strip()
     if not tl or len(tl) > 60:
         return False
-    return any(p.match(tl) for p in _GENERIC_DRUG_CLASS_PATTERNS)
+
+    # R34: Class + route (vd "kháng sinh tĩnh mạch") → class term, skip
+    if _DRUG_CLASS_ROUTE_PATTERNS.fullmatch(tl):
+        return True
+
+    stripped = _strip_drug_class_prefix(text)
+    if stripped is None or stripped == text:
+        # Pure class term hoặc không có class prefix → check direct fullmatch
+        return any(p.fullmatch(tl) for p in _GENERIC_DRUG_CLASS_PATTERNS)
+
+    # Stripped result exists. Check if first token is a real drug (INN whitelist).
+    stripped_lower = stripped.lower().strip()
+    stripped_tokens = stripped_lower.split()
+    if stripped_tokens:
+        first_token = stripped_tokens[0]
+        # Import lazily (avoid circular at module load)
+        from src.rxnorm_rag import _DRUG_INN_WHITELIST
+        if first_token in _DRUG_INN_WHITELIST:
+            return False  # drug name attached → lookup drug
+    return True  # no drug name → still class term
+
+
+# R34 (2026-07-13): Strip drug-class prefix để lookup drug part
+# (vd "Kháng sinh Cefepim" → "Cefepim", "Thuốc chống đông X" → "X")
+_DRUG_CLASS_PREFIX_RE = re.compile(
+    r"^(?:thuốc\s+\w+(\s+\w+)*\s+"
+    r"|(?:kháng|chống)\s+\w+(\s+\w+)*\s+"
+    r"|(?:nhóm|loại|họ)\s+\w+(\s+\w+)*\s+"
+    r"|(?:thuốc|loại\s+thuốc|nhóm\s+thuốc)\s+)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# R34 (2026-07-13): Additional patterns để detect drug-class + route concatenation
+# (vd "kháng sinh tĩnh mạch", "thuốc an thần đường uống"). Skip luôn — không có drug cụ thể.
+_DRUG_CLASS_ROUTE_PATTERNS = re.compile(
+    r"^(?:kháng\s+sinh|chống\s+viêm|thuốc\s+(?:chống|kháng|giảm|hạ|tăng|lợi|cầm|an\s+thần|bổ|giúp)|"
+    r"nhóm\s+thuốc)\s+(?:tĩnh\s+mạch|uống|tiêm|truyền|tiêm\s+tĩnh\s+mạch|"
+    r"tiêm\s+bắp|tiêm\s+dưới\s+da|uống\s+sau\s+ăn|uống\s+trước\s+ăn|"
+    r"đường\s+uống|đường\s+tiêm|đường\s+tĩnh\s+mạch|trước\s+ăn|sau\s+ăn|khi\s+đau)"
+    r"(\s+\w+)*\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _strip_drug_class_prefix(text: str) -> str | None:
+    """R34 FIX: Strip drug-class prefix để lookup drug part.
+
+    Returns:
+        - None nếu text là pure class term (vd "kháng sinh", "thuốc chống đông")
+        - Stripped drug name nếu có drug attached (vd "Kháng sinh Cefepim" → "Cefepim")
+        - Original text nếu không match class pattern
+    """
+    if not text:
+        return text
+    stripped = _DRUG_CLASS_PREFIX_RE.sub("", text, count=1).strip()
+    if not stripped:
+        # Pure class term — caller SKIP lookup
+        return None
+    return stripped
 
 
 def _load_generic_stoplist() -> tuple[tuple[re.Pattern, ...], ...]:
@@ -182,6 +248,21 @@ def _has_resistance_context_icd(text: str) -> bool:
     return False
 
 
+# R34 (2026-07-13): Resistance suffix stripping — strip "kháng thuốc" / "kháng sinh"
+# khỏi diagnosis text để lookup core diagnosis (vd "Nhiễm trùng đường tiết niệu kháng thuốc" → N39.0).
+_RESISTANCE_SUFFIX_RE = re.compile(
+    r"\s*kháng\s+(?:thuốc|sinh|kháng\s+sinh)\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _strip_resistance_suffix(text: str) -> str:
+    """R34: Strip trailing resistance context → lookup core diagnosis."""
+    if not text:
+        return text
+    return _RESISTANCE_SUFFIX_RE.sub("", text).strip()
+
+
 def _looks_like_noise_tokens(text: str) -> bool:
     """Detect nonsense tokens (vd 'asdfgh', 'xyz test') — không phải clinical term.
 
@@ -223,6 +304,49 @@ def _looks_like_noise_tokens(text: str) -> bool:
 
 
 _KNOWN_VN_ABBR_LOOKUP: set[str] = set()
+
+
+def _load_vn_medical_abbreviations(target_dict: dict[str, list[str]]) -> int:
+    """R35 (2026-07-14): Load VN medical abbreviations → ICD-10 codes.
+
+    File: data/icd_abbreviations.json
+    Format: {"sp tlh": ["N85.8"], "btmv": ["I25"], ...}
+    Empty list → admin/note (skip lookup), non-empty → lookup ICD codes.
+
+    Returns:
+        Number of abbreviations added.
+    """
+    path = DATA_DIR / "icd_abbreviations.json"
+    if not path.exists():
+        logger.debug("[R35] %s chưa tồn tại", path.name)
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            logger.warning("[R35] %s phải là dict, got %s", path.name, type(data).__name__)
+            return 0
+        n_added = 0
+        for key, codes in data.items():
+            if not isinstance(key, str) or not isinstance(codes, list):
+                continue
+            ak = key.lower().strip()
+            if not ak:
+                continue
+            existing = target_dict.get(ak, [])
+            for c in codes:
+                if c not in existing:
+                    existing.append(c)
+            if existing:
+                target_dict[ak] = existing
+                n_added += 1
+            # R35: Also add to _KNOWN_VN_ABBR_LOOKUP so noise filter doesn't reject them
+            _KNOWN_VN_ABBR_LOOKUP.add(ak)
+        logger.info("[R35] Merged %d VN medical abbreviations (%d unique keys)",
+                    n_added, len(data))
+        return n_added
+    except Exception as exc:
+        logger.warning("[R35] Failed to load %s: %s", path, exc)
+        return 0
 
 
 def _init_known_abbrs() -> None:
@@ -1001,6 +1125,11 @@ class ICDRetriever:
         """Tra ICD-10 cho 1 cụm chẩn đoán tiếng Việt (có tự động tách chẩn đoán kép)."""
         if not vn_text:
             return []
+        # R34: Strip resistance suffix trước (vd "...kháng thuốc" → core diagnosis).
+        # Chỉ strip khi suffix ở CUỐI text (R34: surgical precision).
+        stripped_vn_text = _strip_resistance_suffix(vn_text)
+        if stripped_vn_text != vn_text:
+            vn_text = stripped_vn_text
         # R34: L_filter_context — reject resistance mentions + drug-class blacklisted terms
         if _has_resistance_context_icd(vn_text):
             logger.debug("R34: resistance context rejected: '%s'", vn_text)
@@ -1993,6 +2122,9 @@ class ICDRetriever:
         }
         # R34: MERGE auto-mined aliases từ data/icd_aliases.json (build_mining_index.py).
         _load_mined_icd_aliases(self._icd_vn_to_codes)
+
+        # R35 (2026-07-14): MERGE VN medical abbreviations từ data/icd_abbreviations.json
+        _load_vn_medical_abbreviations(self._icd_vn_to_codes)
 
         # R34 (2026-07-13): Fix duplicate keys in dict literal (Python dict literal
         # OVERWRITES earlier entries on duplicate keys → some codes get lost).
