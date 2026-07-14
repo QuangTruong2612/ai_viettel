@@ -108,6 +108,52 @@ class LLMClient:
     # Public API
     # ------------------------------------------------------------------ #
 
+    def call_sync(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int = 50,
+        temperature: float = 0.1,
+        system_prompt: str | None = None,
+    ) -> str:
+        """Synchronous LLM call - returns raw content string.
+
+        Dùng cho RAG fallback (ICD code lookup, RxNorm code lookup) khi
+        vector + BM25 không đủ confidence. Caller tự parse response.
+
+        Args:
+            prompt: user prompt (text).
+            max_tokens: max output tokens (default 50 - RAG fallback ngắn).
+            temperature: sampling temperature (default 0.1).
+            system_prompt: optional system prompt override (mặc định dùng config).
+
+        Returns:
+            str: raw LLM response content (chưa parse JSON).
+
+        Raises:
+            RuntimeError: nếu openai client không available (Kaggle no LM Studio).
+        """
+        if self._client is None:
+            raise RuntimeError(
+                "LLMClient chưa kết nối được đến LM Studio/Ollama. "
+                "Trên Kaggle cần setup LM Studio hoặc dùng HuggingFace Inference API."
+            )
+
+        # Default system prompt: rỗng (RAG fallback dùng prompt có sẵn)
+        msgs: list[dict] = []
+        if system_prompt:
+            msgs.append({"role": "system", "content": system_prompt})
+        msgs.append({"role": "user", "content": prompt})
+
+        resp = self._client.chat.completions.create(
+            model=self.config.model,
+            messages=msgs,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=self.config.timeout,
+        )
+        return (resp.choices[0].message.content or "").strip()
+
     @staticmethod
     def _extract_json(content: str) -> Any:
         """Trích JSON ra khỏi content LLM.
