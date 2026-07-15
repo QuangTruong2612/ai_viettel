@@ -45,13 +45,14 @@ class LLMConfig:
     keep_alive: str = "0"
 
     # Ollama-specific: num_ctx override PER-REQUEST (qua extra_body).
-    # Default 16384 cho qwen3.5:9b trên Kaggle (qwen3.5 supports 32k context).
-    # - qwen2.5:7b FP16 (~5GB) → 16384 OK với 16GB VRAM
-    # - qwen3.5:9b FP16 (~5.5GB) → 16384 vừa đủ (12GB free cho KV+embeddings)
-    # - Quantized Q4_K_M (~3GB) → 16384 comfortable + còn headroom
-    # - 32768 chỉ work với quantized + GPU offload
+    # R37 (2026-07-15): Default 32768 cho prompt mở rộng (~17K tokens) +
+    # few-shot dynamic cap (~5K) + user input (~3K) + output (~3K) ≈ 28K.
+    # - qwen2.5:7b FP16 (~5GB) → 32768 OK với 16GB+ VRAM
+    # - qwen3.5:9b FP16 (~5.5GB) → 32768 vừa đủ (12GB free cho KV+embeddings)
+    # - Quantized Q4_K_M (~3GB) → 32768 comfortable
+    # 65536 chỉ work với quantized + GPU offload. Set 16384 nếu OOM.
     # Override qua env OLLAMA_NUM_CTX hoặc --target-ctx.
-    num_ctx: int = 16384
+    num_ctx: int = 32768
 
     # Ollama-specific: num_gpu layers. -1 = all (default).
     # Giảm nếu OOM (vd num_gpu=20 → 20 layer trên GPU, phần còn trên CPU/RAM).
