@@ -222,10 +222,14 @@ def _call_with_retry(
                 # - num_ctx: override Ollama context length PER-REQUEST. Default 8192 để
                 #   tránh overflow khi user chưa bump Modelfile num_ctx.
                 # - num_gpu: số layer GPU (default -1 = all). Giảm nếu OOM.
+                # - think: TẮT Qwen3 thinking mode (chỉ apply cho Qwen3+; Qwen2.5 ignore tham số này).
+                #   Thiếu dòng này khiến model sinh block suy luận dài trước JSON,
+                #   ăn vào max_tokens budget và làm chậm inference đáng kể.
                 extra_body={
                     "keep_alive": getattr(llm.config, "keep_alive", "0"),
                     "num_ctx": getattr(llm.config, "num_ctx", 8192),
                     "num_gpu": getattr(llm.config, "num_gpu", -1),
+                    "think": False,
                 },
             )
             content = resp.choices[0].message.content or ""

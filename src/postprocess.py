@@ -2173,6 +2173,17 @@ _DROP_NOISE_PATTERNS = [
     re.compile(r"^hôm\s+nay$", re.IGNORECASE | re.UNICODE),
     re.compile(r"^trong\s+(?:ngày|tuần\s+qua|tuần|tháng|năm)$", re.IGNORECASE | re.UNICODE),
     re.compile(r"^(?:uống|dùng)\s+(?:trước|sau|khi|trong)\s+.*$", re.IGNORECASE | re.UNICODE),
+    # R-fix (2026-07-15): Drop nhóm thuốc chung chung (vd "kháng sinh", "kháng sinh tĩnh mạch",
+    # "chống đông máu", "thuốc hạ sốt") — prompts.py yêu cầu DROP nhưng trước đây chưa có pattern.
+    # Generic class không map được sang RxNorm candidate cụ thể → gây noise "THUỐC không có candidates".
+    re.compile(
+        r"^(?:kháng\s+sinh|kháng\s+viêm|kháng\s+đông|chống\s+đông(?:\s+máu)?|"
+        r"thuốc\s+(?:chống|hạ|giảm)\s+\w+|"
+        r"thuốc\s+an\s+thần|thuốc\s+kháng\s+sinh|"
+        r"thuốc\s+(?:uống|tiêm|tĩnh\s+mạch|bắp))"
+        r"(?:\s+(?:tĩnh\s+mạch|uống|tiêm|tại\s+chỗ))?$",
+        re.IGNORECASE | re.UNICODE,
+    ),
 ]
 
 # Pure duration (R28.2) - standalone time expression should not be entity
@@ -2358,9 +2369,13 @@ _ABNORMAL_FINDING_TO_CHAN_DOAN = re.compile(
 # Procedures/surgeries → TÊN_XÉT_NGHIỆM (không phải THUỐC)
 # R28 (2026-07-13): CHUYỂN từ hardcoded regex → data-driven load từ data/procedure_patterns.json.
 # Cho phép mở rộng mà không cần sửa code.
+# Fix (2026-07-15): thêm wildcard `(?:\s+\w[\w\s]*)?` cho các cụm động từ VN có thể kèm
+# object phía sau (vd "phẫu thuật bắc cầu nối động mạch vành", "đặt stent ống tuỵ gần").
+# Trước đây regex chỉ match đúng nguyên văn → miss các cụm nhiều từ.
 _PROCEDURE_TO_TEN_XN = re.compile(
-    r"^(phẫu thuật|nội soi|chọc dò|đặt stent|đặt ống|"
-    r"thủ thuật|nội soi|can thiệp|cắt \w+|"
+    r"^(phẫu thuật(?:\s+\w[\w\s]*)?|nội soi(?:\s+\w[\w\s]*)?|chọc dò(?:\s+\w[\w\s]*)?|"
+    r"đặt stent(?:\s+\w[\w\s]*)?|đặt ống(?:\s+\w[\w\s]*)?|"
+    r"thủ thuật(?:\s+\w[\w\s]*)?|can thiệp(?:\s+\w[\w\s]*)?|cắt \w+|"
     r"xạ trị|hóa trị|"
     r"siêu âm|chụp \w+|"
     r"đo \w+|test \w+ \w+)$",

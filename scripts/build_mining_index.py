@@ -82,7 +82,10 @@ def mine_icd_aliases(icd_jsonl: Path) -> dict[str, list[str]]:
         return out
     t0 = time.time()
     n_codes = 0
-    n_aliases = 0
+    n_aliases_raw = 0
+
+    # Pass 1: mine thô (giữ nguyên logic cũ)
+    raw: dict[str, list[str]] = {}
     with icd_jsonl.open("r", encoding="utf-8") as f:
         for line in f:
             try:
@@ -94,12 +97,58 @@ def mine_icd_aliases(icd_jsonl: Path) -> dict[str, list[str]]:
             if not code or not desc_vi:
                 continue
             aliases = _mine_vi_aliases(desc_vi)
-            out[code] = aliases
+            raw[code] = aliases
             n_codes += 1
-            n_aliases += len(aliases)
+            n_aliases_raw += len(aliases)
+
+    # Pass 2: TỰ LỌC COLLISION — loại bỏ alias bị dùng chung bởi >=2 mã KHÔNG liên quan.
+    # Lý do: alias thật (đồng nghĩa đúng nghĩa) hầu như luôn gắn riêng với 1 mã (hoặc các
+    # subcode CÙNG gốc, vd J18/J18.0/J18.9). Nếu 1 cụm từ (mined từ ngoặc) xuất hiện dùng
+    # chung cho NHIỀU mã thuộc các chương/nhóm bệnh khác nhau (vd "mắc phải", "các", "lồng",
+    # "nguyên phát" — đã phát hiện thực tế dùng chung tới 34-59 mã không liên quan), đó gần
+    # như chắc chắn là qualifier/cross-reference chung chung, KHÔNG phải alias thật — cần bỏ
+    # để tránh 1 alias trả về hàng chục candidate vô nghĩa (đã verify bằng data thật, không
+    # phải giả thuyết).
+    #
+    # Ngoại lệ: nếu tất cả các mã dùng chung alias đó đều CÙNG "gốc" (3 ký tự đầu mã ICD, vd
+    # J18 và J18.9 đều bắt đầu "J18") → được coi là hợp lệ (subcode của cùng 1 bệnh), không bị lọc.
+    alias_to_codes: dict[str, set[str]] = defaultdict(set)
+    for code, aliases in raw.items():
+        for alias in aliases:
+            ak = alias.strip().lower()
+            if ak and ak != code.lower():  # bỏ qua chính desc_vi gốc (luôn giữ)
+                alias_to_codes[ak].add(code)
+
+    def _same_family(codes: set[str]) -> bool:
+        roots = {c.split(".")[0][:3] for c in codes}
+        return len(roots) <= 1
+
+    noisy_aliases = {
+        ak for ak, codes in alias_to_codes.items()
+        if len(codes) >= 2 and not _same_family(codes)
+    }
+    if noisy_aliases:
+        print(f"[ICD] Lọc bỏ {len(noisy_aliases)} alias bị dùng chung bởi nhiều mã "
+              f"không liên quan (nghi vấn qualifier/cross-ref gây nhiễu), vd: "
+              f"{sorted(noisy_aliases, key=lambda a: -len(alias_to_codes[a]))[:5]}")
+
+    n_aliases_kept = 0
+    for code, aliases in raw.items():
+        kept: list[str] = []
+        for i, a in enumerate(aliases):
+            if i == 0:
+                kept.append(a)  # desc_vi gốc — LUÔN giữ, không bao giờ bị lọc collision
+                continue
+            if a.strip().lower() not in noisy_aliases:
+                kept.append(a)
+        out[code] = kept
+        n_aliases_kept += len(kept)
+
     elapsed = time.time() - t0
-    print(f"[ICD] Mined {n_aliases} aliases từ {n_codes} codes ({elapsed:.1f}s)")
+    print(f"[ICD] Mined {n_aliases_raw} aliases thô → giữ {n_aliases_kept} sau lọc collision, "
+          f"từ {n_codes} codes ({elapsed:.1f}s)")
     return out
+
 
 
 # ════════════════════════════════════════════════════════════════════════════════
