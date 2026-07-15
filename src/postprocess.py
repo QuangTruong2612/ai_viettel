@@ -53,6 +53,86 @@ logger.info(
 )
 
 
+# ════════════════════════════════════════════════════════════════════════════════
+# R37 (2026-07-15): Drug BRAND names set — union keys của drug_aliases.json +
+# drug_brand_seed.json (sau khi loại bỏ các token không phải thuốc).
+# Dùng trong _retype_entity: nếu text trùng brand → force THUỐC.
+# ════════════════════════════════════════════════════════════════════════════════
+
+_BRAND_NAMES: set[str] = set()
+try:
+    _alias_path = _PROJECT_ROOT / "data" / "drug_aliases.json"
+    if _alias_path.exists():
+        _alias_obj = json.loads(_alias_path.read_text(encoding="utf-8"))
+        for k in _alias_obj.keys():
+            kl = str(k).lower().strip()
+            if kl and "?" not in kl:
+                _BRAND_NAMES.add(kl)
+except Exception as exc:
+    logger.warning("[R37] Failed to load drug_aliases.json for brands: %s", exc)
+
+try:
+    _brand_path = _PROJECT_ROOT / "data" / "drug_brand_seed.json"
+    if _brand_path.exists():
+        _brand_obj = json.loads(_brand_path.read_text(encoding="utf-8"))
+        for k in _brand_obj.keys():
+            kl = str(k).lower().strip()
+            # Loại bỏ những token rõ ràng không phải thuốc (BiPAP, BIPAP, kháng, ...)
+            if not kl or "?" in kl:
+                continue
+            if kl in {"bipap", "cpap", "kháng", "thuốc"}:
+                continue
+            _BRAND_NAMES.add(kl)
+except Exception as exc:
+    logger.warning("[R37] Failed to load drug_brand_seed.json: %s", exc)
+
+_DRUG_BRANDS: frozenset[str] = frozenset(_BRAND_NAMES)
+logger.info("[R37] drug_brands whitelist: %d entries", len(_DRUG_BRANDS))
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# R37 (2026-07-15): Test name ABBREVIATIONS (xét nghiệm viết tắt).
+# Khi LLM extract ast/alt/wbc/... thường gán KQ_XN (vì đi kèm số đo) → sai, phải là TÊN_XN.
+# Dùng trong _retype_entity: nếu text trùng abbreviation (case-insensitive,
+# standalone, không kèm số) → force TÊN_XÉT_NGHIỆM.
+# ════════════════════════════════════════════════════════════════════════════════
+
+_TEST_ABBREVIATIONS: frozenset[str] = frozenset({
+    # Liver panel
+    "ast", "alt", "ggt", "ldh", "alp", "bilirubin",
+    # CBC
+    "wbc", "rbc", "hgb", "hct", "plt", "mcv", "mch", "mchc", "rdw", "mpv",
+    # Chemistry
+    "na", "k", "cl", "mg", "ca", "phos", "glucose", "bun", "creatinine",
+    "uric acid", "uric",
+    # Lipid
+    "cholesterol", "triglyceride", "hdl", "ldl",
+    # Endocrine
+    "tsh", "t3", "t4", "ft4", "ft3", "hba1c",
+    # Inflammation markers
+    "crp", "esr", "procalcitonin",
+    # Cardiac
+    "psa", "troponin", "bnp", "ck", "ck-mb", "ckmb",
+    # Renal
+    "egfr", "protein", "albumin",
+    # Coag
+    "pt", "ptt", "inr", "aptt", "fibrinogen", "ddimer", "d-dimer",
+    # Misc
+    "lactate", "ammonia", "iron", "ferritin", "vitamin d", "b12",
+    "magnesium", "phosphate",
+})
+logger.info("[R37] test_abbreviations whitelist: %d entries", len(_TEST_ABBREVIATIONS))
+
+
+# R37 (2026-07-15): Standalone dose fragment regex — pure "<number><unit>" với
+# không có tên thuốc đi kèm. Match: "30 mg", "60 mg", "500mcg", "5 ml", ...
+# Dùng để DROP entity trong _clean_entity_text.
+_DOSE_FRAGMENT_RE = re.compile(
+    r"^\s*\d+(?:[.,]\d+)?\s*(mg|ml|g|mcg|iu|meq|µg|ug|ng|kg|mmol|mm|l)\s*$",
+    re.IGNORECASE,
+)
+
+
 # ---------------------------------------------------------------------- #
 # Input preprocessing — clean/truncate input trước khi gửi LLM
 # ---------------------------------------------------------------------- #
@@ -2220,6 +2300,10 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
     3. Parens admin trong THUỐC strip ("(uống trước ăn)" → DROP)
     4. Pure duration DROP (return None → caller drop entity)
     5. R35 (2026-07-14): Drop TRIỆU_CHỨNG chỉ là body part đơn lẻ (vd "ngực", "bụng")
+    6. R37 (2026-07-15): Drop standalone dose fragment ("30 mg", "60 mg") trong THUỐC
+       (mảnh rời không phải entity hoàn chỉnh).
+    7. R37 (2026-07-15): Drop THUỐC là pure drug-class generic ("kháng sinh",
+       "thuốc chống viêm") theo prompt rules.
 
     Args:
         text: entity text gốc từ LLM.
@@ -2239,11 +2323,26 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
         logger.debug("Clean: drop body-part-alone symptom '%s'", original)
         return None
 
+    # === BƯỚC 1: R37 (2026-07-15) — DROP pure drug-class generic term ===
+    # Áp dụng cho THUỐC, CHẨN_ĐOÁN (một số cụm "thuốc X" được LLM gán nhầm CD).
+    # VD: "kháng sinh", "thuốc chống viêm", "thuốc hạ sốt" — theo prompt rule 1.
+    if etype in ("THUỐC", "CHẨN_ĐOÁN", "TRIỆU_CHỨNG", "TÊN_XÉT_NGHIỆM"):
+        if _is_generic_drug_class(text):
+            logger.debug("Clean: drop generic drug-class term '%s'", original)
+            return None
+
     # === BƯỚC 2: Pure duration → DROP (R28.2) ===
     if etype in ("TRIỆU_CHỨNG", "CHẨN_ĐOÁN"):
         if _PURE_DURATION_ENHANCED_RE.match(text_lower):
             logger.debug("Clean: drop pure duration entity '%s'", original)
             return None
+
+    # === BƯỚC 2b: R37 (2026-07-15) — DROP standalone dose fragment trong THUỐC ===
+    # Audit phát hiện case file 50: "30 mg", "60 mg" được extract riêng → gây nhiễu.
+    # Mảnh chỉ chứa số + đơn vị, không có tên thuốc → drop.
+    if etype == "THUỐC" and _DOSE_FRAGMENT_RE.match(text.strip()):
+        logger.debug("Clean: drop standalone dose fragment '%s'", original)
+        return None
 
     # === BƯỚC 3: TÊN_XÉT_NGHIỆM — strip verb prefix ===
     if etype == "TÊN_XÉT_NGHIỆM":
@@ -2331,6 +2430,9 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
 # ---------------------------------------------------------------------- #
 
 # Abnormal findings trên imaging → CHẨN_ĐOÁN (không phải TRIỆU_CHỨNG/KQ_XN)
+# R37 (2026-07-15): Mở rộng pattern để cover các case audit phát hiện
+# (bệnh lý chất trắng, ST chênh xuống/lên, gãy xương, ngoại tâm thu + tần suất,
+# viêm mô tế bào, tổn thương X, block nhĩ thất, rung nhĩ, ...).
 _ABNORMAL_FINDING_TO_CHAN_DOAN = re.compile(
     r"^(tràn dịch màng phổi|tràn dịch màng tim|tràn dịch ổ bụng|cổ trướng|"
     r"tràn khí màng phổi|tràn khí trung thất|"
@@ -2340,7 +2442,7 @@ _ABNORMAL_FINDING_TO_CHAN_DOAN = re.compile(
     r"gan nhiễm mỡ|xơ gan|thoát vị hoành|"
     r"giãn đường mật|tắc nghẽn đường mật|sỏi mật|"
     r"phù phổi|phù não|"
-    r"gãy xương \w+|gãy \w+ xương|"
+    r"gãy xương \w+|gãy \w+ xương|gãy xương|"
     r"chấn thương sọ não|chấn thương \w+|"
     r"vết thương hở \w+|"
     r"hở van (hai lá|ba lá|động mạch chủ|động mạch phổi|2 lá)|"
@@ -2362,7 +2464,23 @@ _ABNORMAL_FINDING_TO_CHAN_DOAN = re.compile(
     r"dây\s+thần\s+kinh|van\s+tim|tiết\s+niệu|"
     r"ruột\s+non|ruột\s+thừa|thực\s+quản|hang\s+vị|"
     r"trực\s+tràng|hậu\s+môn|tiền\s+liệt\s+tuyến|"
-    r"\w+))",
+    r"mô\s+tế\s+bào|"
+    r"\w+))|"
+    # R37 (2026-07-15): Audit findings — bệnh lý chất trắng (CT scan finding).
+    r"bệnh\s+lý\s+chất\s+trắng|"
+    # ECG abnormalities (full + modifier variants).
+    r"ST\s+chênh(?:\s+(?:xuống|lên|chênh))?|"
+    r"ST\s+chênh\s+(?:xuống|lên)\s+\w+|"
+    r"block\s+(?:nhĩ\s+thất|nhĩ|thất)(?:\s+\w+)?|"
+    r"rung\s+nhĩ(?:\s+\w+)?|"
+    r"cuồng\s+nhĩ(?:\s+\w+)?|"
+    # Arrhythmia with frequency qualifier (audit found "ngoại tâm thu X xuất hiện thường xuyên").
+    r"ngoại\s+tâm\s+thu\s+(?:nhĩ|thất)(?:\s+(?:xuất\s+hiện|thường\s+xuyên|có|chiếm)\s+\w+)*|"
+    # Tổn thương X (lesion X).
+    r"tổn\s+thương\s+\w+(?:\s+\w+)?|"
+    # Hẹp/hở động mạch / van variants (overlap-safe).
+    r"(?:hẹp|hở)\s+động\s+mạch\s+\w+|"
+    r"phình\s+(?:động\s+mạch|đại\s+tràng|tĩnh\s+mạch)\s+\w*",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -2476,6 +2594,9 @@ def _retype_entity(text: str, etype: str) -> str:
     - Procedures (phẫu thuật, nội soi, chọc dò, ...) → TÊN_XÉT_NGHIỆM
       (không phải THUỐC)
     - Treatment modalities (liệu pháp, ...) → CHẨN_ĐOÁN
+    - R37 (2026-07-15): Drug BRAND name → THUỐC (vd 'crestor', 'toradol', 'augmentin').
+    - R37 (2026-07-15): Test ABBREVIATION (ast/alt/wbc/...) → TÊN_XÉT_NGHIỆM
+      (không phải KQ_XN).
 
     Args:
         text: entity text (đã được _clean_entity_text clean).
@@ -2487,6 +2608,13 @@ def _retype_entity(text: str, etype: str) -> str:
     if not text:
         return etype
     text_stripped = text.strip()
+    text_lower = text_stripped.lower()
+
+    # 0. R37: Drug brand name (vd "crestor", "toradol", "augmentin") → THUỐC.
+    # Match standalone brand token (whole-text or first 1-2 token).
+    if etype != "THUỐC" and text_lower in _DRUG_BRANDS:
+        logger.debug("Retype: '%s' %s → THUỐC (brand name)", text, etype)
+        return "THUỐC"
 
     # 1. Abnormal findings → CHẨN_ĐOÁN (override TRIỆU_CHỨNG hoặc KQ_XN)
     if etype in ("TRIỆU_CHỨNG", "KẾT_QUẢ_XÉT_NGHIỆM"):
@@ -2502,6 +2630,13 @@ def _retype_entity(text: str, etype: str) -> str:
         if _TREATMENT_MODALITY_TO_CHAN_DOAN.match(text_stripped):
             logger.debug("Retype: '%s' THUỐC → CHẨN_ĐOÁN (treatment modality)", text)
             return "CHẨN_ĐOÁN"
+
+    # 3. R37: Test abbreviation (vd "ast", "alt", "wbc", "hgb") → TÊN_XÉT_NGHIỆM
+    # Chỉ áp dụng khi standalone token (vd "ast" đứng riêng, không phải "ast 421"
+    # vì "ast 421" có số đi kèm → đúng là KQ_XN). So sánh full-match lowercase.
+    if etype == "KẾT_QUẢ_XÉT_NGHIỆM" and text_lower in _TEST_ABBREVIATIONS:
+        logger.debug("Retype: '%s' KQ_XN → TÊN_XÉT_NGHIỆM (test abbreviation)", text)
+        return "TÊN_XÉT_NGHIỆM"
 
     return etype
 

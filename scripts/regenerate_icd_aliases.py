@@ -273,7 +273,7 @@ def main() -> int:
         help="OpenAI-compatible endpoint (Ollama mặc định :11434, LM Studio :1234)",
     )
     parser.add_argument(
-        "--model", type=str, default="qwen2.5:7b",
+        "--model", type=str, default="qwen2.5:7b-instruct",
         help="Tên model Ollama/LM Studio (vd qwen2.5:7b, qwen3.5:9b)",
     )
     parser.add_argument(
