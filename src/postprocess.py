@@ -140,7 +140,7 @@ _DOSE_FRAGMENT_RE = re.compile(
 # Ngưỡng tối đa cho input (chars). Vượt ngưỡng sẽ truncate để tránh overflow.
 # SYSTEM_PROMPT (~4059 tokens) + 4000 chars input (~1000 tokens) + max_tokens output (4096)
 # = ~9155 tokens. Vừa với Ollama num_ctx=8192 nếu giảm input xuống <3000 chars.
-_INPUT_MAX_CHARS = 4000
+_INPUT_MAX_CHARS = 12000
 
 # Header đánh dấu đã truncate (LLM biết phần nào bị cắt)
 _TRUNCATION_MARKER = "\n\n[... Đã rút gọn phần giữa để vừa context window ...]\n\n"
