@@ -58,6 +58,7 @@ from src.prompts import (
     build_stage1_user_prompt,
     build_stage2_user_prompt,
     format_few_shot_stage2_messages,
+    format_few_shot_stage3_messages,
 )
 from src.rxnorm_rag import RxNormRetriever
 
@@ -358,6 +359,7 @@ def _stage3_refine_candidates(
     entities: list[dict[str, Any]],
     llm: LLMClient,
     batch_size: int = 30,
+    stage3_few_shot: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """R37 (2026-07-16): Stage 3 LLM pass to verify/refine ICD/RxNorm candidates.
 
@@ -367,6 +369,8 @@ def _stage3_refine_candidates(
         entities: list of dicts (each has text/type) — to be refined in-place
         llm: LLMClient for stage 3 call
         batch_size: max entities per LLM call (default 30)
+        stage3_few_shot: optional list of {role, content} message dicts to inject between
+            system prompt and user prompt (concrete input→output examples for LLM).
 
     Returns:
         The same entities list with `candidates` field updated per entity (verdict-based).
@@ -402,6 +406,17 @@ def _stage3_refine_candidates(
     ]
     user_prompts = build_stage3_user_prompt(input_text, entity_payloads, batch_size=batch_size)
 
+    # Stage 3 message scaffold: system → optional few-shot pairs → user prompt
+    prefix_messages: list[dict[str, str]] = [
+        {"role": "system", "content": STAGE3_PROMPT},
+    ]
+    if stage3_few_shot:
+        prefix_messages.extend(stage3_few_shot)
+    logger.debug(
+        "[%d] Stage 3: %d batches, %d few-shot msgs",
+        rec_id, len(user_prompts), len(stage3_few_shot or []),
+    )
+
     # Apply LLM per batch, default = unchanged RAG candidates
     for batch_idx, user_prompt in enumerate(user_prompts):
         batch_start = batch_idx * batch_size
@@ -414,12 +429,12 @@ def _stage3_refine_candidates(
         last_exc = None
         for attempt in range(2):  # 0=first try, 1=retry
             try:
+                messages = list(prefix_messages) + [
+                    {"role": "user", "content": user_prompt},
+                ]
                 resp = llm._client.chat.completions.create(
                     model=llm.config.model,
-                    messages=[
-                        {"role": "system", "content": STAGE3_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                    messages=messages,
                     temperature=0.05,
                     top_p=1.0,
                     max_tokens=llm.config.max_tokens,
@@ -523,6 +538,7 @@ def process_record(
     few_shot: list[dict[str, str]],
     output_dir: Path,
     few_shot_stage2: list[dict[str, str]] | None = None,
+    stage3_few_shot: list[dict[str, str]] | None = None,
     use_two_stage: bool = True,
 ) -> None:
     """Xử lý 1 record: gọi LLM (Two-Stage hoặc Single-Pass) → assemble → ghi file.
@@ -727,6 +743,7 @@ def process_record(
                 raw = _stage3_refine_candidates(
                     rec_id=rec_id, input_text=input_text,
                     entities=raw, llm=llm,
+                    stage3_few_shot=stage3_few_shot,
                 )
                 logger.info("[%d] Stage 3 LLM refine hoàn tất", rec_id)
     else:
@@ -972,6 +989,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             logger.info("Single-Pass Pipeline mode (--no-two-stage).")
 
+    # R37 (2026-07-16): Load Stage 3 few-shot (8 hardcoded examples cho LLM học
+    # verdict format + ICD/RxNorm code conventions từ Stage 1/2 context).
+    # Stage 3 default ON + few-shot default ON; opt-out chung bằng LLM_DISABLE_STAGE3=1.
+    stage3_few_shot = format_few_shot_stage3_messages()
+    logger.info(
+        "Stage 3 few-shot loaded: %d msgs (%d examples)",
+        len(stage3_few_shot),
+        len(stage3_few_shot) // 2,
+    )
+
     # Dùng real token estimate cho log
     sys_tokens_for_log = int(len(SYSTEM_PROMPT) / 3)
     logger.info(
@@ -1027,7 +1054,9 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 process_record(
                     rec_id, text, llm, retriever, icd_retriever, few_shot, args.output,
-                    few_shot_stage2=few_shot_stage2, use_two_stage=use_two_stage,
+                    few_shot_stage2=few_shot_stage2,
+                    stage3_few_shot=stage3_few_shot,
+                    use_two_stage=use_two_stage,
                 )
             except SystemExit as se:
                 # SystemExit thường từ Ollama client hoặc assertFail.

@@ -927,6 +927,18 @@ VERDICT RULES:
 - "refine": có qualifier làm candidate hiện tại chưa chính xác. Replace `candidates` với codes tốt hơn.
 - "drop": text là drug-class generic (vd "kháng sinh", "NSAID") hoặc không nên có candidate. Set `candidates = []`.
 
+ICD-10 SPECIFICITY RULES (chọn subcode cụ thể khi có qualifier trong text):
+1. **Anatomical side** ("trái"/"phải"): prefer ICD có laterality khi text chỉ rõ. VD: "viêm phổi phải" → J18.1 nếu có; nếu không có, giữ J18.x generic.
+2. **Etiology (organism)**: organism name → specific A0x subcode. VD: "Shigella dysenteriae" → A03.0 (KHÔNG A03 generic); "Salmonella" → A02.x; nếu organism không đặc hiệu → A04.x or generic.
+3. **Acute vs chronic** ("cấp" vs "mạn"/"mãn"): different subcodes. VD: "viêm phế quản cấp" → J20; viêm phế quản mạn → J41-J42.
+4. **Anatomical detail** ("thùy trên/dưới", "vách", "đoạn gần/xa"): check ICD có anatomical subcodes. VD: "ung thư phổi thùy trên" → C34.1 (KHÔNG chỉ C34 generic); "nhồi máu cơ tim thành trước" → I21.0; "vách liên thất" → specific I21 subcode.
+5. **Severity grade** ("độ 1/2/3", "giai đoạn I-IV", "NYHA I/II/III/IV"): prefer subcode reflect severity. VD: tăng huyết áp độ 1/2/3 có thể map I10 vs I10 với qualifier thứ 5; nếu ICD không phân biệt severity, giữ I10.
+6. **Organ + dysfunction pattern** ("rối loạn + organ"): typically single code, not multiple. VD: "rối loạn nhịp tim" → I47-I49 (arrhythmia block, KHÔNG cả I47 + I48 + I49); "rối loạn lipid máu" → E78 (single); "rối loạn giấc ngủ" → G47.
+7. **Diabetes type** ("tiểu đường type 1/2"): "type 1" → E10, "type 2" → E11. Khi text có complication (neuropathy, retinopathy, nephropathy, ketoacidosis) → add 4th/5th char subcode (E10.4-, E11.6-, v.v.).
+8. **Cancer + vị trí** ("ung thư X"): specific C-code với site. VD: "ung thư vú" → C50.x; ung thư phổi thùy trên → C34.1. Khi text có "di căn"/"metastasis" → add C77-C79 secondary code khi RAG chưa có.
+9. **MI location** ("nhồi máu cơ tim vị trí"): "STEMI/NSTEMI + location" → I21.x; "thành trước" → I21.0; "thành dưới" → I21.1; "không rõ vị trí" → I21.3.
+10. **Stroke type** ("đột quỵ"/"tai biến"): phân biệt nhồi máu não (ischemic) vs xuất huyết não (hemorrhagic). "nhồi máu não" → I63.x, "xuất huyết não" → I61, "chảy máu dưới màng nhện" → I60. Khi text KHÔNG nói rõ ischemic vs hemorrhagic → I64 (unspecified).
+
 EXAMPLES (THAM KHẢO, không bắt buộc giống):
 - text="loét tá tràng" type="CHẨN_ĐOÁN" cand=[K26] → verdict=ok
 - text="viêm phổi do covid" type="CHẨN_ĐOÁN" cand=[U07.1] → verdict=ok
@@ -939,6 +951,133 @@ EXAMPLES (THAM KHẢO, không bắt buộc giống):
 
 ⚠️ CHỈ trả về JSON array, KHÔNG giải thích trước/sau. Code phải tồn tại trong ICD-10 hoặc RxNorm — không invent.
 """
+
+
+# R37 (2026-07-16): Stage 3 few-shot examples — message-level (user → assistant pairs).
+# Default 8 examples hardcoded từ prompt inline cũ, convert sang JSON response format.
+# LLM học output format + verdict logic qua concrete input→output pairs.
+_STAGE3_FEW_SHOT_POOL: list[dict] = [
+    {
+        "context": "Bệnh nhân nam 50 tuổi, đau thượng vị 2 tuần, nội soi thấy loét tá tràng kích thước 1.5cm.",
+        "text": "loét tá tràng",
+        "type": "CHẨN_ĐOÁN",
+        "candidates": ["K26"],
+        "verdict": "ok",
+        "refined_candidates": ["K26"],
+        "reasoning": "K26 đúng cho loét tá tràng không có biến chứng cụ thể.",
+    },
+    {
+        "context": "Bệnh nhân nữ 65 tuổi, sốt cao, ho đờm vàng, PCR COVID dương tính, X-quang thấy thâm nhiễm hai phổi.",
+        "text": "viêm phổi do covid",
+        "type": "CHẨN_ĐOÁN",
+        "candidates": ["U07.1"],
+        "verdict": "ok",
+        "refined_candidates": ["U07.1"],
+        "reasoning": "U07.1 đúng cho COVID-19 có biểu hiện viêm phổi.",
+    },
+    {
+        "context": "Bệnh nhân sốt cao, ho đờm mủ, X-quang thấy thâm nhiễm thùy dưới phổi phải, cấy đờm ra Streptococcus pneumoniae.",
+        "text": "viêm phổi do vi khuẩn",
+        "type": "CHẨN_ĐOÁN",
+        "candidates": ["J15.9"],
+        "verdict": "refine",
+        "refined_candidates": ["J15", "J15.9"],
+        "reasoning": "J15.9 quá generic — nên include parent J15 để giữ code-block.",
+    },
+    {
+        "context": "Bệnh nhân tiêu chảy phân nhầy máu, cấy phân phân lập Shigella dysenteriae.",
+        "text": "bệnh lỵ trực khuẩn do Shigella dysenteriae",
+        "type": "CHẨN_ĐOÁN",
+        "candidates": ["A03"],
+        "verdict": "refine",
+        "refined_candidates": ["A03.0"],
+        "reasoning": "Shigella dysenteriae → A03.0 (cụ thể nhóm), A03 generic quá rộng.",
+    },
+    {
+        "context": "Bệnh nhân nam 70 tuổi, ho máu, CT ngực thấy khối u thùy trên phổi trái kích thước 4cm, sinh thiết xác nhận ung thư biểu mô tuyến.",
+        "text": "ung thư phổi thùy trên",
+        "type": "CHẨN_ĐOÁN",
+        "candidates": ["C34"],
+        "verdict": "refine",
+        "refined_candidates": ["C34.1"],
+        "reasoning": "C34 generic — refine thành C34.1 (ung thư thùy trên phổi phải) hoặc C34.2 nếu là phổi trái.",
+    },
+    {
+        "context": "Bệnh nhân được kê đơn kháng sinh amoxicillin cho viêm phổi.",
+        "text": "kháng sinh",
+        "type": "THUỐC",
+        "candidates": ["A07"],
+        "verdict": "drop",
+        "refined_candidates": [],
+        "reasoning": "'kháng sinh' là drug-class generic, không phải thuốc cụ thể — không nên có candidate.",
+    },
+    {
+        "context": "Bệnh nhân tăng huyết áp, đang dùng metoprolol 25mg uống 2 lần/ngày.",
+        "text": "metoprolol 25mg",
+        "type": "THUỐC",
+        "candidates": ["866924"],
+        "verdict": "ok",
+        "refined_candidates": ["866924"],
+        "reasoning": "RxNorm 866924 đúng cho metoprolol tartrate 25mg.",
+    },
+    {
+        "context": "Bệnh nhân đau ngực, được cho aspirin 500mg uống ngay.",
+        "text": "aspirin",
+        "type": "THUỐC",
+        "candidates": ["198467"],
+        "verdict": "ok",
+        "refined_candidates": ["198467"],
+        "reasoning": "RxNorm 198467 đúng cho aspirin (acetylsalicylic acid).",
+    },
+]
+
+
+def format_few_shot_stage3_messages(
+    examples: list[dict] | None = None,
+    max_examples: int = 8,
+) -> list[dict[str, str]]:
+    """R37 (2026-07-16): Convert Stage 3 few-shot examples → OpenAI chat message pairs.
+
+    Mỗi example → 2 messages:
+      - user: clinical context + entity payload (text, type, candidates)
+      - assistant: JSON array với verdict + refined candidates
+
+    Args:
+        examples: list of dict (mặc định: _STAGE3_FEW_SHOT_POOL hardcoded).
+        max_examples: cap số example (default 8, đủ cho LLM học format + verdict logic).
+
+    Returns:
+        List of message dicts (OpenAI chat format), xen giữa system và user prompt.
+    """
+    import json as _json
+
+    pool = examples if examples is not None else _STAGE3_FEW_SHOT_POOL
+    selected = pool[:max_examples]
+
+    messages: list[dict[str, str]] = []
+    for ex in selected:
+        ctx = ex.get("context", "")[:600]
+        candidates = ex.get("candidates", [])
+        cand_str = ",".join(str(c) for c in candidates) if candidates else "(none)"
+        user_msg = (
+            f"# Clinical note\n{ctx}\n\n"
+            f"# Entities cần verify (1 entity)\n"
+            f"- 1. text=\"{ex['text']}\" type=\"{ex['type']}\" cand=[{cand_str}]\n\n"
+            f"# Trả về JSON array (verdict + refined candidates cho MỖI entity theo thứ tự)."
+        )
+        assistant_payload = [{
+            "text": ex["text"],
+            "type": ex["type"],
+            "verdict": ex["verdict"],
+            "candidates": ex.get("refined_candidates", candidates),
+            "reasoning": ex.get("reasoning", ""),
+        }]
+        assistant_msg = _json.dumps(assistant_payload, ensure_ascii=False)
+
+        messages.append({"role": "user", "content": user_msg})
+        messages.append({"role": "assistant", "content": assistant_msg})
+
+    return messages
 
 
 def build_stage3_user_prompt(

@@ -256,6 +256,65 @@ ok = result[0]['candidates'] == ['A03'] and result[1]['candidates'] == ['A04.0']
 print(f"  Status: {'✓ PASS' if ok else '✗ FAIL'}")
 
 
+# ===== Test 8: Stage 3 few-shot integration =====
+print("\n=== Test: Stage 3 few-shot messages injected into LLM call ===")
+from src.prompts import format_few_shot_stage3_messages
+
+# Build fake few-shot (3 examples)
+fake_few_shot = format_few_shot_stage3_messages(max_examples=3)
+print(f"  Few-shot msgs built: {len(fake_few_shot)} (expect 6 = 3 user + 3 assistant)")
+
+# Verify role alternation
+roles = [m['role'] for m in fake_few_shot]
+print(f"  Roles sequence: {roles}")
+roles_ok = roles == ['user', 'assistant'] * 3
+print(f"  Roles alternating user/assistant: {roles_ok}")
+
+# Verify assistant content is valid JSON
+import json as _json_test
+first_asst_content = fake_few_shot[1]['content']
+try:
+    parsed = _json_test.loads(first_asst_content)
+    first_ok = (
+        isinstance(parsed, list) and len(parsed) == 1
+        and 'verdict' in parsed[0]
+    )
+except Exception as exc:
+    first_ok = False
+    print(f"  Parse error: {exc}")
+print(f"  First assistant content is valid JSON: {first_ok}")
+
+# Pass to _stage3_refine_candidates and verify LLM receives them
+ents_fewshot = [
+    {'text': 'loét tá tràng', 'type': 'CHẨN_ĐOÁN', 'candidates': ['K26']},
+]
+llm_fewshot = MockLLM([
+    '[{"text":"loét tá tràng","type":"CHẨN_ĐOÁN","verdict":"ok","candidates":["K26"]}]',
+])
+result_fewshot = _stage3_refine_candidates(
+    rec_id=99, input_text="context",
+    entities=ents_fewshot, llm=llm_fewshot,
+    stage3_few_shot=fake_few_shot,
+)
+# Inspect captured call messages
+captured_messages = llm_fewshot._calls[0]['messages']
+expected_roles = ['system'] + ['user', 'assistant'] * 3 + ['user']
+actual_roles = [m['role'] for m in captured_messages]
+sequence_ok = actual_roles == expected_roles
+print(f"  LLM call msg count: {len(actual_roles)} (expect 8 = 1 sys + 3 pairs + 1 user)")
+print(f"  LLM call msg roles: {actual_roles}")
+print(f"  Sequence matches expected: {sequence_ok}")
+
+fshot_ok = (
+    len(fake_few_shot) == 6
+    and roles_ok
+    and first_ok
+    and sequence_ok
+    and result_fewshot[0]['candidates'] == ['K26']
+)
+print(f"  Status: {'[PASS]' if fshot_ok else '[FAIL]'}")
+
+
 # ===== Summary =====
 print("\n" + "=" * 60)
 print("SUMMARY: All Stage 3 tests validated behavior")
@@ -267,3 +326,4 @@ print("✓ Fewer entries than requested → fallback to RAG")
 print("✓ Hallucinated codes → filtered out")
 print("✓ Malformed JSON → fallback to RAG (no crash)")
 print("✓ Partial batch failure → only failed batch keeps RAG")
+print("✓ Few-shot messages integrated (system + 3 pairs + user)")

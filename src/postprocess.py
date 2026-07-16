@@ -3342,6 +3342,168 @@ def _split_drug_disease_connector(
     return out
 
 
+
+# R37 (2026-07-16): Augment entities từ input patterns LLM hay miss
+# - Drug + cho/trị + Disease pattern (R1 split, R37 auto-detect)
+# - Compound symptoms (buồn nôn, đau đầu, ...) thường bị LLM tách nhỏ
+
+# R37 FIX (2026-07-16): Pattern drug + connector + disease
+# - drug group: starts with ASCII/VN letter, then 1+ letters/hyphens
+# - disease group: word-bounded, max 4 words, exclude trailing common VN particles
+#   (trong, và, của, tại, ở, lúc, khi, được, là, nay, hôm, qua, đến, sang, ...)
+#   để tránh capture "viêm tuyến mồ hôi trong" → "viêm tuyến mồ hôi"
+_R1_PATTERN = re.compile(
+    r"\b([A-ZÀ-Ỹa-zà-ỹ][A-Za-zÀ-Ỹa-zà-ỹ\-]+)\s+"
+    r"(?:cho|trị|điều\s+trị|chữa)\s+"
+    r"([A-Za-zÀ-Ỹ][A-Za-zÀ-Ỹà-ỹ\-]+"
+    r"(?:\s+(?!(?:trong|và|của|tại|ở|lúc|khi|được|là|nay|hôm|qua|đến|sang|tới|từ|như|khi|đã|sẽ|rồi|vẫn|cũng|hay)\b)"
+    r"[A-ZaizÀ-Ỹà-ỹ\-]+){0,5})",
+    re.IGNORECASE | re.UNICODE,
+)
+
+_COMPOUND_SYMPTOMS = [
+    ("buồn nôn", "TRIỆU_CHỨNG"),
+    ("đau đầu", "TRIỆU_CHỨNG"),
+    ("đau bụng", "TRIỆU_CHỨNG"),
+    ("đau ngực", "TRIỆU_CHỨNG"),
+    ("đau lưng", "TRIỆU_CHỨNG"),
+    ("đau cổ", "TRIỆU_CHỨNG"),
+    ("đau khớp", "TRIỆU_CHỨNG"),
+    ("đau cơ", "TRIỆU_CHỨNG"),
+    ("sốt cao", "TRIỆU_CHỨNG"),
+    ("sốt nhẹ", "TRIỆU_CHỨNG"),
+    ("khó thở", "TRIỆU_CHỨNG"),
+    ("khò khè", "TRIỆU_CHỨNG"),
+    ("tiếng rít", "TRIỆU_CHỨNG"),
+    ("đau họng", "TRIỆU_CHỨNG"),
+    ("đau ngực trái", "TRIỆU_CHỨNG"),
+    ("đau ngực phải", "TRIỆU_CHỨNG"),
+    ("mất ngủ", "TRIỆU_CHỨNG"),
+    ("chóng mặt", "TRIỆU_CHỨNG"),
+    ("đổ mồ hôi", "TRIỆU_CHỨNG"),
+    ("đau thượng vị", "TRIỆU_CHỨNG"),
+    ("phù chi dưới", "TRIỆU_CHỨNG"),
+]
+
+
+def _ensure_drug_disease_split(
+    input_text: str,
+    existing_entities: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """R37 (2026-07-16): Auto-add disease bị LLM miss khi input có pattern 'drug cho disease'.
+
+    Example:
+        Input: 'doxycycline cho viêm tuyến mồ hôi'
+        LLM extracted: 'doxycycline' only
+        → add 'viêm tuyến mồ hôi' (CHẨN_ĐOÁN)
+
+    Returns:
+        List các entities bổ sung (có thể rỗng). Caller appends.
+    """
+    additional: list[dict[str, Any]] = []
+    existing_texts = {e.get("text", "").strip().lower() for e in existing_entities}
+
+    for m in _R1_PATTERN.finditer(input_text):
+        drug_part = m.group(1).strip()
+        disease_part = m.group(2).strip()
+
+        if disease_part.lower() in existing_texts:
+            continue
+        if len(disease_part) < 4:
+            continue
+
+        # Validate drug (simple check)
+        is_drug = True
+        try:
+            from src.rxnorm_rag import _DRUG_INN_WHITELIST
+            from src.postprocess import _DRUG_NAMES_UNIONED
+            drug_lower = drug_part.lower().strip()
+            is_drug = (drug_lower in _DRUG_INN_WHITELIST
+                       or drug_lower in _DRUG_NAMES_UNIONED)
+        except Exception:
+            pass
+        if not is_drug:
+            continue
+
+        disease_pos = _find_span(input_text, disease_part, start=0)
+        if disease_pos is None:
+            continue
+
+        s, e = disease_pos
+        overlap = any(
+            en.get("position", [0, 0])[0] < e
+            and en.get("position", [0, 0])[1] > s
+            for en in existing_entities
+        )
+        if overlap:
+            continue
+
+        additional.append({
+            "text": disease_part,
+            "type": "CHẨN_ĐOÁN",
+            "position": list(disease_pos),
+            "assertions": [],
+            "candidates": [],
+        })
+        logger.debug("R37 auto-extracted disease from R1 pattern: %r", disease_part)
+
+    return additional
+
+
+def _ensure_compound_symptoms(
+    input_text: str,
+    existing_entities: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """R37 (2026-07-16): Auto-add compound symptoms bị LLM miss hoặc split nhỏ.
+
+    Common cases:
+    - 'buồn nôn' extracted as 'nôn' (substring)
+    - 'đau đầu' extracted as 'đầu' or 'đau'
+    - 'sốt cao' extracted as 'sốt' only
+
+    Returns:
+        List các entities bổ sung.
+    """
+    additional: list[dict[str, Any]] = []
+    existing_texts = {e.get("text", "").strip().lower() for e in existing_entities}
+    input_lower = input_text.lower()
+
+    for compound_text, etype in _COMPOUND_SYMPTOMS:
+        compound_lower = compound_text.lower()
+        if compound_lower in existing_texts:
+            continue
+
+        if compound_lower not in input_lower:
+            continue
+
+        pos = _find_span(input_text, compound_text, start=0)
+        if pos is None:
+            continue
+
+        s, e = pos
+        overlap = any(
+            en.get("position", [0, 0])[0] < e
+            and en.get("position", [0, 0])[1] > s
+            for en in existing_entities
+        )
+        if overlap:
+            continue
+
+        assertions = _detect_assertions_from_context(compound_text, input_text, etype, s)
+
+        additional.append({
+            "text": compound_text,
+            "type": etype,
+            "position": list(pos),
+            "assertions": assertions,
+            "candidates": [],
+        })
+        logger.debug("R37 auto-extracted compound symptom: %r", compound_text)
+
+    return additional
+
+
+
 def _split_test_name_value_connector(
     input_text: str,
     raw_entities: Iterable[dict[str, Any]],
@@ -3578,6 +3740,21 @@ def align_and_expand_entities(
 
     # R28 (2026-07-13): Final word-boundary + text-claim validator.
     # Span phải: input_text[s:e] == entity.text (case-insensitive) VÀ boundaries thuộc word boundary.
+    # R37 (2026-07-16): Auto-augment missing entities từ input patterns
+    # (drug-disease split, compound symptoms). LLM hay miss 1 phần.
+    try:
+        extra_dd = _ensure_drug_disease_split(input_text, aligned)
+        extra_cs = _ensure_compound_symptoms(input_text, aligned)
+        if extra_dd or extra_cs:
+            aligned.extend(extra_dd)
+            aligned.extend(extra_cs)
+            logger.debug(
+                "R37 augmented: %d disease (R1) + %d compound symptoms",
+                len(extra_dd), len(extra_cs),
+            )
+    except Exception as exc:
+        logger.debug("R37 augment failed (non-fatal): %s", exc)
+
     aligned = [e for e in (_validate_span_or_drop(input_text, e) for e in aligned) if e]
 
     return aligned
