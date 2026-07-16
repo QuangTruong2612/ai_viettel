@@ -45,14 +45,23 @@ class LLMConfig:
     keep_alive: str = "0"
 
     # Ollama-specific: num_ctx override PER-REQUEST (qua extra_body).
-    # R37 (2026-07-15): Default 32768 cho prompt mở rộng (~17K tokens) +
-    # few-shot dynamic cap (~5K) + user input (~3K) + output (~3K) ≈ 28K.
-    # - qwen2.5:7b FP16 (~5GB) → 32768 OK với 16GB+ VRAM
-    # - qwen3.5:9b FP16 (~5.5GB) → 32768 vừa đủ (12GB free cho KV+embeddings)
-    # - Quantized Q4_K_M (~3GB) → 32768 comfortable
-    # 65536 chỉ work với quantized + GPU offload. Set 16384 nếu OOM.
-    # Override qua env OLLAMA_NUM_CTX hoặc --target-ctx.
-    num_ctx: int = 32768
+    # R37 (2026-07-15) UPDATED 2026-07-16: Default 65536 để fit full prompt
+    # without losing few-shot examples.
+    # Token budget breakdown (worst case):
+    #   - SYSTEM_PROMPT:         ~21,000 tokens (đã mở rộng với R37 enhancements)
+    #   - Stage 2 few-shot:      ~13,500 tokens (48 examples, dynamic cap)
+    #   - Stage 3 prompt:        ~2,000 tokens (batched 30 entities)
+    #   - User input:            ~3,000 tokens (clinical note ~4500 chars VN)
+    #   - LLM output (max_tokens): 12,288 tokens
+    #   ──────────────────────────
+    #   TOTAL:                  ~51,800 tokens
+    #   → num_ctx=32768 OVERFLOWS (~19K tokens bị truncate, mất few-shot)
+    #   → num_ctx=65536 cho buffer 13K cho safety
+    # - qwen2.5:7b FP16 (~5GB) → 65536 work với 16GB+ VRAM
+    # - qwen3.5:9b FP16 (~5.5GB) → 65536 vừa đủ
+    # - Quantized Q4_K_M (~3GB) → 65536 comfortable
+    # Set 32768 nếu OOM. Override qua env OLLAMA_NUM_CTX hoặc --target-ctx.
+    num_ctx: int = 65536
 
     # Ollama-specific: num_gpu layers. -1 = all (default).
     # Giảm nếu OOM (vd num_gpu=20 → 20 layer trên GPU, phần còn trên CPU/RAM).
