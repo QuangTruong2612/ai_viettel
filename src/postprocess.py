@@ -1419,7 +1419,101 @@ def _detect_assertions_from_context(
     if found_negated and "isNegated" not in found:
         found.append("isNegated")
 
+    # R37 (2026-07-16): NEGATION CHAINING — "không X[, hay Y]* Z" → cả đều isNegated.
+    # Phải check xem entity có nằm trong cùng chain "không ..." không.
+    if "isNegated" not in found:
+        if _is_in_negation_chain(input_text, entity_pos):
+            found.append("isNegated")
+
     return found[:3]  # max 3 theo spec
+
+
+# R37 (2026-07-16): Negation chain detector
+# Phát hiện chuỗi "không X[, hay/và/cũng]* Y[, Z, W, ...]" để negate all items.
+# BREAK chain khi gặp: "có", "nhưng", "mà" (theo sau có thể là positive).
+
+_NEG_CHAIN_BREAKERS = re.compile(
+    r"\b(?:có|nhưng|mà|tuy\s+nhiên|hiện\s+tại|khám|chẩn\s+đoán|kết\s+luận|"
+    r"loại\s+trừ|trừ\s+khi)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_NEG_CHAIN_STARTERS = re.compile(
+    r"\b(?:không|chưa|chưa\s+có|âm\s+tính|không\s+thấy|chưa\s+thấy)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _is_in_negation_chain(input_text: str, entity_pos: int) -> bool:
+    """R37: True nếu entity nằm trong chuỗi phủ định "không ...[, hay/và/cũng]* ...".
+
+    Logic:
+    1. Search BACKWARD từ entity_pos để tìm "không"/"chưa" gần nhất.
+    2. Nếu tìm được, check xem giữa "không" và entity có từ BREAK ("có", "nhưng", "mà") không.
+    3. Nếu KHÔNG break → entity nằm trong chain "không" → isNegated.
+    4. Nếu có break OR không tìm được "không" → False.
+
+    Args:
+        input_text: full clinical note
+        entity_pos: position of entity trong input_text
+
+    Returns:
+        True nếu entity nằm trong chain "không" hiện tại.
+    """
+    text_before = input_text[:entity_pos]
+    if not text_before.strip():
+        return False
+
+    # Look backward từ entity_pos tìm "không" gần nhất (max 200 chars window)
+    search_window_start = max(0, entity_pos - 200)
+    search_slice = text_before[search_window_start:]
+
+    # Find last "không" match (closest to entity)
+    matches = list(_NEG_CHAIN_STARTERS.finditer(search_slice))
+    if not matches:
+        return False
+
+    last_match = matches[-1]
+    last_match_abs_pos = search_window_start + last_match.start()
+    last_match_end_pos = search_window_start + last_match.end()
+
+    # Check giữa "không" và entity_pos có BREAK word không
+    # (vd "có", "nhưng" sẽ reset negation chain)
+    between = text_before[last_match_end_pos:entity_pos]
+    if not between.strip():
+        # "không" ngay trước entity (no words between)
+        # Check NON_NEGATION_CONTEXTS trên full span "không" → entity_pos + 80
+        entity_end = min(len(input_text), entity_pos + 80)
+        non_neg_span = input_text[max(0, last_match_abs_pos - 50):entity_end]
+        for pat in (
+            r"không\s+tuân\s+thủ",
+            r"không\s+thể",
+            r"không\s+có\s+khả\s+năng",
+            r"chưa\s+rõ",
+            r"không\s+được\s+(?:thực\s+hiện|làm|chụp|tiến\s+hành)",
+        ):
+            if re.search(pat, non_neg_span, re.UNICODE | re.IGNORECASE):
+                return False
+        return True
+
+    # Có words giữa "không" và entity. Check for BREAK words.
+    if _NEG_CHAIN_BREAKERS.search(between):
+        return False  # Có "có"/"nhưng"/"mà" → chain break
+
+    # Check NON_NEGATION_CONTEXTS — span từ "không" → hết entity (entity_pos + len(entity_text))
+    # Lưu ý: entity_text có thể không có trong current scope, dùng end_pos fallback
+    entity_end = min(len(input_text), entity_pos + 80)  # 80 chars từ entity start
+    non_neg_span = input_text[last_match_abs_pos:entity_end]
+    for pat in (
+        r"không\s+tuân\s+thủ",
+        r"không\s+thể",
+        r"không\s+có\s+khả\s+năng",
+        r"chưa\s+rõ",
+        r"không\s+được\s+(?:thực\s+hiện|làm|chụp|tiến\s+hành)",
+    ):
+        if re.search(pat, non_neg_span, re.UNICODE | re.IGNORECASE):
+            return False
+
+    return True
 
 
 def _find_current_section(input_text: str, entity_pos: int) -> str:

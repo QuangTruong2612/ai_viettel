@@ -338,20 +338,25 @@ Các pattern dưới đây **LUÔN** là `CHẨN_ĐOÁN` (có ICD code), **KHÔN
    - `WBC 14,5 K/uL` → TÁCH 2: TÊN_XÉT_NGHIỆM (`WBC`) + KẾT_QUẢ_XÉT_NGHIỆM (`14,5 K/uL`).
    - `HA 160/90 mmHg` → TÁCH 2: TÊN_XÉT_NGHIỆM (`HA`) + KẾT_QUẢ_XÉT_NGHIỆM (`160/90 mmHg`).
 
-3. **Chuỗi phủ định \u2014 CHỈ entity ngay sau từ phủ định mới bị `isNegated` (PARTIAL NEGATION)**:
-   - `Không sốt, không ho, có đau đầu` → `sốt`=`isNegated`, `ho`=`isNegated`, **`đau đầu`=`[]` (KHÔNG bị negate!)**
-   - `Không buồn nôn, không nôn, đổ mồ hôi` → `buồn nôn`=`isNegated`, `nôn`=`isNegated`, **`đổ mồ hôi`=`[]` (KHÔNG bị negate!)**
-   - `Không sốt, không ho, không khó thở` → 3 TRIỆU_CHỨNG, **đều** `isNegated`.
-   - ⚠️ **NGUYÊN TẮC VÀNG**: Phủ định trong tiếng Việt chỉ áp dụng cho từ/cụm ngay sau nó, KHÔNG tự động lan sang các entity tiếp theo. Cụm `có`, `bị`, `xuất hiện` sau dấu phẩy phá vỡ chuỗi phủ định. Chuỗi liên tiếp `không A, không B` hay `không A, hay B` → cả A và B bị negate.
+3. **Chuỗi phủ định — NEGATION CHAINING (R37 sửa 2026-07-16)**:
+   - Bệnh án VN thường liệt kê nhiều triệu chứng VẮNG MẶT sau "không" đầu câu.
+     Toàn bộ list trong cùng chuỗi "không ..." đều bị `isNegated` (CHAIN tiếp tục qua dấu `,` và `hay`/`và`/`cũng`).
+   - `Không sốt, không ho, có đau đầu` → `sốt`=`isNegated`, `ho`=`isNegated`, **`đau đầu`=`[]`** (vì "có" BREAK chain trước "đau đầu")
+   - `Không buồn nôn, hay nôn, đổ mồ hôi` → `buồn nôn`=`isNegated`, `nôn`=`isNegated`, **`đổ mồ hôi`=`isNegated`** (chain "không ... hay ... Z" → cả 3 đều negate, KHÔNG có "có" phá chain)
+   - `Không buồn nôn, không nôn, không đổ mồ hôi` → 3 TRIỆU_CHỨNG, **đều** `isNegated` (chuỗi "không" liên tiếp)
+   - `Không sốt, không ho` → cả 2 đều isNegated (chuỗi "không" liên tiếp)
+   - ⚠️ **NGUYÊN TẮC VÀNG**:
+     - "không X[, hay/và/cũng]* Y[, Z, W, ...]" → **TẤT CẢ** đều isNegated cho đến khi gặp `"có"`/`"nhưng"`/`"mà"` (BREAK chain)
+     - "có"/"nhưng" + symptom mới = NEW assertion (=`[]`, không negate)
    - **Ví dụ PHÂN BIỆT:**
-     - `không sốt, không ho, đau đầu` → sốt=`isNegated`, ho=`isNegated`, đau đầu=`[]`
-     - `không sốt, không ho, không đau đầu` → sốt=`isNegated`, ho=`isNegated`, đau đầu=`isNegated`
+     - `không sốt, không ho, đau đầu` → sốt=`isNegated`, ho=`isNegated`, **đau đầu=`isNegated`** (chain tiếp qua `,`)
+     - `không sốt, không ho, có đau đầu` → sốt=`isNegated`, ho=`isNegated`, đau đầu=`[]` (vì "có" break chain)
+     - `không sốt, không ho, nhưng đau ngực` → sốt=`isNegated`, ho=`isNegated`, đau ngực=`[]` ("nhưng" break chain)
      - `không có khó thở, có thắt chặt ngực` → khó thở=`isNegated`, thắt chặt ngực=`[]`
-     - `Không buồn nôn, hay nôn, đổ mồ hôi` → buồn nôn=`isNegated`, nôn=`isNegated`, đổ mồ hôi=`[]`
-
+     - `Không buồn nôn, hay nôn, đổ mồ hôi` → buồn nôn=`isNegated`, nôn=`isNegated`, **`đổ mồ hôi`=`isNegated`** (chain "không" qua "hay")
 4. **3 Assertions chuẩn (max 3, có thể kết hợp)**:
    - `isHistorical`: Tiền sử bệnh xa (`Tiền sử: THA 5 năm`), hoặc thuốc đang dùng TRƯỚC nhập viện (`Thuốc đang dùng: amlodipine`, `Thuốc trước khi nhập viện:`). *(Lưu ý: "Lý do nhập viện", "Triệu chứng hiện tại", "Khám lâm sàng" là đợt bệnh hiện tại → `assertions: []`, KHÔNG phải isHistorical)*.
-   - `isNegated`: Bệnh/triệu chứng bị phủ định bởi từ `không`, `chưa`, `âm tính`, `không có`, `không xuất hiện` **ngay phía trước** entity đó. Chỉ entity đó bị negate, KHÔNG áp dụng hàng loạt cho các entity sau!
+   - `isNegated`: Bệnh/triệu chứng bị phủ định bởi từ `không`/`chưa`/`không có` ở đầu HOẶC trong chuỗi chain "không X[, hay/và/cũng]* Y[, Z, ...]" (xem mục 3 ở trên). Chain tiếp tục qua dấu `,` cho đến khi gặp `"có"`/`"nhưng"`/`"mà"` (break).
    - `isFamily`: CHỈ khi người thân là CHỦ THỂ mắc bệnh (`Bố bệnh nhân bị THA` → `["isFamily", "isHistorical"]`). KHÔNG gán khi "bác sĩ" (nhân viên y tế) hoặc gia đình chỉ kể/quan sát hộ bệnh nhân (`"bác sĩ chăm sóc chính kê đơn..."`, `"Gia đình nhận thấy bệnh nhân..."` → đây là bệnh/thuốc của bệnh nhân, KHÔNG `isFamily`).
 </splitting_and_context>
 

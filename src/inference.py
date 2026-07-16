@@ -408,29 +408,46 @@ def _stage3_refine_candidates(
         batch_end = min(batch_start + batch_size, len(entity_payloads))
         batch_payloads = entity_payloads[batch_start:batch_end]
 
-        try:
-            resp = llm._client.chat.completions.create(
-                model=llm.config.model,
-                messages=[
-                    {"role": "system", "content": STAGE3_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.05,
-                top_p=1.0,
-                max_tokens=llm.config.max_tokens,
-                timeout=min(60, llm.config.timeout),
-                extra_body={
-                    "keep_alive": getattr(llm.config, "keep_alive", "0"),
-                    "num_ctx": getattr(llm.config, "num_ctx", 32768),
-                    "num_gpu": getattr(llm.config, "num_gpu", -1),
-                    "think": False,
-                },
-            )
-            content = (resp.choices[0].message.content or "").strip()
-        except Exception as exc:
+        # R37 (2026-07-16): Add retry logic for transient LLM failures
+        # (network blip, timeout, rate limit). 1 retry with 2s wait.
+        content = ""
+        last_exc = None
+        for attempt in range(2):  # 0=first try, 1=retry
+            try:
+                resp = llm._client.chat.completions.create(
+                    model=llm.config.model,
+                    messages=[
+                        {"role": "system", "content": STAGE3_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.05,
+                    top_p=1.0,
+                    max_tokens=llm.config.max_tokens,
+                    timeout=min(60, llm.config.timeout),
+                    extra_body={
+                        "keep_alive": getattr(llm.config, "keep_alive", "0"),
+                        "num_ctx": getattr(llm.config, "num_ctx", 32768),
+                        "num_gpu": getattr(llm.config, "num_gpu", -1),
+                        "think": False,
+                    },
+                )
+                content = (resp.choices[0].message.content or "").strip()
+                if content:
+                    break  # Got valid response, exit retry loop
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0:
+                    import time as _t
+                    logger.debug(
+                        "[%d] Stage 3 batch %d attempt 1 failed (%s), retrying...",
+                        rec_id, batch_idx, exc,
+                    )
+                    _t.sleep(1.5)
+
+        if not content:
             logger.warning(
-                "[%d] Stage 3 LLM call failed (batch %d): %s — keeping RAG candidates",
-                rec_id, batch_idx, exc,
+                "[%d] Stage 3 batch %d failed (last exc: %s) — keeping RAG candidates",
+                rec_id, batch_idx, last_exc,
             )
             continue
 
@@ -469,6 +486,21 @@ def _stage3_refine_candidates(
                 "type": etype,
                 "candidates": valid_cands,
             }
+
+    # Compute summary stats (R37): refined count + dropped count
+    refined_count = 0
+    dropped_count = 0
+    for (orig_idx, _), tp in zip(target_entities, entity_payloads):
+        old_cand = entities[orig_idx].get("candidates", [])
+        new_cand = tp.get("candidates", [])
+        if old_cand != new_cand:
+            refined_count += 1
+        if old_cand and not new_cand:
+            dropped_count += 1
+    logger.info(
+        "[%d] Stage 3: %d CD/drug entities processed (refined=%d, dropped=%d)",
+        rec_id, len(target_entities), refined_count, dropped_count,
+    )
 
     # Merge back into entities list (in-place)
     for (orig_idx, _orig_ent), new_payload in zip(target_entities, entity_payloads):
