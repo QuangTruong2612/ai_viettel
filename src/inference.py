@@ -535,15 +535,19 @@ def process_record(
     _CURRENT_REC_ID[0] = rec_id
     t0 = time.time()
     logger.info("[%d] Bắt đầu (len=%d, two_stage=%s)", rec_id, len(input_text), use_two_stage)
-    # Adaptive few-shot: cap ở 12-20 examples dựa trên test thực nghiệm.
-    # Test data (user Kaggle 10/07/2026):
-    #   12 few-shot → 37 entities (TỐT NHẤT - sweet spot)
+    # Adaptive few-shot: cap dựa trên num_ctx và input length.
+    # R37 (2026-07-16) UPDATED: num_ctx=65536 cho budget 30K+ tokens → tăng cap.
+    # Original test (10/07/2026, num_ctx=32768): 12 examples sweet spot
+    #   12 few-shot → 37 entities (TỐT NHẤT)
     #   24 few-shot → 30-35 entities
-    #   35 few-shot → <30 entities (overwhelm)
-    # Quy tắc mới (KHÔNG cap dưới 12 vì sẽ giảm recall nghiêm trọng):
-    #   user_prompt > 8000 chars → cap 12 (input rất dài)
-    #   user_prompt > 5000 chars → cap 15 (input vừa)
-    #   user_prompt <= 5000 chars → cap 20 (input ngắn, sweet spot)
+    #   35 few-shot → <30 entities
+    # Updated test (16/07/2026, num_ctx=65536): 24/30/40 examples
+    #   → Tăng cap vì budget cho phép nhiều few-shot hơn
+    #   → Pattern coverage tăng, ít miss entities ngữ cảnh hiếm
+    # Quy tắc hiện tại (với num_ctx=65536):
+    #   user_prompt > 8000 chars → cap 24 (input rất dài, dùng full cap)
+    #   user_prompt > 5000 chars → cap 30 (input vừa, dùng max)
+    #   user_prompt <= 5000 chars → cap 40 (input ngắn, max few-shot)
     user_prompt_len = len(input_text)
     # Upgrade H: Domain-Adaptive Few-Shot Selection based on Keyword/Domain Overlap
     if few_shot and len(few_shot) > 4:
@@ -572,17 +576,20 @@ def process_record(
     else:
         sorted_few_shot_stage2 = few_shot_stage2 or []
 
+    # R37 (2026-07-16) UPDATED: num_ctx=65536 cho budget 30K+ tokens cho few-shot
+    # Tăng cap từ 12/14/20 lên 24/30/40 để LLM thấy nhiều pattern hơn.
+    # Vẫn dynamic theo input length (input càng dài → few-shot ít hơn để tránh dilute).
     if user_prompt_len > 8000:
-        adaptive_few_shot = sorted_few_shot[:12]
-        logger.debug("[%d] Adaptive: keep 6 pairs (12 msgs) domain-ranked few-shot (input len=%d > 8000)",
+        adaptive_few_shot = sorted_few_shot[:24]
+        logger.debug("[%d] Adaptive: keep 12 pairs (24 msgs) domain-ranked few-shot (input len=%d > 8000, num_ctx=65536)",
                       rec_id, user_prompt_len)
     elif user_prompt_len > 5000:
-        adaptive_few_shot = sorted_few_shot[:14]
-        logger.debug("[%d] Adaptive: keep 7 pairs (14 msgs) domain-ranked few-shot (input len=%d > 5000)",
+        adaptive_few_shot = sorted_few_shot[:30]
+        logger.debug("[%d] Adaptive: keep 15 pairs (30 msgs) domain-ranked few-shot (input len=%d > 5000, num_ctx=65536)",
                       rec_id, user_prompt_len)
     else:
-        adaptive_few_shot = sorted_few_shot[:20]
-        logger.debug("[%d] Adaptive: keep 10 pairs (20 msgs) domain-ranked few-shot (input len=%d <= 5000, sweet spot)",
+        adaptive_few_shot = sorted_few_shot[:40]
+        logger.debug("[%d] Adaptive: keep 20 pairs (40 msgs) domain-ranked few-shot (input len=%d <= 5000, sweet spot, num_ctx=65536)",
                       rec_id, user_prompt_len)
 
     # Fix #4: Log few-shot examples used (debug "which examples drove this output")
