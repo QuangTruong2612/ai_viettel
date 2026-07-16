@@ -142,6 +142,22 @@ def test_r1_short_disease():
 test_r1_short_disease()
 
 
+# Case 5b: Disease + newline + list marker (CRITICAL: regex phải stop at \n)
+def test_r1_newline_boundary():
+    input_text = "    - doxycycline cho viêm tuyến mồ hôi\n    - atenolol (uống hôm nay)"
+    llm_output = [{"text": "doxycycline", "type": "THUỐC", "position": [6, 17]}]
+    extras = _ensure_drug_disease_split(input_text, llm_output)
+    found = _has_entity(extras, "viêm tuyến mồ hôi", "CHẨN_ĐOÁN")
+    extras_text = [e['text'] for e in extras]
+    # BUG trước đây: capture "viêm tuyến mồ hôi\n    - atenolol" (greedy across newline)
+    no_newline = all("\n" not in e for e in extras_text)
+    no_extra_drug = all("atenolol" not in e for e in extras_text)
+    _run("R1 newline boundary: stop at \\n, no 'atenolol' leak",
+         found and no_newline and no_extra_drug,
+         f"extras={extras_text}")
+test_r1_newline_boundary()
+
+
 # ──────────────────────────────────────────────────────────────────
 # Compound symptom tests
 # ──────────────────────────────────────────────────────────────────

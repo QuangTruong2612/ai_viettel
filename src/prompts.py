@@ -358,6 +358,75 @@ Các pattern dưới đây **LUÔN** là `CHẨN_ĐOÁN` (có ICD code), **KHÔN
    - `isHistorical`: Tiền sử bệnh xa (`Tiền sử: THA 5 năm`), hoặc thuốc đang dùng TRƯỚC nhập viện (`Thuốc đang dùng: amlodipine`, `Thuốc trước khi nhập viện:`). *(Lưu ý: "Lý do nhập viện", "Triệu chứng hiện tại", "Khám lâm sàng" là đợt bệnh hiện tại → `assertions: []`, KHÔNG phải isHistorical)*.
    - `isNegated`: Bệnh/triệu chứng bị phủ định bởi từ `không`/`chưa`/`không có` ở đầu HOẶC trong chuỗi chain "không X[, hay/và/cũng]* Y[, Z, ...]" (xem mục 3 ở trên). Chain tiếp tục qua dấu `,` cho đến khi gặp `"có"`/`"nhưng"`/`"mà"` (break).
    - `isFamily`: CHỈ khi người thân là CHỦ THỂ mắc bệnh (`Bố bệnh nhân bị THA` → `["isFamily", "isHistorical"]`). KHÔNG gán khi "bác sĩ" (nhân viên y tế) hoặc gia đình chỉ kể/quan sát hộ bệnh nhân (`"bác sĩ chăm sóc chính kê đơn..."`, `"Gia đình nhận thấy bệnh nhân..."` → đây là bệnh/thuốc của bệnh nhân, KHÔNG `isFamily`).
+
+## 3A. ASSERTIONS — QUY TẮC CHI TIẾT & EDGE CASES (R37 cập nhật 2026-07-16)
+
+**A. `isHistorical` — bệnh/thuốc của BỆNH NHÂN trong quá khứ**:
+
+Gán `isHistorical` cho entity khi thuộc 1 trong các ngữ cảnh:
+- **Section header tiền sử**: trong phần `Tiền sử`, `Tiền căn`, `Bệnh sử`, `Tiền sử bệnh nội/ngoại khoa`, `Tiền sử phẫu thuật`.
+- **Thuốc trước nhập viện**: `Thuốc trước khi nhập viện:`, `Thuốc đang dùng:`, `Đang điều trị tại nhà:` → TẤT CẢ drugs trong đó → `isHistorical`.
+- **Câu có temporal marker quá khứ**: `cách đây X năm`, `năm 2018`, `đã từng`, `trước đây`, `từng có`, `tiền sử X`, `cũ X`. VD: `"tiền sử THA 10 năm"`, `"đã từng NMCT 2018"`, `"phẫu thuật ruột thừa năm 2015"`.
+
+KHÔNG gán `isHistorical`:
+- Trong section **hiện tại**: `Lý do nhập viện:`, `Triệu chứng hiện tại:`, `Khám lâm sàng:`, `Cận lâm sàng:`, `Chẩn đoán xác định:`, `Điều trị:`, `Thuốc ra viện:` → `assertions: []`.
+- Thuốc kê MỚI trong đợt điều trị hiện tại → KHÔNG `isHistorical`.
+
+**B. `isFamily` — bệnh của NGƯỜI THÂN bệnh nhân**:
+
+Gán `isFamily` (THƯỜNG KẾT HỢP với `isHistorical`) khi CHỦ THỂ mắc bệnh là người thân:
+- **Section "Tiền sử gia đình"**: MỌI entity trong đó → `["isFamily"]` (không cần `isHistorical` vì bệnh không thuộc BN).
+- **Pattern bố/mẹ/anh/chị/em mắc bệnh**: `(bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú|bác) (đã |từng |được chẩn đoán |bị |mắc |có )? [bệnh]` → bệnh = `["isFamily", "isHistorical"]`.
+  - VD: `"Bố bệnh nhân bị THA"` → THA=`["isFamily", "isHistorical"]`
+  - VD: `"Mẹ từng NMCT năm 2010"` → NMCT=`["isFamily", "isHistorical"]`
+  - VD: `"Anh trai đái tháo đường type 2"` → ĐTĐ type 2=`["isFamily"]`
+- **Pattern "gia đình có/có ai đó"**: `"gia đình có ai bị hen"` → hen=`["isFamily"]`.
+- **Negative family**: `"gia đình KHÔNG ai bị X"` → X=`["isFamily", "isNegated"]`.
+
+KHÔNG gán `isFamily`:
+- Khi chủ thể là **bác sĩ/nhân viên y tế**: `"bác sĩ phụ trách chính kê đơn"`, `"điều dưỡng chăm sóc"` → đây là hành động chăm sóc, KHÔNG phải bệnh người thân.
+- Khi **người nhà chỉ kể quan sát**: `"Gia đình nhận thấy bệnh nhân khó thở"`, `"Người nhà kể bệnh nhân đau ngực"` → đây là bệnh CỦA BỆNH NHÂN, người nhà chỉ là witness. Bệnh → `assertions: []` (KHÔNG `isFamily`).
+- Khi bệnh được đề cập chung chung không có chủ thể rõ ràng.
+
+**C. `isNegated` — bệnh/triệu chứng bị PHỦ ĐỊNH**:
+
+Gán `isNegated` khi:
+- **Từ phủ định trực tiếp trước entity** (window 5-15 từ): `không X`, `chưa X`, `chưa có X`, `không có X`, `không thấy X`, `không ghi nhận X`, `chưa phát hiện X`, `âm tính`, `loại trừ X`.
+- **Negation chain** (xem section 3): `không X, hay/và/cũng Y, Z` → cả list trong chain đều `isNegated` cho đến khi gặp `có`/`nhưng`/`mà` (BREAK chain).
+- **Câu phủ định mệnh đề**: `"bệnh nhân KHÔNG có tiền sử THA"` → THA=`isNegated` (KHÔNG `isHistorical` vì là PHỦ ĐỊNH tiền sử).
+
+KHÔNG gán `isNegated`:
+- **TÊN_XÉT_NGHIỆM** trong câu kết quả bình thường: `"x-quang ngực không ghi nhận bất thường"` → TÊN_XN (`x-quang ngực`) có `assertions: []`, KQ_XN (`không ghi nhận bất thường`) MỚI là `isNegated` (nếu có).
+- **Bình thường / không có gì đáng chú ý**: đây là KẾT QUẢ bình thường (positive normal finding), KHÔNG `isNegated`. VD: `"X-quang bình thường"` → KQ_XN=`bình thường`, assertions=`[]`.
+- **Dương tính**: có bệnh → `assertions: []`. **Âm tính**: không có bệnh → `isNegated`.
+
+**D. KẾT HỢP ASSERTIONS** (max 3 assertions mỗi entity):
+- `isHistorical` + `isFamily`: `"Bố bệnh nhân bị THA từ 2010"` → `["isFamily", "isHistorical"]`.
+- `isFamily` + `isNegated`: `"Gia đình không ai bị hen"` → `["isFamily", "isNegated"]`.
+- `isHistorical` + `isNegated`: `"Bệnh nhân không có tiền sử đái tháo đường"` → ĐTĐ=`["isHistorical", "isNegated"]`.
+
+**E. BẢNG TRA NHANH ASSERTION**:
+
+| Câu trong input | Entity type | Assertions |
+|---|---|---|
+| `Tiền sử: THA 10 năm` | THA (CHẨN_ĐOÁN) | `["isHistorical"]` |
+| `Thuốc đang dùng: amlodipine 5mg` | amlodipine (THUỐC) | `["isHistorical"]` |
+| `Bố bệnh nhân bị đái tháo đường type 2` | ĐTĐ type 2 (CHẨN_ĐOÁN) | `["isFamily", "isHistorical"]` |
+| `Gia đình không ai bị hen` | hen (CHẨN_ĐOÁN) | `["isFamily", "isNegated"]` |
+| `Lý do nhập viện: đau ngực` | đau ngực (TRIỆU_CHỨNG) | `[]` |
+| `Chẩn đoán: nhồi máu cơ tim cấp` | NMCT cấp (CHẨN_ĐOÁN) | `[]` |
+| `Không buồn nôn, hay nôn, đổ mồ hôi` | buồn nôn/nôn/đổ mồ hôi | `["isNegated"]` |
+| `X-quang ngực không ghi nhận bất thường` | X-quang ngực (TÊN_XN) | `[]` |
+| `X-quang ngực không ghi nhận bất thường` | không ghi nhận bất thường (KQ_XN) | `["isNegated"]` |
+| `AST bình thường` | bình thường (KQ_XN) | `[]` (positive normal) |
+| `Cấy máu âm tính` | cấy máu (TÊN_XN) | `[]` |
+| `Cấy máu âm tính` | âm tính (KQ_XN) | `["isNegated"]` |
+
+**F. POSITION-BASED HEURISTIC** (khi không có cue word rõ ràng):
+- Nếu entity nằm trong section có header `"Tiền sử"`, `"Tiền căn"`, `"Tiền sử bệnh"` (không kèm "hiện tại") → `isHistorical`.
+- Nếu entity nằm trong section `"Tiền sử gia đình"`, `"Tiền sử xã hội"` → `isFamily` (gộp `isHistorical` nếu bệnh có thời gian cụ thể).
+- Nếu entity nằm trong section `"Lý do nhập viện"`, `"Triệu chứng cơ năng"`, `"Khám lâm sàng"`, `"Cận lâm sàng"`, `"Chẩn đoán xác định"`, `"Điều trị"`, `"Thuốc ra viện"` → `assertions: []`.
+- Nếu không rõ section → default `[]` (KHÔNG default `isHistorical` để tránh over-assign).
 </splitting_and_context>
 
 <duplicate_and_position>

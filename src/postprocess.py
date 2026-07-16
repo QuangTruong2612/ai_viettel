@@ -3347,17 +3347,18 @@ def _split_drug_disease_connector(
 # - Drug + cho/trị + Disease pattern (R1 split, R37 auto-detect)
 # - Compound symptoms (buồn nôn, đau đầu, ...) thường bị LLM tách nhỏ
 
-# R37 FIX (2026-07-16): Pattern drug + connector + disease
+# R37 FIX (2026-07-16 v2): Pattern drug + connector + disease
 # - drug group: starts with ASCII/VN letter, then 1+ letters/hyphens
-# - disease group: word-bounded, max 4 words, exclude trailing common VN particles
+# - disease group: word-bounded, max 6 words, exclude trailing common VN particles
 #   (trong, và, của, tại, ở, lúc, khi, được, là, nay, hôm, qua, đến, sang, ...)
-#   để tránh capture "viêm tuyến mồ hôi trong" → "viêm tuyến mồ hôi"
+#   + KHÔNG span newlines (`[^\S\n]+` thay vì `\s+`) để tránh capture "viêm tuyến
+#   mồ hôi\n    - atenolol" → "viêm tuyến mồ hôi"
 _R1_PATTERN = re.compile(
-    r"\b([A-ZÀ-Ỹa-zà-ỹ][A-Za-zÀ-Ỹa-zà-ỹ\-]+)\s+"
-    r"(?:cho|trị|điều\s+trị|chữa)\s+"
+    r"\b([A-ZÀ-Ỹa-zà-ỹ][A-Za-zÀ-Ỹa-zà-ỹ\-]+)[ \t]+"
+    r"(?:cho|trị|điều\s+trị|chữa)[ \t]+"
     r"([A-Za-zÀ-Ỹ][A-Za-zÀ-Ỹà-ỹ\-]+"
-    r"(?:\s+(?!(?:trong|và|của|tại|ở|lúc|khi|được|là|nay|hôm|qua|đến|sang|tới|từ|như|khi|đã|sẽ|rồi|vẫn|cũng|hay)\b)"
-    r"[A-ZaizÀ-Ỹà-ỹ\-]+){0,5})",
+    r"(?:[^\S\n]+(?!(?:trong|và|của|tại|ở|lúc|khi|được|là|nay|hôm|qua|đến|sang|tới|từ|như|khi|đã|sẽ|rồi|vẫn|cũng|hay)\b)"
+    r"[A-Za-zÀ-Ỹà-ỹ\-]+){0,5})",
     re.IGNORECASE | re.UNICODE,
 )
 
