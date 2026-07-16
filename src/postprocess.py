@@ -1812,6 +1812,94 @@ def _drop_symptom_when_diagnosis_present(entities: list[dict]) -> list[dict]:
     return [e for i, e in enumerate(entities) if i not in drop_idx]
 
 
+# R37 (2026-07-16): Cross-type substring drop — drop short entity (TÊN_XN/KQ_XN/...)
+# nếu nó là substring của entity dài hơn (CHẨN_ĐOÁN) với position overlap.
+# VD: "mạch" (TÊN_XN) inside "bệnh tim mạch do xơ vữa động mạch" (CHẨN_ĐOÁN) → drop "mạch".
+def _drop_short_substring_inside_longer(
+    entities: list[dict],
+    short_min_len: int = 4,
+    short_max_len: int = 9,
+    longer_min_len: int = 8,
+) -> list[dict]:
+    """Drop short entity (4-9 chars) nếu nó fully contained inside longer entity (>=10 chars).
+
+    Cross-type substring drop. Ví dụ:
+    - "mạch" (TÊN_XN, 4 chars) inside "bệnh tim mạch do xơ vữa động mạch" (CHẨN_ĐOÁN) → drop "mạch"
+    - "phổi" (TÊN_XN, 4 chars) inside "viêm phổi" (CHẨN_ĐOÁN) → drop "phổi"
+    - "máu" (KQ_XN, 3 chars < 4) inside "nhiễm trùng máu" (CHẨN_ĐOÁN) → KEEP (below short_min_len)
+
+    Args:
+        entities: list of dicts with 'text', 'type', 'position' [start, end]
+        short_min_len: text ngắn tối thiểu (default 4) để được xét
+        short_max_len: text ngắn tối đa (default 9) — words > 9 chars thường là disease đầy đủ
+        longer_min_len: text dài tối thiểu (default 10) để được coi là container
+
+    Returns:
+        List các entities sau khi drop. Same type substring đã được handle bởi
+        `_drop_substring_entities` trước đó, nên hàm này chỉ lo cross-type.
+    """
+    if len(entities) < 2:
+        return entities
+
+    drop_indices: set[int] = set()
+
+    for i, ent_i in enumerate(entities):
+        if i in drop_indices:
+            continue
+        text_i = str(ent_i.get("text", "")).strip().lower()
+        if not text_i or len(text_i) < longer_min_len:
+            continue  # Only long entities can be containers
+        pos_i = ent_i.get("position", [0, 0])
+        if not (isinstance(pos_i, list) and len(pos_i) == 2):
+            continue
+        try:
+            s_i, e_i = int(pos_i[0]), int(pos_i[1])
+        except (ValueError, TypeError):
+            continue
+        if s_i < 0 or e_i <= s_i:
+            continue
+        type_i = ent_i.get("type", "")
+
+        for j, ent_j in enumerate(entities):
+            if i == j or j in drop_indices:
+                continue
+            type_j = ent_j.get("type", "")
+            if type_j == type_i:
+                continue  # Same type → đã handle bởi _drop_substring_entities
+            text_j = str(ent_j.get("text", "")).strip().lower()
+            if not text_j:
+                continue
+            # Length filter: chỉ drop short words
+            jl = len(text_j)
+            if jl < short_min_len or jl > short_max_len:
+                continue
+            if jl >= len(text_i):
+                continue
+            pos_j = ent_j.get("position", [0, 0])
+            if not (isinstance(pos_j, list) and len(pos_j) == 2):
+                continue
+            try:
+                s_j, e_j = int(pos_j[0]), int(pos_j[1])
+            except (ValueError, TypeError):
+                continue
+            # Position j must be STRICTLY inside i (không overlap từng phần)
+            if not (s_i <= s_j and e_j <= e_i):
+                continue
+            # Text j must be FULLY contained in text i (case-insensitive)
+            if text_j not in text_i:
+                continue
+            # Drop the shorter
+            drop_indices.add(j)
+            logger.debug(
+                "Drop cross-type substring '%s' (%s) inside '%s' (%s) at [%d,%d]",
+                text_j, type_j, text_i, type_i, s_i, e_i,
+            )
+
+    if not drop_indices:
+        return entities
+    return [e for idx, e in enumerate(entities) if idx not in drop_indices]
+
+
 # ════════════════════════════════════════════════════════════════════════════════
 # R37-bis (2026-07-14): Safety net for drug+clinical parens + compound disease terms
 # ════════════════════════════════════════════════════════════════════════════════
@@ -3726,6 +3814,11 @@ def align_and_expand_entities(
     # R29 (2026-07-13): Cross-type drop — symptom khi diagnosis duplicate span.
     # 'rối loạn lo âu' (CHẨN_ĐOÁN) chứa 'lo âu' (TRIỆU_CHỨNG) → drop symptom.
     aligned = _drop_symptom_when_diagnosis_present(aligned)
+
+    # R37 (2026-07-16): Cross-type substring drop — short entity (TÊN_XN/KQ_XN, 4-9 chars)
+    # nếu nằm hoàn toàn trong longer entity (CHẨN_ĐOÁN/CD, >=10 chars) với position overlap.
+    # VD: 'mạch' (TÊN_XN) inside 'bệnh tim mạch do xơ vữa động mạch' (CHẨN_ĐOÁN) → drop 'mạch'.
+    aligned = _drop_short_substring_inside_longer(aligned)
 
     # R37-bis (2026-07-14): Auto-fix LLM miss khi tách drug + clinical parens.
     # 'metoprolol (reduced from 50mg to 25mg daily)' → 1 entity THUỐC

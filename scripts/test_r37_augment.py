@@ -32,6 +32,7 @@ from src.postprocess import (
     _ensure_drug_disease_split,
     _ensure_compound_symptoms,
     _COMPOUND_SYMPTOMS,
+    _drop_short_substring_inside_longer,
 )
 
 
@@ -227,6 +228,82 @@ def test_cs_not_in_input():
          no_compound,
          f"extras={[(e['text'], e['type']) for e in extras]}")
 test_cs_not_in_input()
+
+
+# ──────────────────────────────────────────────────────────────────
+# Cross-type substring drop tests (R37 fix for user's bug 2026-07-16)
+# ──────────────────────────────────────────────────────────────────
+
+_section("Cross-type substring drop (_drop_short_substring_inside_longer)")
+
+
+# Case 11: 'mạch' (TÊN_XN) inside 'bệnh tim mạch do xơ vữa động mạch' (CHẨN_ĐOÁN)
+# User's actual bug — must drop BOTH 'mạch' (4 chars)
+def test_xsub_basic():
+    entities = [
+        {'text': 'bệnh tim mạch do xơ vữa động mạch', 'type': 'CHẨN_ĐOÁN', 'position': [217, 250]},
+        {'text': 'mạch', 'type': 'TÊN_XÉT_NGHIỆM', 'position': [226, 230]},
+        {'text': 'mạch', 'type': 'TÊN_XÉT_NGHIỆM', 'position': [246, 250]},
+    ]
+    result = _drop_short_substring_inside_longer(entities)
+    kept_texts = [e['text'] for e in result]
+    _run("XSub basic: 'mach' inside disease -> drop both",
+         len(result) == 1 and 'bệnh tim mạch do xơ vữa động mạch' in kept_texts,
+         f"kept={kept_texts}")
+test_xsub_basic()
+
+
+# Case 12: 'phổi' inside 'viêm phổi'
+def test_xsub_short_disease():
+    entities = [
+        {'text': 'viêm phổi', 'type': 'CHẨN_ĐOÁN', 'position': [100, 110]},
+        {'text': 'phổi', 'type': 'TÊN_XÉT_NGHIỆM', 'position': [105, 109]},
+    ]
+    result = _drop_short_substring_inside_longer(entities)
+    kept_texts = [e['text'] for e in result]
+    _run("XSub short disease: 'phoi' inside 'viem phoi' -> drop",
+         len(result) == 1 and 'viêm phổi' in kept_texts,
+         f"kept={kept_texts}")
+test_xsub_short_disease()
+
+
+# Case 13: Same type - NOT handled (by _drop_substring_entities instead)
+def test_xsub_same_type():
+    entities = [
+        {'text': 'bệnh tim mạch do xơ vữa động mạch', 'type': 'CHẨN_ĐOÁN', 'position': [217, 250]},
+        {'text': 'mạch', 'type': 'CHẨN_ĐOÁN', 'position': [226, 230]},  # same type
+    ]
+    result = _drop_short_substring_inside_longer(entities)
+    _run("XSub same type: not handled here (kept both)",
+         len(result) == 2,
+         f"kept={[e['text'] for e in result]}")
+test_xsub_same_type()
+
+
+# Case 14: Short < 4 chars -> KEEP (protected by threshold)
+def test_xsub_below_threshold():
+    entities = [
+        {'text': 'bệnh đau thắt ngực', 'type': 'CHẨN_ĐOÁN', 'position': [100, 119]},
+        {'text': 'đau', 'type': 'TRIỆU_CHỨNG', 'position': [105, 108]},  # 3 chars
+    ]
+    result = _drop_short_substring_inside_longer(entities)
+    _run("XSub short < 4 chars: 'dau' (3 chars) -> keep",
+         len(result) == 2,
+         f"kept={[e['text'] for e in result]}")
+test_xsub_below_threshold()
+
+
+# Case 15: No position overlap -> KEEP
+def test_xsub_no_position_overlap():
+    entities = [
+        {'text': 'viêm phổi', 'type': 'CHẨN_ĐOÁN', 'position': [100, 110]},
+        {'text': 'phổi', 'type': 'TÊN_XÉT_NGHIỆM', 'position': [200, 204]},  # outside
+    ]
+    result = _drop_short_substring_inside_longer(entities)
+    _run("XSub no position overlap: keep both",
+         len(result) == 2,
+         f"kept={[e['text'] for e in result]}")
+test_xsub_no_position_overlap()
 
 
 # ──────────────────────────────────────────────────────────────────
