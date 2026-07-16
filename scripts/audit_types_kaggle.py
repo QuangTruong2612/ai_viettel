@@ -91,17 +91,11 @@ def _resolve_input_dir(arg_input: str | None) -> Path:
 def _resolve_save_path(arg_save: str | None) -> Path | None:
     if arg_save:
         return Path(arg_save)
-    candidates = [
-        Path("/kaggle/working/_audit_report.json"),
-        Path.cwd() / "_audit_report.json",
-    ]
-    for c in candidates:
-        try:
-            c.parent.mkdir(parents=True, exist_ok=True)
-            return c
-        except Exception:
-            continue
-    return None
+    # Chỉ suggest Kaggle path khi ENV Kaggle thực sự tồn tại
+    # (tránh fall-through về cwd trên Windows khi /kaggle/working không writable)
+    if os.path.isdir("/kaggle/working"):
+        return Path("/kaggle/working") / "_audit_report.json"
+    return Path.cwd() / "_audit_report.json"
 
 
 # Wrap stdout/stderr để tránh lỗi Unicode trên một số môi trường

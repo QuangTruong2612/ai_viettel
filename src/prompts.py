@@ -285,6 +285,20 @@ Các pattern dưới đây **LUÔN** là `CHẨN_ĐOÁN` (có ICD code), **KHÔN
 - VD bệnh án: `"Lý do nhập viện: xuất huyết nội sọ không do chấn thương, không đặc hiệu"`
   - Extract: CHẨN_ĐOÁN = `"xuất huyết nội sọ không do chấn thương, không đặc hiệu"` (1 entity duy nhất, giữ nguyên cụm đầy đủ kèm qualifier)
   - KHÔNG extract `"không đặc hiệu"` riêng làm 1 entity.
+
+⛔ **CẤM 11 (R37 - 2026-07-15): CẤM MỞ RỘNG (EXPAND) VIẾT TẮT trong text**
+- ⚠️ QUAN TRỌNG: Text của entity PHẢI khớp VERBATIM với input. Nếu input ghi viết tắt → text phải là viết tắt. KHÔNG ĐƯỢC mở rộng ra tên đầy đủ.
+- Ví dụ SAI (KHÔNG làm thế này):
+  - Input ghi `"AST 45 U/L"` → KHÔNG extract text=`"aspartate aminotransferase 45 U/L"` (đã mở rộng `AST` → `aspartate aminotransferase`)
+  - Input ghi `"ALT 92"` → KHÔNG extract text=`"alanine aminotransferase 92"`
+  - Input ghi `"THA 10 năm"` → KHÔNG extract text=`"tăng huyết áp 10 năm"`
+  - Input ghi `"ĐTĐ type 2"` → KHÔNG extract text=`"đái tháo đường type 2"` (trừ khi bệnh án ghi rõ như thế)
+- Ví dụ ĐÚNG:
+  - Input ghi `"AST 45 U/L"` → extract text=`"AST"` (TÊN_XN) + text=`"45 U/L"` (KQ_XN) — TÁCH RIÊNG, không expand
+  - Input ghi `"THA 10 năm"` → extract text=`"THA"` (CHẨN_ĐOÁN, với ngữ cảnh input) hoặc extract `THUỐC`/`CHẨN_ĐOÁN` nguyên bản viết tắt
+  - Input ghi `"ĐTĐ"` → extract text=`"ĐTĐ"` (giữ viết tắt)
+- Lý do: Nếu text khác gold (mở rộng), WER tăng → final_score giảm. Scoring dựa trên text matching character-by-character / word-by-word.
+- Ngoại lệ DUY NHẤT: Khi input KHÔNG CÓ viết tắt, chỉ có tên đầy đủ → extract bình thường.
 </strict_negative_rules>
 
 <missing_entity_recovery>
@@ -869,4 +883,94 @@ Input: "{entity_text}"
 
 Output: [rxcui1, rxcui2, ...]
 """
+
+
+# ==============================================================================
+# R37 (2026-07-16): STAGE 3 — LLM CONTEXT ANALYZER cho ICD/RxNorm candidates
+# ==============================================================================
+# Sau Stage 1 (extract) và Stage 2 (classify), Stage 3 cho LLM:
+# - Review ICD codes cho CHẨN_ĐOÁN dựa trên full clinical context
+# - Review RxNorm codes cho THUỐC dựa trên full clinical context
+# - Verdict: ok (giữ), refine (đổi), drop (không nên có candidate)
+#
+# Quyết định:
+# - Stage 3 default ON, opt-out bằng --no-stage3 flag (backward compat)
+# - Scope: CHẨN_ĐOÁN + THUỐC only (skip các type khác để tránh hallucination)
+
+STAGE3_PROMPT = """Bạn là chuyên gia Clinical Coding với 20+ năm kinh nghiệm. Nhiệm vụ: REVIEW lại các ICD-10 (cho CHẨN_ĐOÁN) và RxNorm (cho THUỐC) candidates đã được RAG đề xuất, dựa trên TOÀN BỘ clinical context phía trên.
+
+Với MỖI entity:
+1. Đọc `text` và `type`. So sánh với ICD/RxNorm descriptors (nếu có) để xác minh candidate.
+2. Nếu text có QUALIFIER cụ thể (organism, lobe, severity, side, NYHA class, ...) mà candidate chưa reflect → REFINING.
+3. Nếu candidate quá generic so với qualifier có trong text → prefer specific.
+4. Nếu candidate SAI (vd "kháng sinh" → A07 không phải ICD; "kháng sinh" không nên có candidate) → DROP.
+
+TRẢ VỀ JSON array (MỖI element, KHÔNG thêm field thừa):
+[
+  {{
+    "text": "<exact text from entity>",
+    "type": "<exact type>",
+    "verdict": "ok" | "refine" | "drop",
+    "candidates": ["code1", "code2", ...],   // 0-5 codes, only ICD/RxNorm codes
+    "reasoning": "<short — 1 sentence>"
+  }},
+  ...
+]
+
+VERDICT RULES:
+- "ok": current candidate chính xác (hoặc đủ tốt). Giữ nguyên `candidates`.
+- "refine": có qualifier làm candidate hiện tại chưa chính xác. Replace `candidates` với codes tốt hơn.
+- "drop": text là drug-class generic (vd "kháng sinh", "NSAID") hoặc không nên có candidate. Set `candidates = []`.
+
+EXAMPLES (THAM KHẢO, không bắt buộc giống):
+- text="loét tá tràng" type="CHẨN_ĐOÁN" cand=[K26] → verdict=ok
+- text="viêm phổi do covid" type="CHẨN_ĐOÁN" cand=[U07.1] → verdict=ok
+- text="viêm phổi do vi khuẩn" type="CHẨN_ĐOÁN" cand=[J15.9] → verdict=refine, cand=[J15, J15.9]
+- text="bệnh lỵ trực khuẩn do Shigella dysenteriae" type="CHẨN_ĐOÁN" cand=[A03] → verdict=refine, cand=[A03.0]
+- text="ung thư phổi thùy trên" type="CHẨN_ĐOÁN" cand=[C34] → verdict=refine, cand=[C34.1]
+- text="kháng sinh" type="THUỐC" cand=[A07] → verdict=drop, cand=[]
+- text="metoprolol 25mg" type="THUỐC" cand=[866924] → verdict=ok
+- text="aspirin" type="THUỐC" cand=[198467] → verdict=ok
+
+⚠️ CHỈ trả về JSON array, KHÔNG giải thích trước/sau. Code phải tồn tại trong ICD-10 hoặc RxNorm — không invent.
+"""
+
+
+def build_stage3_user_prompt(
+    input_text: str,
+    entities_with_candidates: list[dict],
+    batch_size: int = 30,
+) -> list[str]:
+    """R37 (2026-07-16): Build Stage 3 user prompts (batched).
+
+    Args:
+        input_text: full clinical note
+        entities_with_candidates: list of {text, type, candidates} for CHẨN_ĐOÁN + THUỐC only
+        batch_size: max entities per LLM call (default 30)
+
+    Returns:
+        List of user prompt strings (one per batch). Caller runs LLM on each, parses, merges results.
+    """
+    if not entities_with_candidates:
+        return []
+
+    batches: list[str] = []
+    for i in range(0, len(entities_with_candidates), batch_size):
+        batch = entities_with_candidates[i:i + batch_size]
+        lines = []
+        for j, e in enumerate(batch):
+            cand = e.get("candidates", [])
+            cand_str = ",".join(str(c) for c in cand) if cand else "(none)"
+            lines.append(f"- {j+1}. text=\"{e.get('text','')}\" type=\"{e.get('type','')}\" cand=[{cand_str}]")
+
+        entities_str = "\n".join(lines)
+        # Compact context first 800 chars to avoid bloat (LLM has the entity text already)
+        context_short = input_text[:800] + ("..." if len(input_text) > 800 else "")
+        prompt = (
+            f"# Clinical note\n{context_short}\n\n"
+            f"# Entities cần verify ({len(batch)} entities)\n{entities_str}\n\n"
+            f"# Trả về JSON array (verdict + refined candidates cho MỖI entity theo thứ tự)."
+        )
+        batches.append(prompt)
+    return batches
 

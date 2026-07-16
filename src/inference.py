@@ -23,6 +23,7 @@ import concurrent.futures as cf
 import json
 import logging
 import re
+import os
 import sys
 import time
 from pathlib import Path
@@ -44,6 +45,7 @@ from src.postprocess import (
     _validate_stage1_mentions,
     _refine_stage2_results,
     _stage2_fallback_classify,
+    _validate_candidates_for_type,
 )
 from src.prompts import (
     SYSTEM_PROMPT,
@@ -347,6 +349,135 @@ def _split_into_sections(text: str, max_chunk_len: int = 750, overlap_len: int =
 
 
 # ---------------------------------------------------------------------- #
+# R37 (2026-07-16): STAGE 3 — LLM context analyzer cho ICD/RxNorm candidates
+# ---------------------------------------------------------------------- #
+
+def _stage3_refine_candidates(
+    rec_id: int,
+    input_text: str,
+    entities: list[dict[str, Any]],
+    llm: LLMClient,
+    batch_size: int = 30,
+) -> list[dict[str, Any]]:
+    """R37 (2026-07-16): Stage 3 LLM pass to verify/refine ICD/RxNorm candidates.
+
+    Args:
+        rec_id: for logging only
+        input_text: full clinical note (provides context for LLM)
+        entities: list of dicts (each has text/type) — to be refined in-place
+        llm: LLMClient for stage 3 call
+        batch_size: max entities per LLM call (default 30)
+
+    Returns:
+        The same entities list with `candidates` field updated per entity (verdict-based).
+
+    Behavior:
+        - Skip entities with type != CHẨN_ĐOÁN and type != THUỐC
+        - Skip entities already empty candidates
+        - Batch entities (default 30 per call)
+        - For each batch: build prompt → call LLM → parse JSON → validate codes → update
+        - On LLM parse failure: keep RAG candidates (fallback)
+    """
+    from src.prompts import STAGE3_PROMPT, build_stage3_user_prompt
+
+    # Filter: only CHẨN_ĐOÁN + THUỐC with non-empty candidates
+    target_entities = [
+        (i, e) for i, e in enumerate(entities)
+        if e.get("type") in ("CHẨN_ĐOÁN", "THUỐC")
+        and isinstance(e.get("candidates"), list)
+        and len(e.get("candidates", [])) > 0
+    ]
+    if not target_entities:
+        logger.debug("[%d] Stage 3: skip (no CHẨN_ĐOÁN/THUỐC with candidates)", rec_id)
+        return entities
+
+    # Build batches (preserve original indices for merging back)
+    entity_payloads = [
+        {
+            "text": e.get("text", ""),
+            "type": e.get("type", ""),
+            "candidates": list(e.get("candidates", [])),
+        }
+        for _, e in target_entities
+    ]
+    user_prompts = build_stage3_user_prompt(input_text, entity_payloads, batch_size=batch_size)
+
+    # Apply LLM per batch, default = unchanged RAG candidates
+    for batch_idx, user_prompt in enumerate(user_prompts):
+        batch_start = batch_idx * batch_size
+        batch_end = min(batch_start + batch_size, len(entity_payloads))
+        batch_payloads = entity_payloads[batch_start:batch_end]
+
+        try:
+            resp = llm._client.chat.completions.create(
+                model=llm.config.model,
+                messages=[
+                    {"role": "system", "content": STAGE3_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.05,
+                top_p=1.0,
+                max_tokens=llm.config.max_tokens,
+                timeout=min(60, llm.config.timeout),
+                extra_body={
+                    "keep_alive": getattr(llm.config, "keep_alive", "0"),
+                    "num_ctx": getattr(llm.config, "num_ctx", 32768),
+                    "num_gpu": getattr(llm.config, "num_gpu", -1),
+                    "think": False,
+                },
+            )
+            content = (resp.choices[0].message.content or "").strip()
+        except Exception as exc:
+            logger.warning(
+                "[%d] Stage 3 LLM call failed (batch %d): %s — keeping RAG candidates",
+                rec_id, batch_idx, exc,
+            )
+            continue
+
+        # Parse JSON response
+        parsed: list[dict] = []
+        try:
+            if content.startswith("```"):
+                lines = content.split("\n")
+                content = "\n".join(lines[1:-1]) if content.endswith("```") else "\n".join(lines[1:])
+            parsed = json.loads(content)
+            if not isinstance(parsed, list):
+                parsed = []
+        except Exception as exc:
+            logger.warning(
+                "[%d] Stage 3 LLM parse fail (batch %d): %s — keeping RAG",
+                rec_id, batch_idx, exc,
+            )
+            continue
+
+        # Apply results
+        for j, payload in enumerate(batch_payloads):
+            if j >= len(parsed):
+                break
+            entry = parsed[j]
+            if not isinstance(entry, dict):
+                continue
+            verdict = entry.get("verdict", "ok")
+            new_cands = entry.get("candidates", [])
+            etype = payload["type"]
+            valid_cands = _validate_candidates_for_type(new_cands, etype)
+            if verdict == "drop":
+                valid_cands = []
+            original_idx = batch_start + j
+            entity_payloads[original_idx] = {
+                "text": payload["text"],
+                "type": etype,
+                "candidates": valid_cands,
+            }
+
+    # Merge back into entities list (in-place)
+    for (orig_idx, _orig_ent), new_payload in zip(target_entities, entity_payloads):
+        entities[orig_idx]["candidates"] = new_payload["candidates"]
+
+    return entities
+
+
+# ---------------------------------------------------------------------- #
 # Per-record handler
 # ---------------------------------------------------------------------- #
 
@@ -450,9 +581,11 @@ def process_record(
             len(highlighted_input) - len(cleaned_input),
         )
 
-    # Section-Based Chunking: nếu bài án dài (> 750 chars), tách thành các chunks theo đoạn
+    # Section-Based Chunking: nếu bài án dài (> 1500 chars), tách thành các chunks theo đoạn
     # để LLM càn quét kiệt để từng đoạn nhỏ, triệt tiêu hiện tượng mỏi (fatigue) bỏ sót entities ở cuối.
-    chunks = _split_into_sections(highlighted_input, max_chunk_len=750, overlap_len=200)
+    # R37 (2026-07-16): Tăng từ 750 → 1500 chars để ít chunk boundaries hơn, giảm nguy cơ
+    # qualifiers (vd "Shigella dysenteriae", "thùy dưới") bị cắt giữa 2 chunks → LLM miss.
+    chunks = _split_into_sections(highlighted_input, max_chunk_len=1500, overlap_len=300)
     if len(chunks) > 1:
         logger.info(
             "[%d] Section-Based Chunking: Input %d chars → tách %d chunks để NER kiệt để",
@@ -548,6 +681,15 @@ def process_record(
             # Python Refiner: Kiểm duyệt & tự động sửa type/assertions theo luật chuyên gia
             raw = _refine_stage2_results(input_text, raw)
             logger.info("[%d] Stage 2 Refinement hoàn tất: %d entities", rec_id, len(raw))
+
+            # R37 (2026-07-16): STAGE 3 — LLM context analysis cho ICD/RxNorm candidates
+            # Apply default ON; opt-out via env LLM_DISABLE_STAGE3=1 (tương đương --no-stage3).
+            if not os.environ.get("LLM_DISABLE_STAGE3", "").strip() == "1":
+                raw = _stage3_refine_candidates(
+                    rec_id=rec_id, input_text=input_text,
+                    entities=raw, llm=llm,
+                )
+                logger.info("[%d] Stage 3 LLM refine hoàn tất", rec_id)
     else:
         # ======================================================================
         # SINGLE-PASS PIPELINE (Legacy mode for benchmarking via --no-two-stage)

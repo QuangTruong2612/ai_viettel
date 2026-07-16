@@ -526,7 +526,12 @@ def _alias_to_generic(drug_text: str) -> str | list[str]:
             # Exact match → return generic name(s)
             return list(value) if is_compound else value
         # Brand như PREFIX (vd "Augmentin 1g") → replace and append rest
-        if text_lower.startswith(brand + " ") or text_lower.startswith(brand):
+        # R37 (2026-07-15): Yêu cầu word boundary ở CUỐI brand (tránh "omeprazol" match "omeprazole")
+        if (
+            text_lower.startswith(brand + " ")
+            or text_lower == brand
+            or (len(text_lower) > len(brand) and text_lower.startswith(brand) and not text_lower[len(brand)].isalnum())
+        ):
             rest = drug_text[len(brand):].lstrip() if drug_text[len(brand):].strip() else ""
             if is_compound:
                 # Compound: trả list các tên + strength suffix

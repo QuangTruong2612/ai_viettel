@@ -2796,7 +2796,96 @@ def _split_long_imaging_result(
     return None
 
 
+# ---------------------------------------------------------------------- #
+# R37 (2026-07-16) — Split merged test_name+value entity
+# ---------------------------------------------------------------------- #
+# LLM hay extract "ast 421" thành 1 entity thay vì tách thành 2:
+#   - TÊN_XÉT_NGHIỆM: "ast"
+#   - KẾT_QUẢ_XÉT_NGHIỆM: "421"
+# Hàm này tự động tách dựa trên pattern (test_name<space>value).
 
+_TEST_NAME_VALUE_SPLIT_RE = re.compile(
+    r"^(?P<test>(?:AST|ALT|GGT|LDH|ALP|WBC|RBC|HGB|HCT|PLT|MCV|MCH|MCHC|RDW|MPV|"
+    r"PT|PTT|aPTT|INR|BNP|CRP|ESR|PSA|TSH|T3|T4|FT3|FT4|HbA1C|"
+    r"NA|K|CL|MG|CA|GLUCOSE|BUN|CREATININE|CHOLESTEROL|TRIGLYCERIDE|HDL|LDL|"
+    r"TROPONIN|CK|CK[- ]MB|D[- ]DIMER|"
+    r"pH|LACTATE|AMMONIA|IRON|FERRITIN|VITAMIN|"
+    r"MAGNESIUM|PHOSPHATE))"
+    r"\s+(?P<value>[\d.,]+(?:\s*[\d./%a-z]+\s*)*)$",
+    re.IGNORECASE,
+)
+
+
+def _split_test_name_and_value(
+    text: str,
+    etype: str,
+    input_text: str,
+    pos: list[int],
+) -> list[dict[str, Any]] | None:
+    """R37 (2026-07-16): Tách merged entity 'test_name value' thành 2 entities.
+
+    LLM hay extract "AST 421" thành 1 entity với type=KQ_XN. Đây là lỗi —
+    phải tách thành TÊN_XN + KQ_XN.
+
+    Trigger:
+    - Text match pattern `<test_abbrev> <value>` (e.g. "AST 421", "WBC 11.6 K/uL")
+    - Test name in `_TEST_ABBREVIATIONS`
+    - Type is KQ_XN
+
+    Returns:
+        List of 2 entities [test_name, value] hoặc None nếu không khớp pattern.
+
+    Ví dụ:
+        "ast 421" → [{type:'TÊN_XN', text:'ast'}, {type:'KQ_XN', text:'421'}]
+        "alt 336 u/l" → [{type:'TÊN_XN', text:'alt'}, {type:'KQ_XN', text:'336 u/l'}]
+    """
+    if not text or len(text) > 50:
+        return None
+    text_stripped = text.strip()
+    # Match must be at etype KQ_XN (LLM common mistake)
+    if etype != "KẾT_QUẢ_XÉT_NGHIỆM":
+        return None
+
+    m = _TEST_NAME_VALUE_SPLIT_RE.match(text_stripped)
+    if not m:
+        return None
+    test_name = m.group("test").strip()
+    value_str = m.group("value").strip()
+
+    # Sanity: test name must be in known abbreviations (case insensitive)
+    if test_name.lower() not in _TEST_ABBREVIATIONS:
+        return None
+    # Value should have digits
+    if not any(c.isdigit() for c in value_str):
+        return None
+    # Value should not be too short (avoid splitting "K 2 1" etc.)
+    if len(value_str) < 1:
+        return None
+
+    # Re-find positions in input_text
+    test_pos = _find_span(input_text, test_name, start=pos[0])
+    if test_pos is None:
+        test_pos = (pos[0], pos[0] + len(test_name))
+    value_pos = _find_span(input_text, value_str, start=test_pos[1])
+    if value_pos is None:
+        value_pos = (pos[0] + len(test_name) + 1, pos[1])
+
+    # Build 2 entities
+    test_entity = {
+        "text": test_name,
+        "type": "TÊN_XÉT_NGHIỆM",
+        "position": list(test_pos),
+        "assertions": [],
+        "candidates": [],
+    }
+    value_entity = {
+        "text": value_str,
+        "type": "KẾT_QUẢ_XÉT_NGHIỆM",
+        "position": list(value_pos),
+        "assertions": [],
+        "candidates": [],
+    }
+    return [test_entity, value_entity]
 
 
 # ---------------------------------------------------------------------- #
@@ -3079,7 +3168,13 @@ def assemble_record(
             seen_test_names, seen_entities,
             skip_attach=True,
         )
-        if record is not None:
+        # R37 (2026-07-16): Handle split case (merged test_name+value)
+        if record is not None and isinstance(record, dict) and record.get("_split"):
+            split_ents = record["entities"]
+            for sent in split_ents:
+                # Re-emit each split entity through pipeline
+                final.append(sent)
+        elif record is not None:
             final.append(record)
 
     # Phase 2: Parallel candidate attachment across CPU/Thread workers (Upgrade F)
@@ -3570,9 +3665,11 @@ def _attach_candidates(
     icd_retriever: Optional[ICDRetriever],
     input_text: str = "",  # R29: passed in for non-treatment context check
 ) -> None:
-    """Gán candidates cho record theo type (RxNorm cho THUỐC, ICD cho CHẨN_ĐOÁN).
+    """Gán candidates cho record theo type (RxNorm cho THUỐC, ICD cho CHẨN_ĐOÁN,
+    common ICD cho TRIỆU_CHỨNG).
 
     Mutates `record["candidates"]` in-place.
+    R37: TRIỆU_CHỨNG cũng attach ICD nếu match common_symptom_map.
     """
     if etype == "CHẨN_ĐOÁN" or record.get("type") == "CHẨN_ĐOÁN":
         if _is_normal_finding_misclassified_as_diagnosis(text):
@@ -3618,7 +3715,142 @@ def _attach_candidates(
             record["candidates"] = list(codes) if codes else []
         except Exception as exc:
             logger.warning("ICD lookup fail for '%s' (%s): %s", text, etype, exc)
+    elif etype == "TRIỆU_CHỨNG":
+        # R37 (2026-07-15): Attach ICD codes cho common symptoms từ data/symptom_icd_map.json
+        # Boost J_candidates nếu gold cũng có ICD cho symptom.
+        icd = _get_symptom_icd_lookup(text)
+        if icd:
+            record["candidates"] = [icd]
 
+
+# R37 (2026-07-15): Cache common symptom → ICD lookup
+_SYMPTOM_ICD_CACHE: dict[str, str] | None = None
+
+
+def _get_symptom_icd_lookup(text: str) -> str | None:
+    """Lookup common symptom → ICD code. Returns None nếu không match."""
+    global _SYMPTOM_ICD_CACHE
+    if _SYMPTOM_ICD_CACHE is None:
+        path = Path(__file__).resolve().parents[1] / "data" / "symptom_icd_map.json"
+        if path.exists():
+            try:
+                cfg = json.loads(path.read_text(encoding="utf-8"))
+                _SYMPTOM_ICD_CACHE = {k.lower().strip(): v for k, v in cfg.get("_vn_symptom_to_icd", {}).items()}
+            except Exception:
+                _SYMPTOM_ICD_CACHE = {}
+        else:
+            _SYMPTOM_ICD_CACHE = {}
+    return _SYMPTOM_ICD_CACHE.get(text.lower().strip())
+
+
+# ==============================================================================
+# R37 (2026-07-16): ICD/RxNorm code validators cho Stage 3 LLM output
+# ==============================================================================
+# Stage 3 LLM có thể "hallucinate" codes không tồn tại trong ICD-10 / RxNorm index.
+# Các helpers này validate LLM-suggested codes TRƯỚC khi attach vào entity.
+
+_ICD_CODE_INDEX: set[str] | None = None
+_RXNORM_CODE_INDEX: set[str] | None = None
+
+
+def _load_icd_index() -> set[str]:
+    """Lazy-load ICD code index từ ICDRetriever (cache sau lần đầu)."""
+    global _ICD_CODE_INDEX
+    if _ICD_CODE_INDEX is None:
+        try:
+            from src.icd_rag import ICDRetriever
+            icd = ICDRetriever()
+            _ICD_CODE_INDEX = set(icd._code_to_desc.keys()) if hasattr(icd, '_code_to_desc') else set()
+            logger.info("[R37] Loaded ICD index: %d codes", len(_ICD_CODE_INDEX))
+        except Exception as exc:
+            logger.warning("[R37] Failed to load ICD index: %s", exc)
+            _ICD_CODE_INDEX = set()
+    return _ICD_CODE_INDEX
+
+
+def _load_rxnorm_index() -> set[str]:
+    """Lazy-load RxNorm rxcui code index từ RxNormRetriever (cache sau lần đầu)."""
+    global _RXNORM_CODE_INDEX
+    if _RXNORM_CODE_INDEX is None:
+        try:
+            from src.rxnorm_rag import RxNormRetriever
+            retriever = RxNormRetriever()
+            _RXNORM_CODE_INDEX = set(retriever.index.rxcuis) if hasattr(retriever.index, 'rxcuis') else set()
+            logger.info("[R37] Loaded RxNorm index: %d codes", len(_RXNORM_CODE_INDEX))
+        except Exception as exc:
+            logger.warning("[R37] Failed to load RxNorm index: %s", exc)
+            _RXNORM_CODE_INDEX = set()
+    return _RXNORM_CODE_INDEX
+
+
+def _validate_icd_code(code: str) -> bool:
+    """Check ICD code tồn tại trong ICD-10 index. Allow parent codes (3-char)."""
+    if not code or not isinstance(code, str):
+        return False
+    code = code.strip().upper()
+    # Accept well-formed codes (A00-Z99, with optional .X or .XX)
+    if not re.match(r"^[A-Z]\d{2}(\.\d{1,2})?$", code):
+        return False
+    valid_set = _load_icd_index()
+    # Direct match
+    if code in valid_set:
+        return True
+    # Try parent (3-char) if specific not found
+    parent = code.split(".")[0]
+    if parent in valid_set:
+        return True
+    # If index is empty (init failed), accept ICD-format-matching codes
+    if not valid_set:
+        return True
+    return False
+
+
+def _validate_rxnorm_code(code: str) -> bool:
+    """Check RxNorm rxcui code (numeric string)."""
+    if not code or not isinstance(code, str):
+        return False
+    code = code.strip()
+    # RxNorm codes are numeric (digits only)
+    if not code.isdigit():
+        return False
+    valid_set = _load_rxnorm_index()
+    # If index loaded, check it
+    if valid_set and code not in valid_set:
+        return False
+    return True
+
+
+def _validate_candidates_for_type(
+    candidates: list[str], etype: str
+) -> list[str]:
+    """R37: Filter candidates list by entity type, validating each code.
+
+    Args:
+        candidates: raw candidate codes from LLM
+        etype: 'THUỐC' or 'CHẨN_ĐOÁN' or others
+
+    Returns:
+        Filtered list of valid codes (max 5).
+        If input empty/invalid → returns empty list.
+    """
+    if not candidates or not isinstance(candidates, list):
+        return []
+
+    out: list[str] = []
+    for raw in candidates[:5]:  # hard cap 5
+        if not isinstance(raw, str):
+            continue
+        code = raw.strip()
+        if not code:
+            continue
+        if etype == "THUỐC":
+            if _validate_rxnorm_code(code):
+                out.append(code)
+        elif etype == "CHẨN_ĐOÁN":
+            if _validate_icd_code(code):
+                out.append(code)
+        # Other types: skip (TRIỆU_CHỨNG/TÊN_XN/KQ_XN not in Stage 3 scope)
+    return out
 
 
 def _emit_entity_record(
@@ -3663,6 +3895,31 @@ def _emit_entity_record(
     if not (isinstance(pos, list) and len(pos) == 2 and all(isinstance(p, int) for p in pos)):
         pos = [0, 0]
     cur_start, cur_end = int(pos[0]), int(pos[1])
+
+    # R37 (2026-07-16): Tách merged test_name+value (vd 'ast 421' → ast + 421).
+    # Phải làm TRƯỚC R31 retype vì text sẽ được tách thành 2 entities.
+    pos = ent.get("position", [0, 0])
+    if (
+        isinstance(pos, list)
+        and len(pos) == 2
+        and all(isinstance(p, int) for p in pos)
+        and etype == "KẾT_QUẢ_XÉT_NGHIỆM"
+    ):
+        split_result = _split_test_name_and_value(text, etype, input_text, pos)
+        if split_result and len(split_result) == 2:
+            # Trả về marker tuple (None, split_entities) để caller xử lý.
+            # Thực tế sẽ xử lý trong assemble_record vì _emit_entity_record
+            # chỉ trả về 1 record. → Tạo 2 records riêng biệt qua loop.
+            logger.debug(
+                "[R37] Split merged test+value: '%s' → ['%s', '%s']",
+                text, split_result[0]['text'], split_result[1]['text']
+            )
+            # Trả về dict đặc biệt với key '_split' để caller biết.
+            return {
+                "_split": True,
+                "entities": split_result,
+                "orig_text": text,
+            }
 
     # R31: Auto-retype dựa trên text patterns (abnormal findings → CHẨN_ĐOÁN, procedures → TÊN_XN)
     new_etype = _retype_entity(text, etype)
@@ -3741,9 +3998,63 @@ def validate_output(payload: list[dict[str, Any]]) -> bool:
 
 
 def write_output(path: Path, payload: list[dict[str, Any]]) -> None:
+    """Write output JSON theo gold NER format chuẩn.
+
+    R37 (2026-07-15): Output phải match gold format về FIELD ORDER.
+    Gold mẫu (có candidates):
+        {"text": "...", "type": "THUỐC",
+         "candidates": [...], "assertions": [...], "position": [X, Y]}
+    Gold mẫu (không candidates):
+        {"text": "...", "type": "TRIỆU_CHỨNG",
+         "assertions": [], "position": [X, Y]}  ← candidates field OMITTED
+
+    KEY_ORDER: text → type → candidates (optional) → assertions → position.
+    assertions giữ nguyên (kể cả khi []), candidates OMIT nếu rỗng.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    KEY_ORDER = ("text", "type", "candidates", "assertions", "position")
+    SKIP_EMPTY = ("candidates",)  # OMIT khi list rỗng
+
+    cleaned: list[dict[str, Any]] = []
+    for ent in payload:
+        if not isinstance(ent, dict):
+            continue
+        ordered: dict[str, Any] = {}
+        for k in KEY_ORDER:
+            if k in ent:
+                v = ent[k]
+                if k in SKIP_EMPTY and isinstance(v, list) and len(v) == 0:
+                    continue  # OMIT candidates khi rỗng
+                ordered[k] = v
+        # Preserve any other keys (defensive) theo thứ tự KEY_ORDER + extras
+        for k in ent:
+            if k not in ordered and k not in KEY_ORDER:
+                ordered[k] = ent[k]
+        cleaned.append(ordered)
+
     with path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+        json.dump(cleaned, f, ensure_ascii=False, indent=2)
+
+
+# R37 (2026-07-15): Normalize dose whitespace trong THUỐC text.
+# Gold format chuẩn: "10 mg" (có space giữa digit và unit).
+# LLM hay output: "10mg" (không space) → WER tăng do mismatch character-by-character.
+_DOSE_WHITESPACE_RE = re.compile(
+    r"(\d)(mg|ml|g|mcg|iu|meq|µg|ug|ng|kg|mmol)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_dose_whitespace(text: str) -> str:
+    """Thêm space giữa digit và unit nếu thiếu: '10mg' → '10 mg'.
+
+    KHÔNG đụng vào cases đã đúng ('10 mg' → giữ nguyên).
+    Return normalized text. Caller phải re-find position sau khi apply.
+    """
+    if not text:
+        return text
+    return _DOSE_WHITESPACE_RE.sub(r"\1 \2", text)
 
 
 # ---------------------------------------------------------------------- #

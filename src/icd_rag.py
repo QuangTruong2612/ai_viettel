@@ -1057,37 +1057,121 @@ class ICDRetriever:
             codes = self._reranker.rerank(text, codes[:10], getattr(self, '_code_to_desc', {}), top_k=max(3, max_k))
         return self._select_adaptive_top_k(codes, max_k=max_k, text=text)
 
-    def _select_adaptive_top_k(self, codes: list[str], max_k: int = 1, text: str = "") -> list[str]:
-        """Mặc định 1 code để tối ưu Jaccard. Chỉ giữ thêm nếu cùng 3-char prefix."""
+    def _select_adaptive_top_k(self, codes: list[str], max_k: int = 2, text: str = "") -> list[str]:
+        """R37 (2026-07-15): Context-aware ICD filter.
+
+        Mục tiêu: hiểu context từ text để chọn đúng codes, không hallucinate.
+
+        Logic:
+        1. Drop uninformative codes (R28 precision guard).
+        2. Enumerate SUBTYPES của parent codes (A03 → A03.0, A03.1, ..., A03.9).
+        3. Filter codes theo text qualifiers (organism, body part, side, severity):
+           - Nếu text có SPECIFIC qualifier (vd "Shigella dysenteriae")
+             → chỉ giữ code có qualifier đó trong description.
+           - Nếu text GENERAL (vd "bệnh lỵ trực khuẩn") → giữ parent + all subtypes
+             (broader coverage, user chấp nhận vì gold có thể lấy nhiều).
+           - Nếu text quá general (no significant token) → fallback parent + top subtypes.
+        """
         if not codes:
             return []
 
-        # R28 (2026-07-13): PRECISION GUARD — drop uninformative ICD codes trước khi pick top.
-        # Catch-all codes (R69, T45.xx, Y5x.xx, Z00.xx, 3-char chapters) làm giảm J_candidates
-        # precision rất nặng. Pattern load từ data/generic_class_stoplist.json để dễ mở rộng.
+        # R28 PRECISION GUARD
         filtered = [c for c in codes if not _is_uninformative_icd_code(c)]
         if not filtered:
-            return []  # tất cả catch-all → KHÔNG trả candidate gì (precision > recall)
+            return []
         codes = filtered
 
-        if len(codes) == 1:
-            return codes
-        out = [codes[0]]
-        top_prefix_3 = codes[0][:3]
-        for c in codes[1:max_k]:
-            if c[:3] == top_prefix_3 and c not in out:
-                out.append(c)
-        if len(out) == 1 and max_k == 1 and text and len(codes) > 1:
-            # Specificity-Aware Picker (Super-Upgrade 4)
-            # Nếu text có từ khóa độ specific cao mà trong top-3 candidates có mã dài hơn cùng prefix (vd I21.1 thay vì I21) thì ưu tiên mã dài
-            spec_keywords = ("vùng", "dưới", "trước", "sau", "bên", "độ 1", "độ i", "độ 2", "độ ii", "độ 3", "độ iii", "độ 4", "độ iv", "mạn tính", "cấp tính", "cấp", "mạn", "nhánh", "kịch phát", "giai đoạn cuối", "thùy")
-            text_lower = text.lower()
-            if any(k in text_lower for k in spec_keywords):
-                for cand in codes[1:4]:
-                    if cand[:3] == top_prefix_3 and len(cand) > len(out[0]):
-                        out = [cand]
-                        break
-        return out
+        # Enumerate subtypes (vd A03 → all A03.x)
+        all_candidates = self._expand_to_subtypes(codes)
+        if not all_candidates:
+            return codes[:max_k]
+
+        # Apply context-aware filter
+        result = self._filter_by_text_context(text, all_candidates, max_k)
+        if result:
+            return result[:max_k]
+
+        # Fallback: parent first + first max_k-1 subtypes
+        return [c for c in all_candidates if not _is_uninformative_icd_code(c)][:max_k]
+
+    def _expand_to_subtypes(self, codes: list[str]) -> list[str]:
+        """Enumerate tất cả subtypes của parent codes (vd A03 → A03.0, A03.1, ..., A03.9).
+        Returns sorted by (length, code) so parent appears first within a prefix.
+        """
+        if not hasattr(self, "_code_to_desc"):
+            return list(codes)
+        result = set(codes)
+        for c in codes:
+            prefix_3 = c[:3]
+            if prefix_3 == c:
+                # Parent code (no decimal) → enumerate all X.Y for this prefix
+                for cd in self._code_to_desc.keys():
+                    if cd.startswith(prefix_3 + "."):
+                        result.add(cd)
+        # Sort: parent first, then by code alphabetical
+        return sorted(result, key=lambda x: (len(x), x))
+
+    def _filter_by_text_context(
+        self, text: str, candidates: list[str], max_k: int
+    ) -> list[str]:
+        """Filter candidates theo qualifiers trong text.
+
+        Tokenize text (bỏ stopwords VN + EN). Score mỗi code = số significant
+        tokens xuất hiện trong description. Sort desc, take top max_k.
+
+        This implements user's R37 rule: keep codes whose descriptions match
+        specific qualifiers in text (organism, body part, side, severity).
+        For general text (no specific qualifier), keep broader coverage.
+        """
+        if not text:
+            return candidates[:max_k]
+        # Vietnamese + English stopwords. CHÚ Ý: KHÔNG bỏ "trên"/"dưới" vì đây là
+        # qualifier quan trọng (vd "ung thư phổi thùy trên" → cần match C34.1 = thùy trên).
+        stopwords = {
+            "bệnh", "ở", "do", "và", "hoặc", "các", "là", "có", "được",
+            "với", "của", "trong", "không", "thể", "này", "đó", "như",
+            "một", "về", "từ", "để", "theo",
+            "bị", "bởi", "khi", "nếu",
+            "and", "or", "the", "a", "an", "of", "in", "with",
+        }
+        text_lower = text.lower()
+        # Replace punctuation với space trước khi split
+        for ch in ".,;:()[]{}!?\"'/\\":
+            text_lower = text_lower.replace(ch, " ")
+        raw_tokens = text_lower.split()
+        sig_tokens = [t for t in raw_tokens if t and len(t) > 1 and t not in stopwords]
+        # Sort by length desc — longer tokens thường là specific keywords
+        sig_tokens.sort(key=lambda x: -len(x))
+
+        if not sig_tokens:
+            # No specific qualifier → return broader coverage (parent + all matched)
+            return candidates[:max_k]
+
+        scored = []
+        for c in candidates:
+            desc = self._code_to_desc.get(c, "").lower()
+            # Use WORD-BOUNDARY check (re.search with \b) thay vì substring `in`,
+            # tránh 'ung' false-match vào 'chồng' trong 'tổn thương'.
+            hits = sum(1 for t in sig_tokens if re.search(r"\b" + re.escape(t) + r"\b", desc))
+            if hits > 0:
+                # Prefer more hits → then shorter codes (more specific)
+                scored.append((hits, -len(c), c))
+        if not scored:
+            # No match → return parent only (parent is first in candidates sorted by len)
+            return candidates[:1]
+        scored.sort(reverse=True)
+
+        # R37 (2026-07-15): Determine how many codes to return based on score distribution.
+        # - If top score significantly higher than rest (specific match) → 1 code
+        # - If multiple codes tie at top score (general match) → return up to max_k codes
+        top_hits = scored[0][0]
+        top_codes = [c for h, _, c in scored if h == top_hits]
+        if len(top_codes) > 1:
+            # Tie at top → general coverage, return up to max_k
+            return [c for _, _, c in scored[:max_k]]
+        else:
+            # Specific match → just the top 1
+            return [c for _, _, c in scored[:1]]
 
     def _cap_single_for_icd(self, codes: list[str]) -> list[str]:
         """R29 (spec round 2): CAP ≥1 cho single ICD lookup.
@@ -1205,11 +1289,16 @@ class ICDRetriever:
                 )
                 if not filtered:
                     filtered = list(resolved)
-                # R34: BYPASS _select_adaptive_top_k (chỉ giữ same-prefix siblings)
-                # cho full-compound → trả ALL resolved codes. User rule: "nếu có các từ
-                # hoặc/và/kèm/trên nền phải in ra đủ ICD".
-                logger.debug("R34: full-compound direct: '%s' → %s", vn_text, filtered)
-                result = filtered
+                # R37 (2026-07-15): KHÔNG bypass _select_adaptive_top_k nữa.
+                # Trước đây bypass cho compound forms với "và/hoặc/kèm" — nhưng audit 100 file
+                # thực tế cho thấy entries như "loét tá tràng" → 11 codes (K26.0-K26.9 + K27),
+                # "người ngồi trên xe bị thương" → 51 codes → Jaccard penalty cực nặng.
+                # Formula: J = |gold ∩ pred| / |gold ∪ pred| → 1 extra candidate không có trong
+                # gold → tăng |∪| → giảm J. Precision-first cho J_candidates.
+                # Compound "X và Y" / "X kèm Y" giờ xử lý qua _split_compound_diagnosis + lookup
+                # từng part (line 1218+) thay vì bypass.
+                logger.debug("R34→R37: full-compound direct: '%s' → %s", vn_text, filtered)
+                result = self._select_adaptive_top_k(filtered, max_k=2, text=vn_text)
                 if len(self._cache) > 4096:
                     self._cache.clear()
                 self._cache[cache_key] = result
@@ -1793,6 +1882,59 @@ class ICDRetriever:
             "tràn dịch màng phổi": ["J90"],
             "xẹp phổi": ["J98.1"],
             "lao phổi": ["A15", "A15.0"],
+
+            # === R37 (2026-07-15) — Pneumonia organism-specific (high-confidence ICD mappings) ===
+            # These map to specific ICD-10 codes; helps avoid over-general J18 fallback.
+            "viêm phổi do vi khuẩn": ["J15", "J15.9"],
+            "viêm phổi do virus": ["J12", "J12.9"],
+            "viêm phổi do phế cầu khuẩn": ["J13"],
+            "viêm phổi do phế cầu": ["J13"],
+            "vp phế cầu khuẩn": ["J13"],
+            "viêm phổi do haemophilus influenzae": ["J14"],
+            "viêm phổi do hemophilus": ["J14"],
+            "viêm phổi do tụ cầu": ["J15.2"],
+            "viêm phổi do tụ cầu vàng": ["J15.2"],
+            "viêm phổi do klebsiella": ["J15.0"],
+            "viêm phổi do pseudomonas": ["J15.1"],
+            "viêm phổi do mycoplasma": ["J15.7"],
+            "viêm phổi do nấm": ["B45", "B45.9"],
+            "viêm phổi do covid": ["U07.1", "U07.2"],
+            "viêm phổi do covid-19": ["U07.1", "U07.2"],
+            "viêm phổi do sars-cov-2": ["U07.1"],
+            "viêm phổi bội nhiễm": ["J18", "J18.9"],
+            "viêm phổi thở máy": ["J95.8"],
+            "viêm phổi hít": ["J69.0"],
+            "viêm phổi hít phải": ["J69.0"],
+            "viêm phổi sặc": ["J69.0"],
+
+            # === R37 (2026-07-15) — Heart failure NYHA stages (mapped to closest I50.x) ===
+            # WHO ICD-10 không có NYHA class code, ta map gần nhất:
+            # suy tim NYHA độ 1-4 đều map I50.x với description phù hợp.
+            "suy tim độ i nyha": ["I50.9"],
+            "suy tim độ ii nyha": ["I50.9"],
+            "suy tim độ iii nyha": ["I50", "I50.9"],
+            "suy tim độ iv nyha": ["I50", "I50.9"],
+            "suy tim độ 1": ["I50.9"],
+            "suy tim độ 2": ["I50.9"],
+            "suy tim độ 3": ["I50", "I50.9"],
+            "suy tim độ 4": ["I50", "I50.9"],
+            "suy tim nặng": ["I50"],
+            "suy tim mất bù": ["I50.0"],
+
+            # === R37 (2026-07-15) — HTN stages (WHO ICD-10 doesn't have stage code) ===
+            # Map đến I10 (essential HTN) hoặc I11 (hypertensive heart disease) theo complication.
+            "tăng huyết áp độ 1": ["I10"],
+            "tăng huyết áp độ 2": ["I10"],
+            "tăng huyết áp độ 3": ["I10", "I11.9"],
+            "tăng huyết áp độ 1 nhẹ": ["I10"],
+            "tăng huyết áp độ 2 nặng": ["I10", "I11.9"],
+            "tăng huyết áp kèm suy tim": ["I11.0"],
+
+            # === R37 (2026-07-15) — Asthma severity ===
+            "hen nhẹ": ["J45.1"],  # không thường xuyên
+            "hen trung bình": ["J45.9"],  # persistent moderate (mapping general J45.9)
+            "hen nặng": ["J45.9"],
+            "hen nguy kịch": ["J46"],  # status asthmaticus
 
             # === MỚI 2026-07-10 — THẦN KINH, TÂM THẦN ===
             "động kinh": ["G40", "G40.9"],
