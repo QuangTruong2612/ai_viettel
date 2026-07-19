@@ -33,7 +33,11 @@ from src.postprocess import (
     _ensure_compound_symptoms,
     _COMPOUND_SYMPTOMS,
     _drop_short_substring_inside_longer,
+    _strip_assertions_for_test_types,
+    _apply_deterministic_icd_rules,
 )
+from src.icd_rag import _is_generic_drug_class
+from src.rxnorm_rag import _alias_to_generic
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -304,6 +308,134 @@ def test_xsub_no_position_overlap():
          len(result) == 2,
          f"kept={[e['text'] for e in result]}")
 test_xsub_no_position_overlap()
+
+
+# Case 16: Strip assertions from TÊN_XN/KQ_XN per spec
+def test_strip_assertions():
+    entities = [
+        {'text': 'phẫu thuật cắt bỏ tuyến tiền liệt', 'type': 'TÊN_XÉT_NGHIỆM',
+         'assertions': ['isHistorical'], 'position': [0, 30]},
+        {'text': 'tăng men gan', 'type': 'KẾT_QUẢ_XÉT_NGHIỆM',
+         'assertions': ['isHistorical'], 'position': [0, 12]},
+        {'text': 'đau ngực', 'type': 'TRIỆU_CHỨNG',
+         'assertions': ['isNegated'], 'position': [0, 8]},
+        {'text': 'THA', 'type': 'CHẨN_ĐOÁN',
+         'assertions': ['isHistorical'], 'position': [0, 3]},
+    ]
+    result = _strip_assertions_for_test_types(entities)
+    # TÊN_XN and KQ_XN should have empty assertions
+    txn_assert = next(e['assertions'] for e in result if e['type'] == 'TÊN_XÉT_NGHIỆM')
+    kq_assert = next(e['assertions'] for e in result if e['type'] == 'KẾT_QUẢ_XÉT_NGHIỆM')
+    tri_assert = next(e['assertions'] for e in result if e['type'] == 'TRIỆU_CHỨNG')
+    cd_assert = next(e['assertions'] for e in result if e['type'] == 'CHẨN_ĐOÁN')
+    _run("Strip: TÊN_XN/KQ_XN empty, others preserved",
+         txn_assert == [] and kq_assert == []
+         and tri_assert == ['isNegated'] and cd_assert == ['isHistorical'],
+         f"txn={txn_assert}, kq={kq_assert}, tri={tri_assert}, cd={cd_assert}")
+test_strip_assertions()
+
+
+# ──────────────────────────────────────────────────────────────────
+# R37 (2026-07-19): Drug-class detection + compound split + typo
+# ──────────────────────────────────────────────────────────────────
+
+_section("Drug-class detection (extended patterns)")
+
+
+# Case 17: Common drug-class terms (R37 fix)
+def test_drug_class():
+    tests = [
+        ('giảm đau', True),
+        ('lợi tiểu', True),
+        ('giảm sốt', True),
+        ('liệu pháp lợi tiểu', True),
+        ('phương pháp điều trị', True),
+        ('xông khí dung', True),
+        ('kháng sinh', True),  # existing
+        ('aspirin', False),
+        ('gleevec', False),
+    ]
+    passed = 0
+    for text, expected in tests:
+        actual = _is_generic_drug_class(text)
+        if actual == expected:
+            passed += 1
+    _run(f"Drug-class: {passed}/{len(tests)} cases correct",
+         passed == len(tests),
+         f"passed={passed}/{len(tests)}")
+test_drug_class()
+
+
+_section("Compound drug split (R39 + new aliases)")
+
+
+# Case 18: Compound drug lookup returns list
+def test_compound_split():
+    tests = [
+        ('albuterolipratropium nebs', ['albuterol', 'ipratropium']),
+        ('albuterolipratropium', ['albuterol', 'ipratropium']),
+        ('doxycyclinebactrim', ['doxycycline', 'bactrim']),
+    ]
+    passed = 0
+    for text, expected in tests:
+        actual = _alias_to_generic(text)
+        if isinstance(actual, list) and sorted(actual) == sorted(expected):
+            passed += 1
+    _run(f"Compound split: {passed}/{len(tests)} return lists",
+         passed == len(tests),
+         f"passed={passed}/{len(tests)}")
+test_compound_split()
+
+
+# Case 19: Brand + route mapping (levafloxacin typo, nitroglycerin routes)
+def test_route_typo():
+    tests = [
+        ('levafloxacin', 'levofloxacin'),
+        ('nitroglycerin dưới lưỡi', 'nitroglycerin sublingual'),
+        ('nitroglycerin dạng bôi', 'nitroglycerin topical'),
+    ]
+    passed = 0
+    for text, expected in tests:
+        actual = _alias_to_generic(text)
+        if actual == expected or (isinstance(actual, str) and actual.startswith(expected)):
+            passed += 1
+    _run(f"Route + typo: {passed}/{len(tests)} work",
+         passed == len(tests),
+         f"passed={passed}/{len(tests)}")
+test_route_typo()
+
+
+# ──────────────────────────────────────────────────────────────────
+# R37 (2026-07-19): Deterministic ICD rules (đủ + chính xác + ngữ cảnh)
+# ──────────────────────────────────────────────────────────────────
+
+_section("Deterministic ICD rules (no LLM)")
+
+
+def test_icd_rules():
+    cases = [
+        # (text, input_cands, expected)
+        ('bệnh lỵ trực khuẩn do Shigella dysenteriae', ['A03'], ['A03.0']),
+        ('ung thư phổi thùy trên', ['C34'], ['C34', 'C34.1']),
+        ('ung thư phổi thùy dưới', ['C34'], ['C34', 'C34.3']),
+        ('ung thư phổi thùy giữa', ['C34'], ['C34', 'C34.2']),
+        ('viêm phổi phải', ['J18.9'], ['J18.9', 'J18.1']),
+        ('viêm phổi trái', ['J18.9'], ['J18.9', 'J18.2']),
+        ('nhồi máu cơ tim thành trước', ['I21.9'], ['I21.0']),
+        ('nhồi máu cơ tim thành dưới', ['I21.9'], ['I21.1']),
+        ('nhồi máu cơ tim không rõ vị trí', ['I21.9'], ['I21.9']),
+        ('tăng huyết áp độ 2', ['I10'], ['I10']),  # no rule
+        ('viêm phế quản cấp', ['J20'], ['J20']),
+    ]
+    passed = 0
+    for text, in_cands, expected in cases:
+        result = _apply_deterministic_icd_rules(text, in_cands)
+        if result == expected:
+            passed += 1
+    _run(f"ICD rules: {passed}/{len(cases)} correct",
+         passed == len(cases),
+         f"passed={passed}/{len(cases)}")
+test_icd_rules()
 
 
 # ──────────────────────────────────────────────────────────────────

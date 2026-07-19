@@ -482,7 +482,12 @@ def _stage3_refine_candidates(
             )
             continue
 
-        # Apply results
+        # Apply results - REPLACE strategy (R37 precision-first, "có N thì N"):
+        # - "ok": keep RAG candidates as-is (LLM verified, no change)
+        # - "refine": REPLACE with LLM candidates (validated) — LLM filters wrong codes
+        #   but does NOT add new ones (avoid hallucination). If LLM returns empty,
+        #   fall back to RAG candidates (don't lose valid codes).
+        # - "drop": empty candidates (drug-class generic, etc.)
         for j, payload in enumerate(batch_payloads):
             if j >= len(parsed):
                 break
@@ -493,13 +498,29 @@ def _stage3_refine_candidates(
             new_cands = entry.get("candidates", [])
             etype = payload["type"]
             valid_cands = _validate_candidates_for_type(new_cands, etype)
-            if verdict == "drop":
-                valid_cands = []
+
+            # RAG original candidates
             original_idx = batch_start + j
+            rag_cands = list(entity_payloads[original_idx].get("candidates", []))
+
+            if verdict == "drop":
+                # Drop completely (LLM says no candidates warranted)
+                final_cands = []
+            elif verdict == "ok":
+                # Keep RAG candidates as-is (no refinement needed)
+                final_cands = rag_cands
+            else:  # "refine"
+                # REPLACE with LLM candidates (validated, deduped, cap 5)
+                # FALLBACK to RAG if LLM returns empty (don't lose valid codes)
+                if valid_cands:
+                    final_cands = valid_cands[:5]
+                else:
+                    final_cands = rag_cands  # safety fallback
+
             entity_payloads[original_idx] = {
                 "text": payload["text"],
                 "type": etype,
-                "candidates": valid_cands,
+                "candidates": final_cands,
             }
 
     # Compute summary stats (R37): refined count + dropped count

@@ -315,6 +315,88 @@ fshot_ok = (
 print(f"  Status: {'[PASS]' if fshot_ok else '[FAIL]'}")
 
 
+# ===== Test 9: Stage 3 REPLACE strategy (precision-first, "có N thì N") =====
+print("\n=== Test: Stage 3 REPLACE candidates (precision-first) ===")
+ents_union = [
+    {'text': 'bệnh lỵ trực khuẩn do Shigella dysenteriae', 'type': 'CHẨN_ĐOÁN',
+     'candidates': ['A03']},  # RAG initial: only parent
+]
+llm_union = MockLLM([
+    '[{"text":"bệnh lỵ trực khuẩn do Shigella dysenteriae","type":"CHẨN_ĐOÁN",'
+    '"verdict":"refine","candidates":["A03.0"],"reasoning":"Shigella → A03.0"}]',
+])
+result_union = _stage3_refine_candidates(
+    rec_id=99, input_text="context",
+    entities=ents_union, llm=llm_union,
+)
+union_cands = result_union[0]['candidates']
+print(f"  Input RAG: ['A03']")
+print(f"  LLM refine: ['A03.0']")
+print(f"  REPLACE result: {union_cands} (expect ['A03.0'] — REPLACE, not UNION)")
+union_ok = union_cands == ['A03.0']
+print(f"  Status: {'[PASS]' if union_ok else '[FAIL]'}")
+
+
+# ===== Test 9b: Stage 3 REPLACE fallback to RAG when LLM empty =====
+print("\n=== Test: Stage 3 REPLACE with LLM empty → fallback to RAG ===")
+ents_fb = [
+    {'text': 'viêm phổi', 'type': 'CHẨN_ĐOÁN', 'candidates': ['J18.9', 'J18.1']},
+]
+llm_fb = MockLLM([
+    '[{"text":"viêm phổi","type":"CHẨN_ĐOÁN","verdict":"refine","candidates":[]}]',
+])
+result_fb = _stage3_refine_candidates(
+    rec_id=99, input_text="context",
+    entities=ents_fb, llm=llm_fb,
+)
+fb_cands = result_fb[0]['candidates']
+print(f"  Input RAG: ['J18.9', 'J18.1']")
+print(f"  LLM refine: [] (empty)")
+print(f"  Result: {fb_cands} (expect RAG fallback: ['J18.9', 'J18.1'])")
+fb_ok = fb_cands == ['J18.9', 'J18.1']
+print(f"  Status: {'[PASS]' if fb_ok else '[FAIL]'}")
+
+
+# ===== Test 10: Stage 3 ok verdict keeps RAG candidates =====
+print("\n=== Test: Stage 3 'ok' verdict preserves RAG candidates ===")
+ents_ok = [
+    {'text': 'loét tá tràng', 'type': 'CHẨN_ĐOÁN', 'candidates': ['K26', 'K26.9']},
+]
+llm_ok = MockLLM([
+    '[{"text":"loét tá tràng","type":"CHẨN_ĐOÁN","verdict":"ok","candidates":[]}]',
+])
+result_ok = _stage3_refine_candidates(
+    rec_id=99, input_text="context",
+    entities=ents_ok, llm=llm_ok,
+)
+ok_cands = result_ok[0]['candidates']
+print(f"  Input RAG: ['K26', 'K26.9']")
+print(f"  LLM ok with empty: [] (LLM returns empty but verdict=ok)")
+print(f"  Result: {ok_cands} (expect RAG kept: ['K26', 'K26.9'])")
+ok_kept = ok_cands == ['K26', 'K26.9']
+print(f"  Status: {'[PASS]' if ok_kept else '[FAIL]'}")
+
+
+# ===== Test 11: Stage 3 drop verdict empties candidates =====
+print("\n=== Test: Stage 3 'drop' verdict empties candidates ===")
+ents_drop = [
+    {'text': 'kháng sinh', 'type': 'THUỐC', 'candidates': ['A07']},
+]
+llm_drop = MockLLM([
+    '[{"text":"kháng sinh","type":"THUỐC","verdict":"drop","candidates":[]}]',
+])
+result_drop = _stage3_refine_candidates(
+    rec_id=99, input_text="context",
+    entities=ents_drop, llm=llm_drop,
+)
+drop_cands = result_drop[0]['candidates']
+print(f"  Input RAG: ['A07']")
+print(f"  LLM drop: []")
+print(f"  Result: {drop_cands} (expect [] — drop overrides RAG)")
+drop_ok = drop_cands == []
+print(f"  Status: {'[PASS]' if drop_ok else '[FAIL]'}")
+
+
 # ===== Summary =====
 print("\n" + "=" * 60)
 print("SUMMARY: All Stage 3 tests validated behavior")
@@ -327,3 +409,7 @@ print("✓ Hallucinated codes → filtered out")
 print("✓ Malformed JSON → fallback to RAG (no crash)")
 print("✓ Partial batch failure → only failed batch keeps RAG")
 print("✓ Few-shot messages integrated (system + 3 pairs + user)")
+print("✓ REPLACE strategy (precision-first, 'có N thì N')")
+print("✓ REPLACE fallback to RAG when LLM empty")
+print("✓ 'ok' verdict preserves RAG candidates")
+print("✓ 'drop' verdict empties candidates")

@@ -1812,6 +1812,30 @@ def _drop_symptom_when_diagnosis_present(entities: list[dict]) -> list[dict]:
     return [e for i, e in enumerate(entities) if i not in drop_idx]
 
 
+# R37 (2026-07-19): Strip assertions from TÊN_XN/KQ_XN per spec
+# (these types don't carry isHistorical/isFamily/isNegated — only TRIỆU_CHỨNG,
+# CHẨN_ĐOÁN, THUỐC do).
+_TYPES_WITHOUT_ASSERTIONS = frozenset({"TÊN_XÉT_NGHIỆM", "KẾT_QUẢ_XÉT_NGHIỆM"})
+
+
+def _strip_assertions_for_test_types(entities: list[dict]) -> list[dict]:
+    """R37 (2026-07-19): Strip `assertions` from TÊN_XÉT_NGHIỆM + KQ_XN entities.
+
+    Per spec:
+    - TÊN_XÉT_NGHIỆM: position only (no assertions, no candidates)
+    - KẾT_QUẢ_XÉT_NGHIỆM: position only (no assertions, no candidates)
+
+    Earlier pipeline occasionally tagged these with isHistorical (e.g. surgical
+    procedures in tiền sử → isHistorical). Per spec, this is wrong — strip.
+    """
+    for e in entities:
+        if not isinstance(e, dict):
+            continue
+        if e.get("type") in _TYPES_WITHOUT_ASSERTIONS:
+            e["assertions"] = []
+    return entities
+
+
 # R37 (2026-07-16): Cross-type substring drop — drop short entity (TÊN_XN/KQ_XN/...)
 # nếu nó là substring của entity dài hơn (CHẨN_ĐOÁN) với position overlap.
 # VD: "mạch" (TÊN_XN) inside "bệnh tim mạch do xơ vữa động mạch" (CHẨN_ĐOÁN) → drop "mạch".
@@ -3820,6 +3844,10 @@ def align_and_expand_entities(
     # VD: 'mạch' (TÊN_XN) inside 'bệnh tim mạch do xơ vữa động mạch' (CHẨN_ĐOÁN) → drop 'mạch'.
     aligned = _drop_short_substring_inside_longer(aligned)
 
+    # R37 (2026-07-19): Strip assertions from TÊN_XN/KQ_XN per spec (these types
+    # don't carry isHistorical/isFamily/isNegated).
+    aligned = _strip_assertions_for_test_types(aligned)
+
     # R37-bis (2026-07-14): Auto-fix LLM miss khi tách drug + clinical parens.
     # 'metoprolol (reduced from 50mg to 25mg daily)' → 1 entity THUỐC
     # (drop misclassified 'reduced from...' TÊN_XÉT_NGHIỆM, extend drug to include parens).
@@ -4078,6 +4106,11 @@ def _attach_candidates(
         try:
             codes = icd_retriever.lookup(text, other_entities=other_ents, entity_type=etype)
             record["candidates"] = list(codes) if codes else []
+            # R37 (2026-07-19): Deterministic ICD rule expansion (organism/side/lobe).
+            # Adds specific subcodes based on text qualifiers WITHOUT LLM.
+            record["candidates"] = _apply_deterministic_icd_rules(
+                text, record["candidates"]
+            )
         except Exception as exc:
             logger.warning("ICD lookup fail for '%s' (%s): %s", text, etype, exc)
     elif etype == "TRIỆU_CHỨNG":
@@ -4216,6 +4249,90 @@ def _validate_candidates_for_type(
                 out.append(code)
         # Other types: skip (TRIỆU_CHỨNG/TÊN_XN/KQ_XN not in Stage 3 scope)
     return out
+
+
+# R37 (2026-07-19): Deterministic ICD rule expander — apply context-aware rules
+# (organism → subcode, anatomical side, severity grade) WITHOUT relying on LLM.
+# Goal: "đủ + chính xác + ngữ cảnh" — deterministic, deterministic, deterministic.
+def _apply_deterministic_icd_rules(text: str, candidates: list[str]) -> list[str]:
+    """Apply deterministic ICD-10 rules based on text qualifiers.
+
+    Rules (from STAGE3_PROMPT ICD-10 SPECIFICITY RULES):
+    1. ETIOLOGY: organism → specific A0x subcode (REPLACE parent)
+    2. ANATOMICAL SIDE: trái/phải → add side-specific subcode
+    3. ANATOMICAL DETAIL: thùy trên/dưới → C34.x
+    4. SEVERITY: độ 1/2/3, NYHA → keep qualifier
+    5. MI LOCATION: thành trước/dưới → I21.0/I21.1
+
+    Args:
+        text: disease name từ entity
+        candidates: ICD codes hiện có (từ RAG hoặc Stage 3)
+
+    Returns:
+        List candidates sau khi áp dụng rules. Có thể REPLACE parent với specific.
+        Max 5 codes.
+    """
+    if not candidates or not text:
+        return candidates[:5]
+
+    text_lower = text.lower()
+    out = list(candidates)
+    seen = set(out)
+
+    # Rule 1: ETIOLOGY — specific organism → REPLACE parent with subcode
+    # Shigella dysenteriae → A03.0 (specific), not generic A03
+    if "shigella dysenteriae" in text_lower:
+        if "A03" in seen or any(c.startswith("A03") for c in out):
+            # Remove generic A03, add A03.0
+            out = [c for c in out if not c.startswith("A03") or c == "A03.0"]
+            if "A03.0" not in out:
+                out.append("A03.0")
+            seen = set(out)
+    elif "shigella" in text_lower:
+        if "A03" in seen and "A03.8" not in out:  # Shigella unspecified → A03.8
+            pass  # Keep parent A03
+
+    if "salmonella" in text_lower:
+        if any(c.startswith("A02") for c in out):
+            out.append("A02.0") if "A02.0" not in out else None
+            seen = set(out)
+
+    # Rule 2: ANATOMICAL SIDE — trái/phải → add side-specific J18.x (lung)
+    if "trái" in text_lower:
+        if any(c.startswith("J18") for c in out) and "J18.2" not in seen:
+            out.append("J18.2")  # left lung
+            seen.add("J18.2")
+    elif "phải" in text_lower:
+        if any(c.startswith("J18") for c in out) and "J18.1" not in seen:
+            out.append("J18.1")  # right lung
+            seen.add("J18.1")
+
+    # Rule 3: ANATOMICAL DETAIL — thùy trên/dưới → C34.x (lung cancer)
+    if "thùy trên" in text_lower:
+        if any(c.startswith("C34") for c in out) and "C34.1" not in seen:
+            out.append("C34.1")
+            seen.add("C34.1")
+    elif "thùy dưới" in text_lower:
+        if any(c.startswith("C34") for c in out) and "C34.3" not in seen:
+            out.append("C34.3")
+            seen.add("C34.3")
+    elif "thùy giữa" in text_lower:
+        if any(c.startswith("C34") for c in out) and "C34.2" not in seen:
+            out.append("C34.2")
+            seen.add("C34.2")
+
+    # Rule 4: MI LOCATION — thành trước/dưới → I21.0/I21.1
+    if "nhồi máu cơ tim" in text_lower:
+        if "thành trước" in text_lower and "I21.0" not in seen:
+            out = [c for c in out if c != "I21.9"]  # Remove unspecified
+            out.append("I21.0")
+            seen = set(out)
+        elif "thành dưới" in text_lower and "I21.1" not in seen:
+            out = [c for c in out if c != "I21.9"]
+            out.append("I21.1")
+            seen = set(out)
+
+    return out[:5]
 
 
 def _emit_entity_record(

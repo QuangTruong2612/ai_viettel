@@ -121,6 +121,10 @@ _GENERIC_DRUG_CLASS_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"^(nhóm|loại|họ)\s+\w+(\s+\w+)*$", re.IGNORECASE | re.UNICODE),
     re.compile(r"(toàn\s+thân)$", re.IGNORECASE | re.UNICODE),
     re.compile(r"^(thuốc|loại\s+thuốc|nhóm\s+thuốc)$", re.IGNORECASE | re.UNICODE),
+    # R37 (2026-07-19): Common drug-class / treatment modality terms (không phải thuốc cụ thể)
+    re.compile(r"^(giảm\s+đau|lợi\s+tiểu|giãn\s+cơ|an\s+thần)$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^(liệu\s+pháp|phương\s+pháp|biện\s+pháp)\s+.+$", re.IGNORECASE | re.UNICODE),
+    re.compile(r"^(xông|khí\s+dung|hít)$", re.IGNORECASE | re.UNICODE),
 )
 
 
