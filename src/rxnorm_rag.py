@@ -1211,12 +1211,28 @@ class RxNormVectorSearch:
         if self._embeddings_path.exists():
             try:
                 self._embeddings = np.load(self._embeddings_path)
-                logger.info(
-                    "RxNormVectorSearch: loaded embeddings %s (shape: %r)",
-                    self._embeddings_path.name, self._embeddings.shape,
-                )
+                # R37 (2026-07-20): Validate shape matches current RxNorm data.
+                # Embeddings may be STALE if rxnorm.jsonl rebuilt without regenerating.
+                # Mismatch: file tồn tại + load OK nhưng số vectors khác RxNorm codes → coi stale,
+                # bỏ qua và regenerate để đảm bảo consistency.
+                expected_count = len(self.names) if self.names else len(self.codes)
+                if expected_count and self._embeddings.shape[0] != expected_count:
+                    logger.warning(
+                        "RxNormVectorSearch: Embeddings STALE — file %s có shape (%d, ...) "
+                        "nhưng RxNorm data hiện có %d codes. Force regenerate.",
+                        self._embeddings_path.name,
+                        self._embeddings.shape[0],
+                        expected_count,
+                    )
+                    self._embeddings = None  # Force regenerate
+                else:
+                    logger.info(
+                        "RxNormVectorSearch: loaded embeddings %s (shape: %r)",
+                        self._embeddings_path.name, self._embeddings.shape,
+                    )
             except Exception as exc:
                 logger.warning("Embeddings load fail (%s)", exc)
+                self._embeddings = None
 
         self._loaded = True
 
@@ -1244,7 +1260,10 @@ class RxNormVectorSearch:
                 return []
 
         if self._embeddings is None:
-            logger.info("Auto-generating RxNorm embeddings (chưa có .npy)...")
+            logger.info(
+                "Auto-generating RxNorm embeddings (file %s invalid/missing)...",
+                self._embeddings_path.name,
+            )
             try:
                 self._embeddings = self._model.encode(
                     self.names,

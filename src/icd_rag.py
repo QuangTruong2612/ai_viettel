@@ -2605,17 +2605,33 @@ class ICD10VectorSearch:
         if self._embeddings_path.exists():
             try:
                 self._embeddings = np.load(self._embeddings_path)
-                logger.info(
-                    "ICD10VectorSearch: Đã tải ma trận embeddings %s (shape: %r)",
-                    self._embeddings_path.name,
-                    self._embeddings.shape,
-                )
+                # R37 (2026-07-20): Validate shape matches current ICD data.
+                # Embeddings may be STALE if icd10.jsonl rebuilt without regenerating embeddings.
+                # Mismatch: file tồn tại + load OK nhưng số vectors khác ICD codes → coi như stale,
+                # bỏ qua và regenerate để đảm bảo consistency.
+                expected_count = len(self.descs_raw) if self.descs_raw else None
+                if expected_count and self._embeddings.shape[0] != expected_count:
+                    logger.warning(
+                        "ICD10VectorSearch: Embeddings STALE — file %s có shape (%d, ...) "
+                        "nhưng ICD data hiện có %d codes. Force regenerate.",
+                        self._embeddings_path.name,
+                        self._embeddings.shape[0],
+                        expected_count,
+                    )
+                    self._embeddings = None  # Force regenerate
+                else:
+                    logger.info(
+                        "ICD10VectorSearch: Đã tải ma trận embeddings %s (shape: %r)",
+                        self._embeddings_path.name,
+                        self._embeddings.shape,
+                    )
             except Exception as exc:
                 logger.warning(
                     "Không thể load file embeddings %s: %s",
                     self._embeddings_path,
                     exc,
                 )
+                self._embeddings = None
 
         self._loaded = True
 
@@ -2633,7 +2649,8 @@ class ICD10VectorSearch:
         # 1 & 2. Đảm bảo model và embeddings sẵn sàng
         if self._embeddings is None:
             logger.info(
-                "ICD10VectorSearch: Không tìm thấy file embeddings.npy có sẵn. Đang sinh trực tiếp..."
+                "ICD10VectorSearch: Không có embeddings hợp lệ (file %s). Đang sinh trực tiếp...",
+                self._embeddings_path.name,
             )
             try:
                 t0 = time.time()
