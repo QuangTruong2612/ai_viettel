@@ -199,7 +199,15 @@ def main() -> int:
         logger.warning("torch không khả dụng → mặc định device=cpu")
 
     t0 = time.time()
-    model = SentenceTransformer("BAAI/bge-m3", device=device)
+    # R43 (2026-07-14): Support local model path via env var để tránh
+    # download chậm từ HF khi chạy trên Kaggle (cache không persistent).
+    import os
+    model_path = os.environ.get("BGE_M3_PATH", "BAAI/bge-m3")
+    if os.path.isdir(model_path):
+        logger.info("Loading BGE-M3 từ LOCAL path: %s", model_path)
+    else:
+        logger.info("Loading BGE-M3 từ HuggingFace: %s (sẽ download ~2.3GB)", model_path)
+    model = SentenceTransformer(model_path, device=device)
     logger.info("Load model xong trong %.2fs", time.time() - t0)
 
     # ------------------------------------------------------------------ #
