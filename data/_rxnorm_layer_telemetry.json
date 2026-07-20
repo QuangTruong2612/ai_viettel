@@ -1,3 +1,26 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:7484c72b4d54677730b23b5d108dbd5e53f22a34f654cb0958fe1a48d73a4bca
-size 497
+{
+  "total": 100,
+  "passed": 100,
+  "elapsed_s": 160.29,
+  "layer_distribution": {
+    "L1_exact": 41,
+    "L0_alias": 2,
+    "EMPTY": 24,
+    "L_filter_context": 16,
+    "L2_hybrid": 14,
+    "L4_fuzzy75": 2,
+    "L3_fuzzy80": 1
+  },
+  "layer_pass": {
+    "L1_exact": 41,
+    "L0_alias": 2,
+    "EMPTY": 24,
+    "L_filter_context": 16,
+    "L2_hybrid": 14,
+    "L4_fuzzy75": 2,
+    "L3_fuzzy80": 1
+  },
+  "rerank_total": 0,
+  "rerank_pass": 0,
+  "failures_by_layer": {}
+}

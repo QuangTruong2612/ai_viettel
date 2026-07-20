@@ -70,7 +70,6 @@ try:
                 _BRAND_NAMES.add(kl)
 except Exception as exc:
     logger.warning("[R37] Failed to load drug_aliases.json for brands: %s", exc)
-
 try:
     _brand_path = _PROJECT_ROOT / "data" / "drug_brand_seed.json"
     if _brand_path.exists():

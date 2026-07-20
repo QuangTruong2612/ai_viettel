@@ -1,3 +1,37 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:65e108644a5d5b97abda9531401224992e4fcce02c9361a811cc077d7ebe7da4
-size 1656
+{
+  "reviewed_at": "2026-07-13",
+  "script_version": "build_mining_index.py v2 (context-aware filters)",
+  "previous_run": {
+    "total_candidates": 4,
+    "after_filtering_93_percent_noise_reduction": true,
+    "candidates": ["bipap", "kháng", "augmentin", "cefepim"]
+  },
+  "actions_taken": {
+    "augmentin": {
+      "decision": "SKIP",
+      "reason": "Already in drug_aliases.json line 55 ('augmentin': 'amoxicillin / clavulanate')"
+    },
+    "cefepim": {
+      "decision": "PROMOTED",
+      "reason": "Useful typo variant for RxNorm lookup",
+      "alias_added": "cefepim → cefepime",
+      "file_modified": "data/drug_aliases.json",
+      "rxnorm_confirmation": "37 RxNorm entries have cefepime ingredient",
+      "verification_test": "PASSED — _alias_to_generic('cefepim 1g') returns 'cefepime 1g'"
+    },
+    "bipap": {
+      "decision": "SKIP",
+      "reason": "Not a drug — it's a medical device (Bilevel Positive Airway Pressure)"
+    },
+    "kháng": {
+      "decision": "SKIP",
+      "reason": "Vietnamese verb meaning 'to resist' — slipped through filters, false positive"
+    }
+  },
+  "re_run_results": {
+    "ran_at": "2026-07-13 (same day)",
+    "candidates_after_cefepim_added": 4,
+    "expected_vs_actual": "cefepim STILL appears as candidate (expected) because seed file scans input/ for raw tokens, and 'cefepim' (typo) is NOT in rxnorm.jsonl ingredients list — only canonical 'cefepime' is. The alias handles lookup at runtime; the seed just lists it for review.",
+    "action_required": "NONE — cefepim is handled by the new alias. Future runs will keep showing it as candidate, which is fine for transparency."
+  }
+}

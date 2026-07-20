@@ -42,6 +42,33 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 
+def _safe_json_load(path: Path, default=None):
+    """R37 (2026-07-20): Safe JSON load — xem src/icd_rag.py để biết chi tiết.
+
+    Trên Kaggle sau khi GIT_LFS_SKIP_SMUDGE=1, file JSON có thể bị empty.
+    Hàm này trả default khi file missing/empty/invalid (no crash).
+    """
+    if default is None:
+        default = {}
+    try:
+        if not path.exists():
+            return default
+        content = path.read_text(encoding="utf-8").strip()
+        if not content:
+            logger.warning(
+                "%s is EMPTY (likely LFS skip-smudge). Returning default.",
+                path.name,
+            )
+            return default
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        logger.warning("%s invalid JSON: %s. Returning default.", path.name, exc)
+        return default
+    except Exception as exc:
+        logger.warning("%s load fail: %s. Returning default.", path.name, exc)
+        return default
+
+
 
 # ---------------------------------------------------------------------- #
 # Normalization helpers

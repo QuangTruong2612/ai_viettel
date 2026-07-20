@@ -1,3 +1,698 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:96449ba527a35f283cfc04c6a35307e310cf860d7b43862d427bdf9a613bf0c3
-size 8441
+[
+  [
+    [
+      "hidradenitis",
+      "mồ hôi",
+      "nhọt ổ gà",
+      "tuyến mồ hôi"
+    ],
+    "L73"
+  ],
+  [
+    [
+      "acne",
+      "mụn trứng cá",
+      "trứng cá",
+      "viêm nang lông"
+    ],
+    "L70"
+  ],
+  [
+    [
+      "nhồi máu cơ tim",
+      "nmct",
+      "nstemi",
+      "stemi"
+    ],
+    "I21"
+  ],
+  [
+    [
+      "bệnh mạch vành",
+      "nhồi máu cơ tim cũ",
+      "nmct cũ"
+    ],
+    "I25"
+  ],
+  [
+    [
+      "st chênh lên",
+      "st chênh xuống",
+      "sóng q bệnh lý",
+      "sóng t đảo ngược"
+    ],
+    "I21"
+  ],
+  [
+    [
+      "đau thắt ngực",
+      "đau thắt ngực không ổn định",
+      "đau thắt ngực ổn định"
+    ],
+    "I20"
+  ],
+  [
+    [
+      "hội chứng vành cấp"
+    ],
+    "I24"
+  ],
+  [
+    [
+      "suy tim"
+    ],
+    "I50"
+  ],
+  [
+    [
+      "cuồng nhĩ",
+      "rung nhĩ"
+    ],
+    "I48"
+  ],
+  [
+    [
+      "ngoại tâm thu nhĩ",
+      "pac"
+    ],
+    "I49"
+  ],
+  [
+    [
+      "ngoại tâm thu thất",
+      "pvc"
+    ],
+    "I49"
+  ],
+  [
+    [
+      "nhịp nhanh trên thất",
+      "svt"
+    ],
+    "I47"
+  ],
+  [
+    [
+      "nhịp nhanh thất",
+      "rung thất"
+    ],
+    "I47"
+  ],
+  [
+    [
+      "bav",
+      "block av",
+      "block nhĩ thất"
+    ],
+    "I44"
+  ],
+  [
+    [
+      "block nhánh trái",
+      "lbbb"
+    ],
+    "I44"
+  ],
+  [
+    [
+      "block nhánh phải",
+      "rbbb"
+    ],
+    "I45"
+  ],
+  [
+    [
+      "cao huyết áp",
+      "ha tăng",
+      "huyết áp cao",
+      "tha",
+      "tăng huyết áp"
+    ],
+    "I10"
+  ],
+  [
+    [
+      "tiểu đường",
+      "đtđ",
+      "đái tháo đường",
+      "đái đường"
+    ],
+    "E11"
+  ],
+  [
+    [
+      "hen",
+      "hen phế quản",
+      "hen suyễn"
+    ],
+    "J45"
+  ],
+  [
+    [
+      "bệnh phổi tắc nghẽn mạn",
+      "copd",
+      "tắc nghẽn mạn"
+    ],
+    "J44"
+  ],
+  [
+    [
+      "viêm phổi"
+    ],
+    "J12"
+  ],
+  [
+    [
+      "viêm gan b",
+      "viêm gan b cấp"
+    ],
+    "B16"
+  ],
+  [
+    [
+      "viêm gan c",
+      "viêm gan c cấp"
+    ],
+    "B17"
+  ],
+  [
+    [
+      "carcinoma phổi",
+      "k phổi",
+      "u phổi",
+      "ung thư phổi"
+    ],
+    "C34"
+  ],
+  [
+    [
+      "di căn gan",
+      "di căn não",
+      "di căn phổi",
+      "di căn xương",
+      "second"
+    ],
+    "C79"
+  ],
+  [
+    [
+      "hở van 2 lá",
+      "hở van hai lá",
+      "hở van mitral",
+      "mitral valve prolapse",
+      "sa van 2 lá",
+      "sa van hai lá",
+      "sa van mitral"
+    ],
+    "I34"
+  ],
+  [
+    [
+      "ung thư"
+    ],
+    "C"
+  ],
+  [
+    [
+      "embolism",
+      "huyết khối",
+      "thrombosis",
+      "tắc mạch"
+    ],
+    "I82"
+  ],
+  [
+    [
+      "pe ",
+      "phổi tắc nghẽn",
+      "thuyên tắc phổi"
+    ],
+    "I26"
+  ],
+  [
+    [
+      "brain tumor",
+      "khối u não",
+      "u bán cầu não",
+      "u não",
+      "u trán"
+    ],
+    "C71"
+  ],
+  [
+    [
+      "di căn"
+    ],
+    "C79"
+  ],
+  [
+    [
+      "tăng huyết áp phổi",
+      "tăng áp phổi"
+    ],
+    "I27"
+  ],
+  [
+    [
+      "hẹp van",
+      "hở van",
+      "van tim"
+    ],
+    "I34"
+  ],
+  [
+    [
+      "suy thận"
+    ],
+    "N18"
+  ],
+  [
+    [
+      "thiếu máu"
+    ],
+    "D50"
+  ],
+  [
+    [
+      "đau thắt lưng"
+    ],
+    "M54"
+  ],
+  [
+    [
+      "thoái hoá",
+      "thoái hóa"
+    ],
+    "M15"
+  ],
+  [
+    [
+      "thoát vị"
+    ],
+    "K46"
+  ],
+  [
+    [
+      "xơ gan"
+    ],
+    "K74"
+  ],
+  [
+    [
+      "loét dạ dày",
+      "loét tá tràng"
+    ],
+    "K25"
+  ],
+  [
+    [
+      "viêm dạ dày"
+    ],
+    "K29"
+  ],
+  [
+    [
+      "gastroesophageal",
+      "gerd",
+      "trào ngược"
+    ],
+    "K21"
+  ],
+  [
+    [
+      "viêm ruột"
+    ],
+    "K52"
+  ],
+  [
+    [
+      "tiêu chảy"
+    ],
+    "K52"
+  ],
+  [
+    [
+      "táo bón"
+    ],
+    "K59"
+  ],
+  [
+    [
+      "viêm phúc mạc"
+    ],
+    "K65"
+  ],
+  [
+    [
+      "sỏi thận"
+    ],
+    "N20"
+  ],
+  [
+    [
+      "viêm bàng quang",
+      "viêm niệu",
+      "viêm đường tiết niệu"
+    ],
+    "N39"
+  ],
+  [
+    [
+      "viêm phổi mắc phải cộng đồng",
+      "vpmpccĐ"
+    ],
+    "J18"
+  ],
+  [
+    [
+      "copd",
+      "hen",
+      "khó thở"
+    ],
+    "J"
+  ],
+  [
+    [
+      "đau ngực"
+    ],
+    "R07"
+  ],
+  [
+    [
+      "đau bụng"
+    ],
+    "R10"
+  ],
+  [
+    [
+      "sốt"
+    ],
+    "R50"
+  ],
+  [
+    [
+      "ho"
+    ],
+    "R05"
+  ],
+  [
+    [
+      "mệt mỏi"
+    ],
+    "R53"
+  ],
+  [
+    [
+      "chóng mặt"
+    ],
+    "R42"
+  ],
+  [
+    [
+      "buồn nôn"
+    ],
+    "R11"
+  ],
+  [
+    [
+      "nôn"
+    ],
+    "R11"
+  ],
+  [
+    [
+      "ruột",
+      "tiêu hóa",
+      "đại tràng"
+    ],
+    "K"
+  ],
+  [
+    [
+      "mạch vành",
+      "tim",
+      "tim mạch"
+    ],
+    "I"
+  ],
+  [
+    [
+      "hô hấp",
+      "phế quản",
+      "phổi"
+    ],
+    "J"
+  ],
+  [
+    [
+      "não",
+      "thần kinh",
+      "thần kinh trung ương"
+    ],
+    "G"
+  ],
+  [
+    [
+      "cơ xương khớp",
+      "khớp",
+      "xương"
+    ],
+    "M"
+  ],
+  [
+    [
+      "nội tiết",
+      "tuyến giáp",
+      "đái tháo đường"
+    ],
+    "E"
+  ],
+  [
+    [
+      "da",
+      "da liễu"
+    ],
+    "L"
+  ],
+  [
+    [
+      "mắt"
+    ],
+    "H"
+  ],
+  [
+    [
+      "họng",
+      "tai",
+      "tai mũi họng"
+    ],
+    "H"
+  ],
+  [
+    [
+      "thận",
+      "tiết niệu"
+    ],
+    "N"
+  ],
+  [
+    [
+      "huyết học",
+      "máu"
+    ],
+    "D"
+  ],
+  [
+    [
+      "phụ khoa",
+      "sản phụ khoa",
+      "thai"
+    ],
+    "O"
+  ],
+  [
+    [
+      "nhi khoa"
+    ],
+    "P"
+  ],
+  [
+    [
+      "tâm lý",
+      "tâm thần"
+    ],
+    "F"
+  ],
+  [
+    [
+      "ngoại khoa",
+      "phẫu thuật"
+    ],
+    "Z"
+  ],
+  [
+    [
+      "nội khoa"
+    ],
+    "Z"
+  ],
+  [
+    [
+      "gan viêm",
+      "viêm gan"
+    ],
+    "K75"
+  ],
+  [
+    [
+      "carcinoma phổi",
+      "k phổi",
+      "ung thư phổi"
+    ],
+    "C34"
+  ],
+  [
+    [
+      "ung thư vú"
+    ],
+    "C50"
+  ],
+  [
+    [
+      "k dạ dày",
+      "ung thư dạ dày"
+    ],
+    "C16"
+  ],
+  [
+    [
+      "k đại tràng",
+      "ung thư ruột",
+      "ung thư trực tràng",
+      "ung thư đại tràng"
+    ],
+    "C18"
+  ],
+  [
+    [
+      "tai biến mạch máu não",
+      "tbmmn",
+      "đột quỵ"
+    ],
+    "I63"
+  ],
+  [
+    [
+      "suy thận"
+    ],
+    "N18"
+  ],
+  [
+    [
+      "viêm dạ dày"
+    ],
+    "K29"
+  ],
+  [
+    [
+      "loét dạ dày"
+    ],
+    "K25"
+  ],
+  [
+    [
+      "thoái hóa khớp"
+    ],
+    "M15"
+  ],
+  [
+    [
+      "viêm khớp dạng thấp"
+    ],
+    "M06"
+  ],
+  [
+    [
+      "thoát vị đĩa đệm"
+    ],
+    "M51"
+  ],
+  [
+    [
+      "trào ngược dạ dày"
+    ],
+    "K21"
+  ],
+  [
+    [
+      "rối loạn lipid",
+      "rối loạn lipid máu",
+      "tăng lipid máu"
+    ],
+    "E78"
+  ],
+  [
+    [
+      "viêm xoang"
+    ],
+    "J32"
+  ],
+  [
+    [
+      "viêm phế quản"
+    ],
+    "J20"
+  ],
+  [
+    [
+      "viêm họng"
+    ],
+    "J02"
+  ],
+  [
+    [
+      "viêm amidan"
+    ],
+    "J03"
+  ],
+  [
+    [
+      "viêm tai giữa"
+    ],
+    "H66"
+  ],
+  [
+    [
+      "nhiễm trùng tiết niệu",
+      "nhiễm trùng đường tiết niệu"
+    ],
+    "N39"
+  ],
+  [
+    [
+      "sỏi thận"
+    ],
+    "N20"
+  ],
+  [
+    [
+      "block av",
+      "block nhĩ thất"
+    ],
+    "I44"
+  ],
+  [
+    [
+      "ngoại tâm thu thất",
+      "pvc"
+    ],
+    "I49"
+  ],
+  [
+    [
+      "ngoại tâm thu nhĩ",
+      "pac"
+    ],
+    "I49"
+  ]
+]

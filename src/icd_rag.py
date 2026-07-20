@@ -42,6 +42,44 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
+
+def _safe_json_load(path: Path, default=None):
+    """R37 (2026-07-20): Safe JSON load với graceful empty/invalid handling.
+
+    Trên Kaggle sau khi GIT_LFS_SKIP_SMUDGE=1, các file JSON có thể bị empty
+    (LFS pointer bị smudge thành 0 bytes). Hàm này:
+    - File missing → trả default
+    - File empty (0 bytes) → log warning + trả default
+    - File invalid JSON → log warning + trả default
+    - File OK → parse và trả data
+
+    Args:
+        path: Path tới file JSON
+        default: giá trị trả về khi lỗi (mặc định {})
+
+    Returns:
+        Parsed JSON hoặc default
+    """
+    if default is None:
+        default = {}
+    try:
+        if not path.exists():
+            return default
+        content = path.read_text(encoding="utf-8").strip()
+        if not content:
+            logger.warning(
+                "%s is EMPTY (likely LFS skip-smudge). Returning default.",
+                path.name,
+            )
+            return default
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        logger.warning("%s invalid JSON: %s. Returning default.", path.name, exc)
+        return default
+    except Exception as exc:
+        logger.warning("%s load fail: %s. Returning default.", path.name, exc)
+        return default
+
 # ════════════════════════════════════════════════════════════════════════════════
 # R28 (2026-07-13): Loader cho auto-mined ICD aliases từ data/icd_aliases.json
 # (chạy `python scripts/build_mining_index.py` để generate file này).
@@ -3251,23 +3289,28 @@ class DynamicConfigManager:
             if force or self._mtimes.get(syn_path) != mtime:
                 self._mtimes[syn_path] = mtime
                 try:
-                    self.synonym_rings = json.loads(syn_path.read_text(encoding="utf-8"))
-                    self._synonym_tokens_cache.clear()
-                    for k, syn_list in self.synonym_rings.items():
-                        tokens_set: set[str] = set()
-                        for syn in syn_list:
-                            tokens_set.update(re.findall(r'[a-zà-ỹ0-9_/-]{2,}', syn.lower()))
-                        self._synonym_tokens_cache[k.lower()] = tokens_set
+                    # R37 (2026-07-20): Skip empty files silently (LFS smudge case)
+                    syn_content = syn_path.read_text(encoding="utf-8").strip()
+                    if syn_content:
+                        self.synonym_rings = json.loads(syn_content)
+                        self._synonym_tokens_cache.clear()
+                        for k, syn_list in self.synonym_rings.items():
+                            tokens_set: set[str] = set()
+                            for syn in syn_list:
+                                tokens_set.update(re.findall(r'[a-zà-ỹ0-9_/-]{2,}', syn.lower()))
+                            self._synonym_tokens_cache[k.lower()] = tokens_set
                 except Exception as e:
                     logger.warning("Failed to hot-reload %s: %s", syn_path, e)
-
         # Check drug-disease cooccurrence
         if coocc_path.exists():
             mtime = coocc_path.stat().st_mtime
             if force or self._mtimes.get(coocc_path) != mtime:
                 self._mtimes[coocc_path] = mtime
                 try:
-                    self.cooccurrence_map = json.loads(coocc_path.read_text(encoding="utf-8"))
+                    # R37 (2026-07-20): Skip empty files silently (LFS smudge case)
+                    coocc_content = coocc_path.read_text(encoding="utf-8").strip()
+                    if coocc_content:
+                        self.cooccurrence_map = json.loads(coocc_content)
                 except Exception as e:
                     logger.warning("Failed to hot-reload %s: %s", coocc_path, e)
 

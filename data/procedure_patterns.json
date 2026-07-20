@@ -1,3 +1,21 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:909707ccc984bc86c54a075cbfad67395dddc3d76345136edfa3e3a0be8e5976
-size 1355
+{
+  "vn_verbs": [
+    "^(?:truyền|truyền\\s+(?:dịch|máu|chế\\s+phẩm|tiểu\\s+cầu|hồng\\s+cầu|yếu\\s+tố|khối|血浆|plasma))",
+    "^(?:phẫu\\s+thuật|nội\\s+soi|chọc\\s+dò|chọc\\s+hút|đặt\\s+(?:stent|shunt|catheter|ống|nội\\s+khí\\s+quản|nội\\s+khí|sonde|drain))",
+    "^(?:thủ\\s+thuật\\s+\\w+|can\\s+thiệp\\s+(?:nội\\s+mạch|nội\\s+soi|tái\\s+thông|qua\\s+da))",
+    "^(?:xạ\\s+trị|hóa\\s+trị|sinh\\s+thiết|cắt\\s+(?:polyp|amidan|amygdala|đại\\s+tràng|hẹp|mổ|bao\\s+thử))",
+    "^(?:rửa\\s+dạ\\s+dày|khâu\\s+vết\\s+thương|băng\\s+bó|cầm\\s+máu|ghi\\s+đông|đốt\\s+(?!điện\\s+diện))",
+    "^(?:thở\\s+(?:oxy|máy|cơ\\s+học)|thông\\s+(?:khí\\s+quản|sống\\s+mũi)|đặt\\s+nội\\s+khí\\s+quản)",
+    "^(?:nong\\s+\\w+|gắp\\s+\\w+|kẹp\\s+\\w+|đỡ\\s+đẻ|cắt\\s+amidan|cắt\\s+polyp)",
+    "^(?:mổ\\s+\\w+|ghép\\s+\\w+|cấy\\s+(?!ghép)|vi\\s+phẫu|nội\\s+soi\\s+\\w+)"
+  ],
+  "exclude_if_contains": [
+    "thuốc", "viên uống", "viên nén", "viên nang",
+    "uống", "tiêm truyền", "tiêm bắp", "tiêm tĩnh mạch",
+    " mg ", " ml ", " mcg ", " iu "
+  ],
+  "exclude_if_startswith": [
+    "siêu âm", "chụp x-quang", "chụp ct", "chụp mri",
+    "điện tâm đồ", "đo ", "xét nghiệm"
+  ]
+}

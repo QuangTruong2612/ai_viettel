@@ -1,3 +1,35 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:55e0d8651be2d18673ab98468f15c888a862816d4fe2a03c83574158f9f2436c
-size 1242
+{
+  "vn_drug_class_patterns": [
+    "^thuốc\\s+(chống|kháng|giảm|hạ|tăng|điều\\s+trị|cầm|lợi|giúp|bổ|an\\s+thần) ",
+    "^(kháng|chống)\\s+(sinh|viêm|đông|nôn|histamin|histamine|đông\\s+máu|oxy\\s+hóa)",
+    "^nhóm\\s+\\w+$",
+    "^(thuốc|loại thuốc|nhóm thuốc)$",
+    "(toàn\\s+thân|họ\\s+\\w+|loại\\s+\\w+)$",
+    "^thuốc\\s+\\w+$",
+    "^nsaid$|^nsaids$|^corticoid(\\s+\\w+)?$|^corticoids$|^corticosteroid(\\s+\\w+)?$|^corticosteroids$|^nitrates?(\\s+\\w+)?$|^nitrate$",
+    "^thuốc\\s+nsaid(\\s|$)",
+    "^thuốc\\s+corticoid(\\s|$)",
+    "^thuốc\\s+nitrate(\\s|$)",
+    "^thuốc\\s+chống\\s+viêm\\s+steroid(\\s|$)",
+    "^thuốc\\s+steroid(\\s|$)",
+    "^giảm\\s+(đau|sốt|ho)$",
+    "^lợi\\s+tiểu$",
+    "^liệu\\s+pháp\\s+.+$",
+    "^phương\\s+pháp\\s+.+$",
+    "^xông(\\s+khí\\s+dung)?$",
+    "^hít\\s+khí\\s+dung$"
+  ],
+  "vn_diagnosis_class_patterns": [
+    "^bệnh\\s+\\w+\\s+cấp$",
+    "^hội\\s+chứng\\s+\\w+$",
+    "^tình\\s+trạng\\s+\\w+$",
+    "^triệu\\s+chứng\\s+\\w+$"
+  ],
+  "icd_uninformative_patterns": [
+    "^[RYZ]\\d{2}(\\.\\d+)?$",
+    "^T45\\.\\d+$",
+    "^Y5[0-7]\\.\\d+$",
+    "^R69(\\.\\d+)?$",
+    "^Z00\\.\\d+$"
+  ]
+}

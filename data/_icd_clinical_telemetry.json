@@ -1,3 +1,69 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:27fd0e41314abbb480122e1a4173bad61a869288a776499ff5f16ed36f50bfab
-size 1386
+{
+  "total": 100,
+  "passed": 96,
+  "elapsed_s": 0.18,
+  "layer_distribution": {
+    "EMPTY": 16,
+    "L0_prefix_word": 68,
+    "L1.5_vn_prefix": 12,
+    "L0_alias": 4
+  },
+  "layer_pass": {
+    "EMPTY": 15,
+    "L0_prefix_word": 68,
+    "L1.5_vn_prefix": 9,
+    "L0_alias": 4
+  },
+  "category_total": {
+    "valid": 50,
+    "symptom": 15,
+    "abbr": 15,
+    "compound": 5,
+    "drug_class": 5,
+    "resistance": 5,
+    "empty": 5
+  },
+  "category_pass": {
+    "valid": 50,
+    "symptom": 15,
+    "abbr": 13,
+    "compound": 5,
+    "drug_class": 5,
+    "resistance": 3,
+    "empty": 5
+  },
+  "failures_by_layer": {
+    "L1.5_vn_prefix": [
+      {
+        "text": "rlll",
+        "got": [],
+        "reason": "EMPTY for 'rlll' (expected ['E78'])",
+        "behavior": "abbr"
+      },
+      {
+        "text": "bptnmt",
+        "got": [],
+        "reason": "EMPTY for 'bptnmt' (expected ['J44'])",
+        "behavior": "abbr"
+      },
+      {
+        "text": "vi khuẩn kháng thuốc",
+        "got": [
+          "B98.0"
+        ],
+        "reason": "NON-EMPTY: ['B98.0']",
+        "behavior": "resistance"
+      }
+    ],
+    "EMPTY": [
+      {
+        "text": "lao kháng thuốc",
+        "got": [
+          "A15"
+        ],
+        "reason": "NON-EMPTY: ['A15']",
+        "behavior": "resistance"
+      }
+    ]
+  }
+}

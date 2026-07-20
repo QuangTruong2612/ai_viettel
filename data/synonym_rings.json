@@ -1,3 +1,30 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:84b369935060722bdf05714d096b325f78c021c513ae9c5c5139aab9e4154e96
-size 1582
+{
+  "u": ["bướu", "khối u"],
+  "bướu": ["u", "khối u"],
+  "khối u": ["u", "bướu"],
+  "ung thư": ["u ác tính", "u ác", "khối u ác"],
+  "tim": ["cơ tim", "mạch vành", "van tim"],
+  "cơ tim": ["tim", "nội tâm mạc"],
+  "thận": ["tiết niệu", "cầu thận", "bể thận"],
+  "tiết niệu": ["thận", "bàng quang", "niệu đạo"],
+  "viêm gan": ["viêm gan siêu vi", "nhiễm trùng gan"],
+  "viêm gan siêu vi": ["viêm gan"],
+  "suy giảm": ["thiếu hụt", "giảm sút", "suy yếu"],
+  "thiếu hụt": ["suy giảm", "giảm sút"],
+  "phổi": ["đường hô hấp dưới", "hô hấp", "phế quản"],
+  "hô hấp": ["phổi", "phế quản"],
+  "dạ dày": ["bao tử", "thực quản dạ dày"],
+  "bao tử": ["dạ dày"],
+  "xuất huyết": ["chảy máu", "rỉ máu"],
+  "chảy máu": ["xuất huyết", "rỉ máu"],
+  "nhồi máu": ["hoại tử", "thiếu máu cục bộ"],
+  "đái tháo đường": ["tiểu đường", "đường huyết cao"],
+  "tiểu đường": ["đái tháo đường", "đường huyết cao"],
+  "tăng huyết áp": ["chứng cao huyết áp", "cao huyết áp", "huyết áp cao"],
+  "cao huyết áp": ["tăng huyết áp", "huyết áp cao"],
+  "suy tim": ["suy bơm tim", "suy tim sung huyết"],
+  "viêm khớp": ["thoái hóa khớp", "đau khớp"],
+  "thoái hóa khớp": ["viêm khớp", "đau khớp"],
+  "tai biến mạch máu não": ["đột quỵ", "nhồi máu não", "xuất huyết não"],
+  "đột quỵ": ["tai biến mạch máu não", "nhồi máu não"]
+}

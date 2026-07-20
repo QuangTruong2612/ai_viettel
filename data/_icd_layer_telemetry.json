@@ -1,3 +1,20 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:1fa3e2aa2fee19a4a8e4d960b91b23bebf45cc88e2b53933f2bb66ad82478b6d
-size 327
+{
+  "total": 100,
+  "passed": 99,
+  "elapsed_s": 0.01,
+  "layer_distribution": {
+    "EMPTY": 100
+  },
+  "layer_pass": {
+    "EMPTY": 99
+  },
+  "failures_by_layer": {
+    "EMPTY": [
+      {
+        "text": "rlll",
+        "got": [],
+        "reason": "EMPTY for 'rlll' (expected ['E78'])"
+      }
+    ]
+  }
+}
