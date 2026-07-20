@@ -1840,12 +1840,38 @@ class RxNormRetriever:
 
 
 def load_index(path: Optional[Path] = None) -> RxNormIndex:
-    """Nạp RxNormIndex từ JSON. Trả RxNormIndex rỗng nếu không có file."""
+    """Nạp RxNormIndex từ JSON. Trả RxNormIndex rỗng nếu không có file hoặc file invalid.
+
+    R37 (2026-07-20): Robust handling cho empty file (vd LFS skip-smudge làm file rỗng).
+    Log warning để user biết cần regenerate index.
+    """
     path = path or (DATA_DIR / "rxnorm_index.json")
     if not path.exists():
         return RxNormIndex()
-    with path.open(encoding="utf-8") as f:
-        return RxNormIndex.from_dict(json.load(f))
+    try:
+        with path.open(encoding="utf-8") as f:
+            content = f.read().strip()
+        if not content:
+            # Empty file — likely LFS skip-smudge hoặc manual edit
+            logger.warning(
+                "RxNorm index file %s is EMPTY (likely LFS skip-smudge). "
+                "Returning empty RxNormIndex. Run scripts/build_rxnorm_index.py to regenerate.",
+                path.name,
+            )
+            return RxNormIndex()
+        return RxNormIndex.from_dict(json.loads(content))
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "RxNorm index file %s invalid JSON: %s. Returning empty RxNormIndex.",
+            path.name, exc,
+        )
+        return RxNormIndex()
+    except Exception as exc:
+        logger.warning(
+            "RxNorm index file %s load fail: %s. Returning empty RxNormIndex.",
+            path.name, exc,
+        )
+        return RxNormIndex()
 
 
 def save_index(idx: RxNormIndex, path: Optional[Path] = None) -> None:

@@ -928,8 +928,20 @@ class ICDRetriever:
                 return build_from_seed(seed_path)
             return ICDIndex()
         try:
-            return ICDIndex.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        except Exception:
+            content = path.read_text(encoding="utf-8").strip()
+            if not content:
+                # R37 (2026-07-20): Empty file — likely LFS skip-smudge
+                logger.warning(
+                    "icd_index.json is EMPTY (likely LFS skip-smudge). "
+                    "Returning empty ICDIndex."
+                )
+                return ICDIndex()
+            return ICDIndex.from_dict(json.loads(content))
+        except json.JSONDecodeError as exc:
+            logger.warning("icd_index.json invalid JSON: %s. Returning empty.", exc)
+            return ICDIndex()
+        except Exception as exc:
+            logger.warning("icd_index.json load fail: %s. Returning empty.", exc)
             return ICDIndex()
 
     def save_index(self, path: Optional[Path] = None) -> None:
