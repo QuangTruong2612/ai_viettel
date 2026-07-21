@@ -584,7 +584,7 @@ def _refine_stage2_results(input_text: str, stage2_entities: list[dict[str, Any]
     
     drug_endings = re.compile(r"\d+\s*(?:mg|mcg|g|ml|iu|viên|ống|gói|po|bid|tid|daily|prn)$", re.IGNORECASE)
     drug_names = _DRUG_NAMES_UNIONED  # R28: 13 → ~63k entries auto-extended
-    normal_patterns = re.compile(r"^(?:bình\s+thường|không\s+ghi\s+nhận.*|nhịp\s+xoang.*|không\s+có\s+gì\s+đáng\s+chú\s+ý)$", re.IGNORECASE)
+    normal_patterns = re.compile(r"^(?:bình\s+thường|không\s+ghi\s+nhận.*|không\s+có\s+gì\s+đáng\s+chú\s+ý)$", re.IGNORECASE)
     vital_patterns = re.compile(r"^(?:\d{2,3}/\d{2,3}\s*(?:mmHg)?|SpO2.*|\d{2,3}\s*%|VS\d+\.\d+.*|\d{2,3}\s*(?:lần/phút|nhịp/phút|\s*°C))$", re.IGNORECASE)
     test_names = {"điện tâm đồ", "ecg", "x-quang ngực", "siêu âm tim", "siêu âm tim qua thành ngực", "phân tích nước tiểu", "công thức máu", "monitor holter", "chụp x-quang"}
 
@@ -602,7 +602,7 @@ def _refine_stage2_results(input_text: str, stage2_entities: list[dict[str, Any]
         elif _is_procedure(text):
             # R28: Kiểm tra TRƯỚC drug để tránh "truyền dịch yếu tố IX" → THUỐC
             etype = "TÊN_XÉT_NGHIỆM"
-        elif drug_endings.search(text) or any(text.lower().startswith(dn) for dn in drug_names):
+        elif drug_endings.search(text) or text.lower() in _COMMON_DRUG_NAMES:
             etype = "THUỐC"
         elif text.lower() in test_names:
             etype = "TÊN_XÉT_NGHIỆM"
@@ -654,7 +654,7 @@ def _stage2_fallback_classify(mentions: list[dict[str, Any]]) -> list[dict[str, 
     fallback_list: list[dict[str, Any]] = []
     drug_endings = re.compile(r"\d+\s*(?:mg|mcg|g|ml|iu|viên|ống|gói|po|bid|tid|daily|prn)$", re.IGNORECASE)
     drug_names = _DRUG_NAMES_UNIONED  # R28: 13 → ~63k entries auto-extended
-    normal_patterns = re.compile(r"^(?:bình\s+thường|không\s+ghi\s+nhận.*|nhịp\s+xoang.*|không\s+có\s+gì\s+đáng\s+chú\s+ý)$", re.IGNORECASE)
+    normal_patterns = re.compile(r"^(?:bình\s+thường|không\s+ghi\s+nhận.*|không\s+có\s+gì\s+đáng\s+chú\s+ý)$", re.IGNORECASE)
     vital_patterns = re.compile(r"^(?:\d{2,3}/\d{2,3}\s*(?:mmHg)?|SpO2.*|\d{2,3}\s*%|VS\d+\.\d+.*|\d{2,3}\s*(?:lần/phút|nhịp/phút|\s*°C))$", re.IGNORECASE)
     test_names = {"điện tâm đồ", "ecg", "x-quang ngực", "siêu âm tim", "siêu âm tim qua thành ngực", "phân tích nước tiểu", "công thức máu", "monitor holter", "chụp x-quang"}
     symptom_hints = {"đau ", "khó thở", "sốt", "mệt mỏi", "đánh trống ngực", "thắt chặt ngực", "buồn nôn", "chóng mặt", "ho ", "phù "}
@@ -673,7 +673,7 @@ def _stage2_fallback_classify(mentions: list[dict[str, Any]]) -> list[dict[str, 
         elif _is_procedure(text):
             # R28: ưu tiên procedure trước drug (vd "truyền dịch yếu tố IX" → procedure)
             etype = "TÊN_XÉT_NGHIỆM"
-        elif drug_endings.search(text) or any(tl.startswith(dn) for dn in drug_names):
+        elif drug_endings.search(text) or tl in _COMMON_DRUG_NAMES:
             etype = "THUỐC"
         elif tl in test_names or "xét nghiệm" in tl or "chụp" in tl or "siêu âm" in tl:
             etype = "TÊN_XÉT_NGHIỆM"
