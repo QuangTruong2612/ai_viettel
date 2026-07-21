@@ -608,20 +608,19 @@ def _refine_stage2_results(input_text: str, stage2_entities: list[dict[str, Any]
             etype = "TÊN_XÉT_NGHIỆM"
 
         # B. Assertion Cross-Validation & Refinement
-        if etype == "KẾT_QUẢ_XÉT_NGHIỆM" and "isNegated" in assertions:
-            assertions = [a for a in assertions if a != "isNegated"]
-
-        if isinstance(pos, list) and len(pos) == 2 and etype in ("CHẨN_ĐOÁN", "THUỐC", "TRIỆU_CHỨNG"):
+        if etype in ("KẾT_QUẢ_XÉT_NGHIỆM", "TÊN_XÉT_NGHIỆM"):
+            assertions = []
+        elif isinstance(pos, list) and len(pos) == 2 and etype in ("CHẨN_ĐOÁN", "THUỐC", "TRIỆU_CHỨNG"):
             try:
                 s = int(pos[0])
                 if 0 <= s < len(input_text):
                     pre_window = input_text[max(0, s - 16):s].lower()
-                    if re.search(r"\b(?:không|chưa|chẳng)\s+(?:có\s+)?$", pre_window) and not re.search(r"\b(?:tuân\s+thủ|rõ|thể|biết|dùng)\s*$", pre_window):
-                        if "isNegated" not in assertions:
-                            assertions.append("isNegated")
+                    # Only check pre_window if within the SAME line/sentence (no \n or .)
+                    if "\n" not in pre_window and "." not in pre_window:
+                        if re.search(r"\b(?:không|chưa|chẳng)\s+(?:có\s+)?$", pre_window) and not re.search(r"\b(?:tuân\s+thủ|rõ|thể|biết|dùng)\s*$", pre_window):
+                            if "isNegated" not in assertions:
+                                assertions.append("isNegated")
 
-                    # Rule-Dominance Merge (Super-Upgrade 5)
-                    rule_assertions = _detect_assertions_from_context(text, input_text, etype, s)
                     section_id = _find_current_section(input_text, s)
                     if section_id == "tien_su":
                         if "isHistorical" not in assertions:
@@ -629,8 +628,9 @@ def _refine_stage2_results(input_text: str, stage2_entities: list[dict[str, Any]
                     elif section_id in ("hien_tai", "ly_do", "danh_gia", "khám"):
                         assertions = [a for a in assertions if a != "isHistorical"]
 
+                    rule_assertions = _detect_assertions_from_context(text, input_text, etype, s)
                     for ra in rule_assertions:
-                        if ra in ("isNegated", "isFamily") and ra not in assertions:
+                        if ra in ("isNegated", "isFamily", "isHistorical") and ra not in assertions:
                             assertions.append(ra)
             except (ValueError, TypeError):
                 pass
@@ -1356,12 +1356,12 @@ def _detect_assertions_from_context(
 
     # isFamily: R38 - comprehensive VN family patterns
     family_patterns = [
-        # Bare family member + disease verb (no "bệnh nhân")
-        r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú|bác)(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ))?\s+(?:bị|mắc|có|từng|tiền\s+sử|mất\s+vì|chết\s+vì|đã\s+từng|được\s+chẩn\s+đoán)\b",
+        # Bare family member + disease verb (no "bệnh nhân"), excluding bác sĩ / chú ý
+        r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú(?!\s+ý)|bác(?!\s+sĩ))(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ))?\s+(?:bị|mắc|có|từng|tiền\s+sử|mất\s+vì|chết\s+vì|đã\s+từng|được\s+chẩn\s+đoán)\b",
         # Family negative ("GIA ĐÌNH KHÔNG ai...")
         r"gia\s+[đd][ìi]nh\s+kh[ôo]ng\s+(?:ai|b[ệe]n\s+n[âa]o)",
-        # Family member with "bệnh nhân"
-        r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú|bác)(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ))?\s+b[ệe]nh\s+nh[âa]n",
+        # Family member with "bệnh nhân" (excluding bác sĩ)
+        r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú(?!\s+ý)|bác(?!\s+sĩ))(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ))?\s+b[ệe]nh\s+nh[âa]n",
         # General family markers
         r"gia\s+đ[ìi]nh\s+(?:có|bị|từng|tiền\s+sử|ghi\s+nhận|ai|mắc)",
         r"ti[eề]n\s+s[ử]\s*gia\s+[đd][ìi]nh",
@@ -1475,12 +1475,13 @@ def _is_in_negation_chain(input_text: str, entity_pos: int) -> bool:
     last_match_abs_pos = search_window_start + last_match.start()
     last_match_end_pos = search_window_start + last_match.end()
 
-    # Check giữa "không" và entity_pos có BREAK word không
-    # (vd "có", "nhưng" sẽ reset negation chain)
+    # Check giữa "không" và entity_pos có BREAK word HOẶC ranh giới câu/dòng (\n hoặc .) không
     between = text_before[last_match_end_pos:entity_pos]
+    if "\n" in between or "." in between:
+        return False  # Ranh giới câu/dòng → chain break!
+
     if not between.strip():
         # "không" ngay trước entity (no words between)
-        # Check NON_NEGATION_CONTEXTS trên full span "không" → entity_pos + 80
         entity_end = min(len(input_text), entity_pos + 80)
         non_neg_span = input_text[max(0, last_match_abs_pos - 50):entity_end]
         for pat in (
@@ -1499,8 +1500,7 @@ def _is_in_negation_chain(input_text: str, entity_pos: int) -> bool:
         return False  # Có "có"/"nhưng"/"mà" → chain break
 
     # Check NON_NEGATION_CONTEXTS — span từ "không" → hết entity (entity_pos + len(entity_text))
-    # Lưu ý: entity_text có thể không có trong current scope, dùng end_pos fallback
-    entity_end = min(len(input_text), entity_pos + 80)  # 80 chars từ entity start
+    entity_end = min(len(input_text), entity_pos + 80)
     non_neg_span = input_text[last_match_abs_pos:entity_end]
     for pat in (
         r"không\s+tuân\s+thủ",
@@ -1547,99 +1547,71 @@ def _find_current_section(input_text: str, entity_pos: int) -> str:
     Returns:
         "tien_su" / "hien_tai" / "danh_gia" / "" (không xác định)
     """
-    text_lower = input_text.lower()
-    pos = max(0, entity_pos)
+    text_before = input_text[:max(0, entity_pos)]
 
-    # Section patterns (ưu tiên cao hơn cho cụm từ cụ thể)
-    section_patterns = [
-        # === TIỀN SỬ (isHistorical=True) ===
-        # Generic "Tiền sử" (không cần số prefix) - PRIORITY CAO để detect section tiền sử ở mọi vị trí
-        (r"\btiền sử bệnh\s*nội khoa", "tien_su", 95),
-        (r"\btiền sử bệnh\s*ngoại khoa", "tien_su", 95),
-        (r"\btiền sử phẫu thuật", "tien_su", 92),
-        (r"\btiền sử thủ thuật", "tien_su", 92),
-        (r"\btiền sử gia đình", "tien_su", 92),
-        (r"\btiền sử dị ứng", "tien_su", 92),
-        (r"\btiền sử xã hội", "tien_su", 92),
-        (r"\btiền sử bệnh", "tien_su", 88),
-        (r"\btiền sử", "tien_su", 85),
-        (r"\bbệnh sử", "tien_su", 85),
-        (r"\btiền căn", "tien_su", 85),
-        (r"thuốc trước khi nhập viện", "tien_su", 95),
-        (r"thuốc trước đây", "tien_su", 95),
-        (r"thuốc đang dùng", "tien_su", 90),
-        (r"thuốc ra viện", "hien_tai", 90),  # Thuốc ra viện = hiện tại
-        (r"đang điều trị tại nhà", "tien_su", 90),
-        (r"đang dùng thuốc", "tien_su", 85),
-        # Số prefix (ưu tiên cao hơn cho "1. Tiền sử bệnh")
-        (r"\d+\.\s*tiền sử bệnh\s*nội khoa", "tien_su", 100),
-        (r"\d+\.\s*tiền sử bệnh\s*ngoại khoa", "tien_su", 100),
-        (r"\d+\.\s*tiền sử bệnh", "tien_su", 95),
-        (r"\d+\.\s*tiền sử phẫu thuật", "tien_su", 95),
-        (r"\d+\.\s*tiền sử thủ thuật", "tien_su", 95),
-        (r"\d+\.\s*tiền sử gia đình", "tien_su", 95),
-        (r"\d+\.\s*tiền sử dị ứng", "tien_su", 95),
-        (r"\d+\.\s*tiền sử xã hội", "tien_su", 95),
-        (r"\d+\.\s*tiền sử", "tien_su", 80),
-        (r"\d+\.\s*bệnh sử", "tien_su", 90),
-        (r"\d+\.\s*tiền căn", "tien_su", 90),
-        # === HIỆN TẠI (isHistorical=False) ===
-        (r"\d+\.\s*tiền sử bệnh\s*hiện tại", "hien_tai", 100),
-        (r"\d+\.\s*bệnh sử hiện tại", "hien_tai", 100),
-        (r"\btiền sử bệnh\s*hiện tại", "hien_tai", 95),
-        (r"\bbệnh sử hiện tại", "hien_tai", 95),
-        (r"lý do nhập viện", "hien_tai", 95),
-        (r"lý do vào viện", "hien_tai", 95),
-        (r"lý do khám", "hien_tai", 95),
-        (r"triệu chứng hiện tại", "hien_tai", 90),
-        (r"triệu chứng cơ năng", "hien_tai", 90),
-        (r"triệu chứng thực thể", "hien_tai", 90),
-        (r"diễn biến bệnh", "hien_tai", 85),
-        (r"diễn tiến", "hien_tai", 80),
-        (r"quá trình bệnh", "hien_tai", 80),
-        (r"\bhiện tại", "hien_tai", 70),
-        # === ĐÁNH GIÁ (isHistorical=False) ===
-        (r"\d+\.\s*đánh giá tại bệnh viện", "danh_gia", 100),
-        (r"\d+\.\s*đánh giá", "danh_gia", 90),
-        (r"đánh giá tại bệnh viện", "danh_gia", 95),
-        (r"\bđánh giá", "danh_gia", 80),
-        (r"khám lúc vào viện", "danh_gia", 95),
-        (r"khám vào viện", "danh_gia", 95),
-        (r"khám tại viện", "danh_gia", 95),
-        (r"khám hiện tại", "danh_gia", 90),
-        (r"\bkhám:", "danh_gia", 80),
-        (r"\bkhám\b", "danh_gia", 70),
-        (r"xét nghiệm", "danh_gia", 80),
-        (r"\bcls\b", "danh_gia", 80),
-        (r"cận lâm sàng", "danh_gia", 80),
-        (r"kết quả xét nghiệm", "danh_gia", 85),
-        (r"chẩn đoán hình ảnh", "danh_gia", 85),
-        (r"hình ảnh", "danh_gia", 80),
-        (r"\bđiều trị", "danh_gia", 75),
-        (r"phác đồ điều trị", "danh_gia", 80),
-        (r"hướng xử trí", "danh_gia", 80),
-        (r"\btheo dõi", "danh_gia", 75),
-        (r"tái khám", "danh_gia", 70),
-        (r"ra viện", "danh_gia", 70),
-        (r"tóm tắt", "danh_gia", 70),
-        (r"kết luận", "danh_gia", 70),
-    ]
+    TIEN_SU_PATTERNS = re.compile(
+        r"(?:^|\n)\s*(?:\d+\.\s*)?(?:"
+        r"tiền\s+sử\s+bệnh(?!\s*hiện\s+tại)|"
+        r"tiền\s+sử\s+bệnh\s*nội\s+khoa|"
+        r"tiền\s+sử\s+bệnh\s*ngoại\s+khoa|"
+        r"tiền\s+sử\s+phẫu\s+thuật|"
+        r"tiền\s+sử\s+thủ\s+thuật|"
+        r"tiền\s+sử\s+dị\s+ứng|"
+        r"tiền\s+sử\s+gia\s+đình|"
+        r"tiền\s+sử\s+xã\s+hội|"
+        r"tiền\s+sử(?!\s*bệnh\s*hiện\s+tại)|"
+        r"bệnh\s+sử(?!\s*hiện\s+tại)|"
+        r"tiền\s+căn|"
+        r"thuốc\s+trước\s+khi\s+nhập\s+viện|"
+        r"thuốc\s+đang\s+dùng|"
+        r"đang\s+điều\s+trị\s+tại\s+nhà"
+        r")",
+        re.IGNORECASE | re.UNICODE,
+    )
 
-    # Tìm tất cả matches TRƯỚC entity_pos
-    matches = []  # (start_pos, section_id, priority)
-    for pattern, section_id, priority in section_patterns:
-        for m in re.finditer(pattern, text_lower):
-            if m.start() < pos:
-                matches.append((m.start(), section_id, priority))
+    HIEN_TAI_PATTERNS = re.compile(
+        r"(?:^|\n)\s*(?:\d+\.\s*)?(?:"
+        r"lý\s+do\s+(?:nhập|vào)\s+viện|"
+        r"lý\s+do\s+khám|"
+        r"tiền\s+sử\s+bệnh\s*hiện\s+tại|"
+        r"bệnh\s+sử\s+hiện\s+tại|"
+        r"triệu\s+chứng\s+hiện\s+tại|"
+        r"triệu\s+chứng\s+cơ\s+năng|"
+        r"diễn\s+biến\s+bệnh|"
+        r"quá\s+trình\s+bệnh"
+        r")",
+        re.IGNORECASE | re.UNICODE,
+    )
 
-    if not matches:
+    DANH_GIA_PATTERNS = re.compile(
+        r"(?:^|\n)\s*(?:\d+\.\s*)?(?:"
+        r"đánh\s+giá\s+tại\s+bệnh\s+viện|"
+        r"kết\s+quả\s+khám|"
+        r"kết\s+quả\s+xét\s+nghiệm|"
+        r"kết\s+quả\s+chẩn\s+đoán|"
+        r"chẩn\s+đoán\s+hình\s+ảnh|"
+        r"khám\s+lúc\s+vào\s+viện|"
+        r"khám\s+lâm\s+sàng"
+        r")",
+        re.IGNORECASE | re.UNICODE,
+    )
+
+    ts_matches = list(TIEN_SU_PATTERNS.finditer(text_before))
+    ht_matches = list(HIEN_TAI_PATTERNS.finditer(text_before))
+    dg_matches = list(DANH_GIA_PATTERNS.finditer(text_before))
+
+    ts_last = ts_matches[-1].start() if ts_matches else -1
+    ht_last = ht_matches[-1].start() if ht_matches else -1
+    dg_last = dg_matches[-1].start() if dg_matches else -1
+
+    max_pos = max(ts_last, ht_last, dg_last)
+    if max_pos == -1:
         return ""
-
-    # Sort theo: (khoảng cách đến entity_pos giảm dần, priority giảm dần)
-    # → Match gần nhất + priority cao nhất
-    matches.sort(key=lambda x: (pos - x[0], -x[2]))
-
-    return matches[0][1]
+    if max_pos == ts_last:
+        return "tien_su"
+    if max_pos == ht_last:
+        return "hien_tai"
+    return "danh_gia"
 
 
 
@@ -3383,17 +3355,18 @@ def assemble_record(
             final.append(record)
 
     # Phase 2: Parallel candidate attachment across CPU/Thread workers (Upgrade F)
+    _CANDIDATE_TYPES = ("THUỐC", "CHẨN_ĐOÁN", "TRIỆU_CHỨNG")
     if len(final) > 1 and (retriever is not None or icd_retriever is not None):
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(final))) as pool:
             futures = [
                 pool.submit(_attach_candidates, rec, rec["text"], rec["type"], rec, validated, retriever, icd_retriever)
-                for rec in final if rec["type"] in ("THUỐC", "CHẨN_ĐOÁN")
+                for rec in final if rec["type"] in _CANDIDATE_TYPES
             ]
             concurrent.futures.wait(futures)
     elif len(final) == 1:
         rec = final[0]
-        if rec["type"] in ("THUỐC", "CHẨN_ĐOÁN"):
+        if rec["type"] in _CANDIDATE_TYPES:
             _attach_candidates(rec, rec["text"], rec["type"], rec, validated, retriever, icd_retriever)
 
     # Phase 3 cuối assemble_record (Fix 2.4)
@@ -3474,25 +3447,71 @@ _R1_PATTERN = re.compile(
 )
 
 _COMPOUND_SYMPTOMS = [
+    # Diseases (CHẨN_ĐOÁN)
+    ("viêm phổi mắc phải cộng đồng", "CHẨN_ĐOÁN"),
+    ("viêm phế quản", "CHẨN_ĐOÁN"),
+    ("viêm phổi", "CHẨN_ĐOÁN"),
+    ("phù phổi", "CHẨN_ĐOÁN"),
+    ("ung thư vú", "CHẨN_ĐOÁN"),
+    ("ung thư tuyến", "CHẨN_ĐOÁN"),
+    ("ung thư phổi", "CHẨN_ĐOÁN"),
+    ("viêm túi mật", "CHẨN_ĐOÁN"),
+    ("viêm ruột thừa", "CHẨN_ĐOÁN"),
+    ("viêm dạ dày", "CHẨN_ĐOÁN"),
+    ("viêm bể thận", "CHẨN_ĐOÁN"),
+    ("viêm mô tế bào", "CHẨN_ĐOÁN"),
+    ("sỏi ống mật", "CHẨN_ĐOÁN"),
+    ("sỏi túi mật", "CHẨN_ĐOÁN"),
+    ("sỏi thận", "CHẨN_ĐOÁN"),
+    ("sỏi bàng quang", "CHẨN_ĐOÁN"),
+    ("tăng huyết áp", "CHẨN_ĐOÁN"),
+    ("đái tháo đường type 2", "CHẨN_ĐOÁN"),
+    ("đái tháo đường type 1", "CHẨN_ĐOÁN"),
+    ("đái tháo đường", "CHẨN_ĐOÁN"),
+    ("nhồi máu cơ tim", "CHẨN_ĐOÁN"),
+    ("nhồi máu não", "CHẨN_ĐOÁN"),
+    ("suy tim độ III", "CHẨN_ĐOÁN"),
+    ("suy tim", "CHẨN_ĐOÁN"),
+    ("rung nhĩ", "CHẨN_ĐOÁN"),
+    ("xơ gan do rượu", "CHẨN_ĐOÁN"),
+    ("xơ gan", "CHẨN_ĐOÁN"),
+    ("rối loạn lipid máu", "CHẨN_ĐOÁN"),
+    ("bệnh thận mạn", "CHẨN_ĐOÁN"),
+    ("suy thận mạn", "CHẨN_ĐOÁN"),
+
+    # Symptoms (TRIỆU_CHỨNG)
     ("buồn nôn", "TRIỆU_CHỨNG"),
+    ("nôn ói", "TRIỆU_CHỨNG"),
+    ("nôn", "TRIỆU_CHỨNG"),
+    ("chóng mặt", "TRIỆU_CHỨNG"),
+    ("choáng váng", "TRIỆU_CHỨNG"),
+    ("vã mồ hôi", "TRIỆU_CHỨNG"),
+    ("đổ mồ hôi", "TRIỆU_CHỨNG"),
+    ("sốt cao", "TRIỆU_CHỨNG"),
+    ("sốt nhẹ", "TRIỆU_CHỨNG"),
+    ("sốt", "TRIỆU_CHỨNG"),
+    ("ho khạc đờm", "TRIỆU_CHỨNG"),
+    ("ho ra máu", "TRIỆU_CHỨNG"),
+    ("ho nhiều", "TRIỆU_CHỨNG"),
+    ("ho", "TRIỆU_CHỨNG"),
+    ("mệt mỏi", "TRIỆU_CHỨNG"),
+    ("đau ngực trái", "TRIỆU_CHỨNG"),
+    ("đau ngực phải", "TRIỆU_CHỨNG"),
+    ("đau ngực", "TRIỆU_CHỨNG"),
+    ("khó thở nhẹ", "TRIỆU_CHỨNG"),
+    ("khó thở khi gắng sức", "TRIỆU_CHỨNG"),
+    ("khó thở", "TRIỆU_CHỨNG"),
+    ("khò khè", "TRIỆU_CHỨNG"),
+    ("tiếng rít", "TRIỆU_CHỨNG"),
+    ("đánh trống ngực", "TRIỆU_CHỨNG"),
     ("đau đầu", "TRIỆU_CHỨNG"),
     ("đau bụng", "TRIỆU_CHỨNG"),
-    ("đau ngực", "TRIỆU_CHỨNG"),
     ("đau lưng", "TRIỆU_CHỨNG"),
     ("đau cổ", "TRIỆU_CHỨNG"),
     ("đau khớp", "TRIỆU_CHỨNG"),
     ("đau cơ", "TRIỆU_CHỨNG"),
-    ("sốt cao", "TRIỆU_CHỨNG"),
-    ("sốt nhẹ", "TRIỆU_CHỨNG"),
-    ("khó thở", "TRIỆU_CHỨNG"),
-    ("khò khè", "TRIỆU_CHỨNG"),
-    ("tiếng rít", "TRIỆU_CHỨNG"),
     ("đau họng", "TRIỆU_CHỨNG"),
-    ("đau ngực trái", "TRIỆU_CHỨNG"),
-    ("đau ngực phải", "TRIỆU_CHỨNG"),
     ("mất ngủ", "TRIỆU_CHỨNG"),
-    ("chóng mặt", "TRIỆU_CHỨNG"),
-    ("đổ mồ hôi", "TRIỆU_CHỨNG"),
     ("đau thượng vị", "TRIỆU_CHỨNG"),
     ("phù chi dưới", "TRIỆU_CHỨNG"),
 ]
@@ -4003,7 +4022,6 @@ def _is_overlap_dup(
 
 _NORMAL_FINDING_PATTERNS = re.compile(
     r"""(?x)
-    ^nhịp\s+xoang(?:\s+(?:chiếm\s+ưu\s+thế|đều|bình\s+thường))?$ |
     \bbình\s+thường\b |
     \b(?:âm|dương)\s+tính\b |
     ^(?:mri|ct|siêu\s+âm|x-quang|pcr|điện\s+tâm\s+đồ)(?::|\s).+ |

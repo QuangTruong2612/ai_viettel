@@ -536,7 +536,7 @@ def _alias_to_generic(drug_text: str) -> str | list[str]:
     text_lower = drug_text.lower().strip()
 
     # Strip common Vietnamese prefix words before matching
-    prefix_re = re.compile(r"^(?:viên\s+uống|viên\s+nén|viên\s+nang|thuốc\s+viên|thuốc\s+tiêm|thuốc\s+uống|thuốc|viên|viêm|tiêm|ống|gói|lọ|dung\s+dịch|hỗn\s+dịch|siro)\s+", re.IGNORECASE)
+    prefix_re = re.compile(r"^(?:sử\s+dụng|dùng|viên\s+uống|viên\s+nén|viên\s+nang|thuốc\s+viên|thuốc\s+tiêm|thuốc\s+uống|thuốc|viên|viêm|tiêm|ống|gói|lọ|dung\s+dịch|hỗn\s+dịch|siro)\s+", re.IGNORECASE)
     stripped_prefix = ""
     m = prefix_re.match(drug_text)
     while m:

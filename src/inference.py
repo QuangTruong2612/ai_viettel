@@ -757,16 +757,6 @@ def process_record(
             # Python Refiner: Kiểm duyệt & tự động sửa type/assertions theo luật chuyên gia
             raw = _refine_stage2_results(input_text, raw)
             logger.info("[%d] Stage 2 Refinement hoàn tất: %d entities", rec_id, len(raw))
-
-            # R37 (2026-07-16): STAGE 3 — LLM context analysis cho ICD/RxNorm candidates
-            # Apply default ON; opt-out via env LLM_DISABLE_STAGE3=1 (tương đương --no-stage3).
-            if not os.environ.get("LLM_DISABLE_STAGE3", "").strip() == "1":
-                raw = _stage3_refine_candidates(
-                    rec_id=rec_id, input_text=input_text,
-                    entities=raw, llm=llm,
-                    stage3_few_shot=stage3_few_shot,
-                )
-                logger.info("[%d] Stage 3 LLM refine hoàn tất", rec_id)
     else:
         # ======================================================================
         # SINGLE-PASS PIPELINE (Legacy mode for benchmarking via --no-two-stage)
@@ -850,6 +840,19 @@ def process_record(
     final = assemble_record(
         input_text, pre_aligned, retriever, icd_retriever=icd_retriever, llm_client=llm
     )
+
+    # BUGFIX (2026-07-21): Stage 3 LLM candidate refiner PHẢI chạy SAU assemble_record.
+    # Trước đây Stage 3 chạy trước RAG → tất cả entities có candidates=[] → Stage 3 bỏ qua
+    # toàn bộ (filter: len(candidates) > 0). Chuyển về đây để RAG đã gán candidates trước,
+    # Stage 3 mới có thể review & refine chúng.
+    if not os.environ.get("LLM_DISABLE_STAGE3", "").strip() == "1":
+        final = _stage3_refine_candidates(
+            rec_id=rec_id, input_text=input_text,
+            entities=final, llm=llm,
+            stage3_few_shot=stage3_few_shot,
+        )
+        logger.info("[%d] Stage 3 LLM refine hoàn tất (post-RAG)", rec_id)
+
     if not validate_output(final):
         logger.warning("[%d] Output fail schema validate", rec_id)
 
