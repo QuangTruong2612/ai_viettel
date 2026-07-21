@@ -485,6 +485,23 @@ def _boost_and_split_stage1_mentions(input_text: str, mentions: list[dict[str, A
                 split_mentions.append({"text": input_text[idx2:idx2+len(part2)], "position": [idx2, idx2+len(part2)]})
                 continue
 
+        # Tách theo từ nối " hoặc " (vd "khó thở hoặc ho" → "khó thở", "ho")
+        if " hoặc " in text.lower():
+            parts = re.split(r"\s+hoặc\s+", text, flags=re.IGNORECASE)
+            if len(parts) >= 2:
+                curr_offset = s
+                temp_list = []
+                for p in parts:
+                    p_clean = p.strip()
+                    if len(p_clean) >= 2:
+                        idx = input_text.find(p_clean, curr_offset, min(len(input_text), e + 5))
+                        if idx >= 0:
+                            temp_list.append({"text": input_text[idx:idx+len(p_clean)], "position": [idx, idx+len(p_clean)]})
+                            curr_offset = idx + len(p_clean)
+                if len(temp_list) >= 2:
+                    split_mentions.extend(temp_list)
+                    continue
+
         # Tách theo từ nối " và " hoặc ", " nếu span dài > 24 chars và không phải bệnh/thuốc gộp cố định
         if (" và " in text or ", " in text) and len(text) > 24 and not re.search(r"(?:tràn dịch|tràn khí|động mạch|tĩnh mạch|nhồi máu|viêm|thuốc)", text, re.IGNORECASE):
             parts = re.split(r"\s+và\s+|,\s*", text)
@@ -493,7 +510,7 @@ def _boost_and_split_stage1_mentions(input_text: str, mentions: list[dict[str, A
             for p in parts:
                 p_clean = p.strip()
                 if len(p_clean) >= 3:
-                    idx = input_text.find(p_clean, curr_offset, e + 5)
+                    idx = input_text.find(p_clean, curr_offset, min(len(input_text), e + 5))
                     if idx >= 0:
                         temp_list.append({"text": input_text[idx:idx+len(p_clean)], "position": [idx, idx+len(p_clean)]})
                         curr_offset = idx + len(p_clean)
@@ -595,6 +612,14 @@ def _refine_stage2_results(input_text: str, stage2_entities: list[dict[str, Any]
         pos = ent.get("position", [0, 0])
         etype = str(ent.get("type", "")).strip()
         assertions = list(ent.get("assertions", [])) if isinstance(ent.get("assertions"), list) else []
+
+        # Filter out non-medical administrative actions from TÊN_XÉT_NGHIỆM
+        if etype == "TÊN_XÉT_NGHIỆM" and re.search(r"\b(?:gọi\s+xe\s+cứu\s+thương|chuyển\s+viện|nhập\s+viện|ra\s+viện|lái\s+xe|đi\s+lại|hỏi\s+bệnh|tái\s+khám)\b", text, re.IGNORECASE):
+            continue
+
+        # Filter out non-symptom sentence fragments from TRIỆU_CHỨNG
+        if etype == "TRIỆU_CHỨNG" and re.search(r"\b(?:lái\s+xe\s+sau\s+ngã|thể\s+chịu\s+trọng\s+lượng|nằm\s+tại\s+giường|không\s+thể\s+tự\s+di\s+chuyển)\b", text, re.IGNORECASE):
+            continue
 
         # A. Auto-Type Correction (R28: order matters)
         if normal_patterns.match(text) or vital_patterns.match(text):
@@ -4131,11 +4156,7 @@ def _attach_candidates(
         except Exception as exc:
             logger.warning("ICD lookup fail for '%s' (%s): %s", text, etype, exc)
     elif etype == "TRIỆU_CHỨNG":
-        # R37 (2026-07-15): Attach ICD codes cho common symptoms từ data/symptom_icd_map.json
-        # Boost J_candidates nếu gold cũng có ICD cho symptom.
-        icd = _get_symptom_icd_lookup(text)
-        if icd:
-            record["candidates"] = [icd]
+        record["candidates"] = []
 
 
 # R37 (2026-07-15): Cache common symptom → ICD lookup
