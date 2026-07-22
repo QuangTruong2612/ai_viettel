@@ -1488,6 +1488,11 @@ def _is_in_negation_chain(input_text: str, entity_pos: int) -> bool:
         return False
 
     # Look backward từ entity_pos tìm "không" gần nhất (max 200 chars window)
+    # NOTE (R38 - 2026-07-22): Giữ nguyên window 200 chars vì:
+    # - LLM đã được dạy qua prompt (STAGE2_PROMPT) rằng "không" chỉ negate trong
+    #   cùng mệnh đề (sau dấu phẩy/chấm → break chain).
+    # - Negation chain logic ở đây chỉ là SAFETY NET bổ trợ, không phải primary detector.
+    # - Việc thu hẹp window ở đây gây DOUBLE-enforcement mâu thuẫn với prompt.
     search_window_start = max(0, entity_pos - 200)
     search_slice = text_before[search_window_start:]
 
@@ -1504,6 +1509,10 @@ def _is_in_negation_chain(input_text: str, entity_pos: int) -> bool:
     between = text_before[last_match_end_pos:entity_pos]
     if "\n" in between or "." in between:
         return False  # Ranh giới câu/dòng → chain break!
+
+    # NOTE (R38 - 2026-07-22): KHÔNG thêm comma-clause break ở đây.
+    # Prompt đã dạy LLM (STAGE2_PROMPT) cách áp dụng isNegated qua clause boundary.
+    # Để postprocess thêm rule sẽ gây DOUBLE-enforcement, dễ conflict với prompt.
 
     if not between.strip():
         # "không" ngay trước entity (no words between)
@@ -2466,6 +2475,9 @@ _DROP_NOISE_PATTERNS = [
         r"(?:\s+(?:tĩnh\s+mạch|uống|tiêm|tại\s+chỗ))?$",
         re.IGNORECASE | re.UNICODE,
     ),
+    # NOTE (R38 - 2026-07-22): KHÔNG thêm pattern keyword cho từng domain cụ thể
+    # (vd "đậu tằm", "hồng cầu", "ăn X", "tiếp xúc Y") — đó là việc của PROMPT.
+    # Nếu LLM vẫn miss → sửa prompt thêm case-by-case guidance, KHÔNG mở rộng list này.
 ]
 
 # Pure duration (R28.2) - standalone time expression should not be entity
@@ -2482,6 +2494,8 @@ _PURE_DURATION_ENHANCED_RE = re.compile(
 
 # R35 (2026-07-14): Body part đơn lẻ KHÔNG phải TRIỆU_CHỨNG (vd "ngực", "bụng", "đầu").
 # LLM hay extract these → safety net DROP trong _clean_entity_text.
+# NOTE (R38 - 2026-07-22): Prompt đã enforce rule này. Set này chỉ là SAFETY NET cuối cùng,
+# KHÔNG mở rộng thêm — nếu LLM vẫn miss body part mới → sửa PROMPT, không sửa list này.
 _BODY_PARTS_ALONE: frozenset[str] = frozenset({
     "ngực", "bụng", "đầu", "lưng", "chân", "tay", "chân tay", "tay chân",
     "bụng trên", "bụng dưới", "ngực trái", "ngực phải",
@@ -2520,7 +2534,8 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
     text_lower = text.strip().lower()
 
     # === BƯỚC 0: R35 (2026-07-14) — DROP TRIỆU_CHỨNG chỉ là body part đơn lẻ ===
-    # Safety net cho LLM ignore prompt rule. Body part alone ("ngực", "bụng") không phải symptom.
+    # Safety net cuối cùng. Prompt đã enforce; set này chỉ cover các token
+    # mà LLM vẫn miss dù đã có rule trong prompt.
     if etype == "TRIỆU_CHỨNG" and text_lower in _BODY_PARTS_ALONE:
         logger.debug("Clean: drop body-part-alone symptom '%s'", original)
         return None
@@ -2785,6 +2800,11 @@ _TREATMENT_MODALITY_TO_CHAN_DOAN = re.compile(
     r"phương pháp \w+|kỹ thuật \w+)$",
     re.IGNORECASE | re.UNICODE,
 )
+
+# NOTE (R38 - 2026-07-22): KHÔNG thêm retype rule cho từng case keyword cụ thể
+# (nhiễm khuẩn → CHẨN_ĐOÁN, Vitamin K → THUỐC, "bị X" → CHẨN_ĐOÁN, ...).
+# Type classification là việc của LLM qua prompt. Nếu LLM sai → sửa prompt,
+# KHÔNG sửa post-process. Giữ `_retype_entity` cho các rule domain-stable.
 
 
 def _retype_entity(text: str, etype: str) -> str:
