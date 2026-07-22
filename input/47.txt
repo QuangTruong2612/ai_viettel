@@ -1,33 +1,47 @@
-1.  Tiền sử bệnh nội khoa
-    Tiền sử phẫu thuật / thủ thuật: Đã thực hiện phẫu thuật cắt bỏ ống dẫn mật chung, cắt bỏ một phần thùy gan bên trái và nối mật tụy bằng ống dẫn hồi tràng (RNY hepaticojejunostomy) vào ngày [Ngày] vì nghi ngờ ung thư biểu mô tế bào mật không thể cắt bỏ.
+1. Tiền sử bệnh
+Các bệnh lý mạn tính
+- Ung thư biểu mô tuyến đại tràng
+- bệnh phổi tắc nghẽn mạn tính, không xác định
+- Đái tháo đường
+- xơ gan do rượu
+Tiền sử phẫu thuật / thủ thuật: Dựa trên tiền sử phẫu thuật mới được bổ sung: "Phẫu thuật mở cắt nối trực tràng/đại tràng sigma vì ung thư tuyến đại tràng
+Các yếu tố nguy cơ liên quan: xơ gan do rượu
 
-2.  Tiền sử bệnh hiện tại
-    Lý do nhập viện: Đến hôm nay để đặt stent thành vách vĩnh viễn
-    Diễn biến bệnh
-    - Gần đây nhất được bác sĩ [Tên bác sĩ] khám tại phòng khám vào ngày [Ngày]. Lúc đó bệnh nhân tình trạng rất tốt.
-    - Bà ấy ăn uống bình thường, cân nặng đã cải thiện của bà ấy đã cải thiện, và bà ấy đã trở lại các hoạt động hàng ngày bình thường.
-    - Bà ấy tiếp tục có ống dẫn mật xuyên gan tại chỗ.
-    - Bà ấy phủ nhận bất kỳ buồn nôn, nôn, sốt, ớn lạnh, hoặc dịch rò rỉ quanh ống thông.
-    - Đã thực hiện cholangiogram vào ngày [Ngày] cho thấy tắc nghẽn kéo dài gần chỗ nối mật tụy, ảnh hưởng đến ống dẫn trước và sau bên phải.
-    - Cả hai ống dẫn mật đều được tăng kích cỡ từ 8.5fr lên 10.2 fr vào thời điểm đó.
-    - Đã thực hiện sinh thiết và lấy mẫu bằng bàn chải vào ngày [Ngày] và kết quả lấy mẫu bằng bàn chải cho thấy tế bào bất thường, đáng ngại cho ung thư biểu mô tuyến.
-    - Thảo luận tại cuộc họp [Tên cuộc họp] vào ngày [Ngày] và quyết định rằng bệnh nhân nên được đặt stent thành vách vĩnh viễn.
-    - Bà ấy đã được đặt 3 stent thành vách vĩnh viễn và có 3 ống dẫn mật ngoài-trong tại chỗ.
-    - Bệnh nhân dung nạp thủ thuật tốt.
-    - Sau thủ thuật, bệnh nhân phủ nhận bất kỳ buồn nôn, nôn, đau ngực, hoặc khó thở.
-    - Bà ấy cho biết có một chút đau khi sờ nắn xung quanh vị trí đặt ống dẫn, đặc biệt là khi hít thở sâu.
-    Sự kiện trước khi nhập viện
-    - Được bác sĩ [Tên bác sĩ] khám tại phòng khám vào ngày [Ngày]. Bệnh nhân tình trạng rất tốt.
-    - ăn uống bình thường, cân nặng đã cải thiện, trở lại các hoạt động hàng ngày bình thường.
-    - Có ống dẫn mật xuyên gan tại chỗ.
-    - Phủ nhận buồn nôn, nôn, sốt, ớn lạnh, hoặc dịch rò rỉ quanh ống thông.
-    - Đã thực hiện cholangiogram vào ngày [Ngày] cho thấy tắc nghẽn kéo dài gần chỗ nối mật tụy, ảnh hưởng đến ống dẫn trước và sau bên phải.
-    - Ống dẫn mật được tăng kích cỡ từ 8.5fr lên 10.2 fr vào thời điểm đó.
-    - Đã thực hiện sinh thiết và lấy mẫu bằng bàn chải vào ngày [Ngày] và kết quả lấy mẫu bằng bàn chải cho thấy các tế bào bất thường, đáng lo ngại cho ung thư biểu mô tuyến.
-    - Thảo luận tại cuộc họp [Tên cuộc họp] vào ngày [Ngày] và quyết định rằng bệnh nhân nên được đặt stent thành vách vĩnh viễn.
+2. Bệnh sử hiện tại
+Lý do nhập viện: tụt huyết áp không rõ nguyên nhân và mệt mỏi
+Thời điểm khởi phát triệu chứng: vài ngày mệt mỏi
+Diễn biến bệnh
+- Bệnh nhân nhập viện, quá trình điều trị biến chứng bởi Viêm phổi bệnh viện và rung nhĩ và nhịp nhanh trên thất, sau đó xuất viện về trung tâm phục hồi chức năng.
+- Bệnh nhân tái khám tại phòng khám vào ngày hẹn để cắt bỏ các mũi kẹp còn lại và thay thế vật liệu độn.
 
-3.  Đánh giá tại bệnh viện
-    Dấu hiệu lâm sàng: đau khi sờ nắn xung quanh vị trí đặt ống dẫn, đặc biệt là khi hít thở sâu
-    Kết quả phòng thí nghiệm: lấy mẫu bằng bàn chải cho thấy tế bào bất thườngtế bào bất thường, đáng ngại cho ung thư biểu mô tuyến
-    Kết quả chẩn đoán hình ảnh: cholangiogram vào ngày [Ngày] cho thấy tắc nghẽn kéo dài gần chỗ nối mật tụy, ảnh hưởng đến ống dẫn trước và sau bên phải
-    Thủ thuật thực hiện: Đặt 3 stent thành vách vĩnh viễn
+Câu trả lời của bác sĩ:
+
+Chào em
+- đi tiêu không liên quan đến đau bụng, buồn nôn, nôn, tiêu chảy, hoặc táo bón.
+- Bệnh nhân đang có đi tiêu mỗi ngày.
+- Không có sốt, đau ngực, chóng mặt, đánh trống ngực.
+- Không có đau bụng hoặc dịch từ vết mổ.
+- Không có đỏ da, hoặc bục chỉ khâu bụng.
+3. Đánh giá tại bệnh viện
+Kết quả khám thực thể
+- Khám thấy ran nổ, phù phù, dịch rỉ huyết thanh từ vết mổ, và phân nâu dương tính guaiac.
+- dấu hiệu sinh tồn là: 98.8 65 9360 20 95 2LNC (tại khoa Cấp cứu)
+- dấu hiệu sinh tồn 98.6 70 10356 17 962LNC (khi đến MICU)
+Dấu hiệu lâm sàng
+- hạ huyết áp, không đặc hiệu
+- mệt mỏi
+- mệt mỏi
+- khó thở khi gắng sức
+- ho mạn tính có đờm vàng loãng
+- ran
+- phù phù
+- dịch thanh dịch lẫn máu từ vết mổ
+- phân nâu dương tính guaiac
+Kết quả xét nghiệm: huyết khối 26.3, giảm so với hôm qua, nhưng ổn định ở mức 28 hậu phẫu tuần trước.
+Kết quả chẩn đoán hình ảnh: chụp x-quang ngực có xẹp phổi thùy dưới phải do chèn ép kèm tràn dịch màng phổi.
+Các thủ thuật đã thực hiện
+- Truyền dịch tĩnh mạch 750cc
+- Xông khí dung
+Các phát hiện chẩn đoán khác
+- Viêm phổi bệnh viện
+- Rung nhĩ kèm nhịp nhanh trên thất

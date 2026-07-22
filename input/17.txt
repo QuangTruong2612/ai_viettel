@@ -1,53 +1,27 @@
-1. Tiền sử bệnh nội khoa
-Bệnh mãn tính: bệnh trào ngược dạ dày- thực quản không có viêm thực quản
-2. Bệnh sử hiện tại
-Lý do nhập viện: sốt và đau cơ sau khi đi du lịch
-Thời điểm khởi phát triệu chứng: 13 ngày sau khi trở về từ một chuyến du thuyền
-Diễn biến bệnh
-- Bắt đầu cảm thấy không khỏe kèm theo sốt, mệt mỏi, đau cơ
-- Sốt cao nhất là 102.9°F không đáp ứng với tylenol và advil
-- Báo cáo đau cổ và vai phải kèm theo sưng quanh khớp ức đòn
-- Đã khám bác sĩ chăm sóc chính  hai lần
-- Sau đó được nhập viện vào khoa cấp cứu
-- cảm thấy tốt hơn sau khi dẫn lưu áp xe, và lại thấy đỡ  sốt và đau cổ
-Triệu chứng hiện tại
-- sốt
-- đau cơ
-- đau cổ
-- đau vai phải
-- sưng quanh khớp ức đòn
-- mệt mỏi
-- ho khan
-- đau đầu
-- sợ ánh sáng
-Các biến trước khi nhập viện
-- Đã khám bác sĩ chăm sóc chính hai lần
--sau đó nhaoaj viện tại khoa cấp cứu 
-- Đã thực hiện khám và điều trị
-- Đã thực hiện siêu âm vùng cổ phải  cho có kết qủa là  áp xe/viêm khớp nhiễm trùng
-- Dẫn lưu dịch
-- x-quang đề nghị mri
-- nhập viện tại  khoa cấp cứu để điều trị thêm, dùng kháng sinh tĩnh mạch và mri
-3. Đánh giá tại bệnh viện
-Kết quả khám lâm sàng
-- Vết rạch nhỏ trên ngực phải, hơi đau khi sờ nắn
-- Không đau khi vận động cánh tay
-- Không có dấu hiệu viêm mô tế bào hoặc nhiễm trùng ở các bộ phận khác trên cơ thể
-- Phổi rõ tiếng khi nghe
-- Tim nhịp đều, không có tiếng tim bệnh lý
-Kết quả xét nghiệm máu
-- bạch cầu 13.9
-- 80 neutrophil
-- 11 lymphocyte
-- bình thường chem 7
-- ck 58
-- alt 92
-- hiv vl đang chờ
-- soi tươi ký sinh trùng âm tính
-Kết quả chẩn đoán hình ảnh
-- siêu âm vùng cổ phải (scm):  ổ tụ dịch chia làm hai thùy, giới hạn và bờ không rõ. Cấu trúc tổn thương giảm âm, có hồi âm lợn cợn (vẩn đục) bên trong. Kích thước đo được khoảng 3.7 x 0.7 cm trên mặt cắt ngang. Ổ dịch có xu hướng lan lên trên và ăn sâu xuống phía dưới xương đòn.
-- sung huyết ngoại vi nhẹ nhưng không có mạch máu bên trong
-Các thủ thuật đã thực hiện
-- siêu âm vùng cổ phải (scm)
-- Hút 0.5cc dịch mủ
-- Dẫn lưu dịch mủ/dịch chứa
+Câu hỏi từ người dùng:
+
+chào bác sĩ, em 28 tuổi, dạo này em đánh răng hay chảy máu chân răng, miệng thấy hơi thở mùi khó chịu, kèm theo thấy nhiều mảng bám quanh răng nữa, bác sĩ tư vấn giúp em với.
+
+Câu trả lời của bác sĩ:
+
+Chào bạn
+Vấn đề của bạn nói nguy hiểm hay không nguy hiểm thì còn tùy một số trường hợp, các nguy cơ có thể xảy ra như sau:
+Nguyên nhân:
+- Vệ sinh răng miệng kém: Đây được xem là nguyên nhân phổ biến gây ra chảy máu chân răng kèm hôi miệng. Nếu không vệ sinh răng miệng đúng cách sẽ tạo điều kiện cho vi khuẩn xâm nhập, gây tổn thương nướu và làm phát sinh mùi hôi.
+- Viêm quanh răng: Các mô bao quanh cuống răng bị viêm và sưng do nhiễm vi khuẩn, sang chấn răng. 
+- Viêm nha chu: Đây là dạng nhiễm trùng lợi nặng, các triệu chứng gồm đau khi nhai, răng lung lay, sưng nướu, dễ chảy máu răng, hôi miệng, có mủ. Viêm nha chu nếu để kéo dài, chân răng có thể bị hư hại dẫn đến tình trạng mất răng hoặc viêm khớp dạng thấp, các bệnh hô hấp, đột quỵ,...
+- Thiếu canxi và vitamin: Thiếu hụt canxi dễ gây loãng xương, sâu răng và có nguy cơ bị viêm nha chu. Hôi miệng và chảy máu chân răng còn có thể do cơ thể thiếu hụt vitamin K.
+- Tiểu đường: Hôi miệng và chảy máu chân răng là dấu hiệu của bệnh tiểu đường. Nguyên nhân là do cơ thể sẽ giảm sản xuất insulin nên người bị tiểu đường suy yếu hệ miễn dịch, dễ gặp phải các vấn đề về răng miệng. Tình trạng khó đông máu khiến chân răng chảy máu kéo dài do nồng độ đường trong máu cao.
+- Tác dụng phụ của thuốc: Sử dụng một số loại thuốc có thể gây hôi miệng kèm chảy máu chân răng. Các loại thuốc gồm: Kháng histamin H1, thuốc chống trầm cảm, thuốc lợi tiểu, thuốc kháng sinh, thuốc chống nôn,..
+-Hút thuốc lá: Thành phần trong thuốc lá gây hỏng men răng, gai lưỡi phát triển quá mức khiến vi khuẩn xâm nhập, gây hôi miệng, chảy máu chân răng và mất răng.
+    - bệnh mạch máu ngoại biên
+    - bệnh phổi tắc nghẽn mạn tính
+    - Ngưng thở khi ngủ do tắc nghẽn đang dùng BiPAP
+    - Ung thư biểu mô tế bào vảy xâm nhập của dương vậtbiệt hóa kém, sau cắt bao quy đầu với bờ diện cắt dương tính.
+    Tiền sử phẫu thuật / thủ thuật
+•	Uống trà gừng và mật ong để loại bỏ vi khuẩn gây hại, khử mùi hôi do viêm, làm dịu niêm mạc, giảm sưng đau
+•	Trà đinh hương giúp loại bỏ mùi hôi trong khoang miệng, ngăn ngừa chảy máu, giảm tình trạng chảy máu chân răng và hôi miệng.
+•	Thực hiện bào láng gốc răng để ngăn chặn quá trình tích tụ cao răng và hỗ trợ loại bỏ vi khuẩn gây viêm.
+•	Ghép mô mềm ở vòm họng vào vùng nướu bị ảnh hưởng để tái tạo mô và ổn định chân răng.
+Để đảm bảo sức khỏe răng miệng, bạn nên đi khám răng miệng để biết nguyên nhân chính xác nhé!
+

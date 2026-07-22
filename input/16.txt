@@ -1,55 +1,30 @@
-1. Tiền sử bệnh
-Các bệnh lý mạn tính
-- Ung thư biểu mô tuyến đại tràng
-- bệnh phổi tắc nghẽn mạn tính, không xác định
-- Đái tháo đường
-- xơ gan do rượu
-Tiền sử phẫu thuật / thủ thuật: Dựa trên tiền sử phẫu thuật mới được bổ sung: "Phẫu thuật mở cắt nối trực tràng/đại tràng sigma vì ung thư tuyến đại tràng
-Các yếu tố nguy cơ liên quan: xơ gan do rượu
+Câu hỏi của người dùng gửi đến hệ thống
+Em chào bác sỹ
+Cho em hỏi em có bị thương nhẹ ở tay nhưng bị chảy máu,sau đó khoảng 10 phút em có chơi với 1 con chó con nhà em (chó chưa tiêm dại) tuổi có có dính nước dãi của chó con vào tay. 
+Hôm qua em vô tình đọc được thông tin là nếu dính nước dãi chó vẫn có nguy cơ lây bệnh dại. Vậy bác sỹ cho em hỏi trong trường hợp của em có bị sao không ạ?
+Mong nhận được sự tư vấn của bác sỹ
 
-2. Bệnh sử hiện tại
-Lý do nhập viện: tụt huyết áp không rõ nguyên nhân và mệt mỏi
-Thời điểm khởi phát triệu chứng: vài ngày mệt mỏi
-Diễn biến bệnh
-- Bệnh nhân nhập viện, quá trình điều trị biến chứng bởi Viêm phổi bệnh viện và rung nhĩ và nhịp nhanh trên thất, sau đó xuất viện về trung tâm phục hồi chức năng.
-- Bệnh nhân tái khám tại phòng khám vào ngày hẹn để cắt bỏ các mũi kẹp còn lại và thay thế vật liệu độn.
-- Hôm nay, bệnh nhân đến khoa Cấp cứu khám vì tình trạng mệt mỏi kéo dài trong vài ngày, kèm theo khó khăn khi ra khỏi giường vào sáng nay.
-- Bệnh nhân đã có đau bụng gián đoạn kể từ khi phẫu thuật.
-Triệu chứng hiện tại
-- hạ huyết áp, không đặc hiệu
-- mệt mỏi
-- mệt mỏi
-- khó khăn khi ra khỏi giường
-- đau bụng gián đoạn
-- khó thở khi gắng sức
-- ho mạn tính có đờm vàng loãng
-- chán ăn trong vài tháng
-Đặc điểm triệu chứng
-- đi tiêu không liên quan đến đau bụng, buồn nôn, nôn, tiêu chảy, hoặc táo bón.
-- Bệnh nhân đang có đi tiêu mỗi ngày.
-- Không có sốt, đau ngực, chóng mặt, đánh trống ngực.
-- Không có đau bụng hoặc dịch từ vết mổ.
-- Không có đỏ da, hoặc bục chỉ khâu bụng.
-3. Đánh giá tại bệnh viện
-Kết quả khám thực thể
-- Khám thấy ran nổ, phù phù, dịch rỉ huyết thanh từ vết mổ, và phân nâu dương tính guaiac.
-- dấu hiệu sinh tồn là: 98.8 65 9360 20 95 2LNC (tại khoa Cấp cứu)
-- dấu hiệu sinh tồn 98.6 70 10356 17 962LNC (khi đến MICU)
-Dấu hiệu lâm sàng
-- hạ huyết áp, không đặc hiệu
-- mệt mỏi
-- mệt mỏi
-- khó thở khi gắng sức
-- ho mạn tính có đờm vàng loãng
-- ran
-- phù phù
-- dịch thanh dịch lẫn máu từ vết mổ
-- phân nâu dương tính guaiac
-Kết quả xét nghiệm: huyết khối 26.3, giảm so với hôm qua, nhưng ổn định ở mức 28 hậu phẫu tuần trước.
-Kết quả chẩn đoán hình ảnh: chụp x-quang ngực có xẹp phổi thùy dưới phải do chèn ép kèm tràn dịch màng phổi.
-Các thủ thuật đã thực hiện
-- Truyền dịch tĩnh mạch 750cc
-- Xông khí dung
-Các phát hiện chẩn đoán khác
-- Viêm phổi bệnh viện
-- Rung nhĩ kèm nhịp nhanh trên thất
+Bác sĩ trả lời 
+Chào bạn,
+Để giải đáp thắc mắc của bạn, tôi xin chia sẻ một số thông tin như sau:
+Bệnh dại chỉ không chỉ lây qua vết cắn của động vật. Đường lây bệnh dại phổ biến nhất là do bị động vật dại cắn. Bệnh dại còn có thể lây truyền từ nước bọt của chó, mèo dại
+ hoặc động vật khác mắc bệnh dại do cào hoặc liếm vào vết thương, những vùng da bị trầy xước của cơ thể.
+1. Bệnh dại có lây không?
+Bệnh dại do Lyssavirus, thuộc họ Lyssaviridae gây ra. Sau khi xâm nhập vào cơ thể người và động vật có vú, virus di chuyển theo hệ thần kinh vào tủy sống và não, phá hủy các trung khu thần kinh trong đại não, 
+gây ra trạng thái điên dại ở động vật và người.
+Bệnh dại là bệnh đe dọa tính mạng và có thể gây tử vong cho người nếu người bị cắn không rửa vết thương và được điều trị y tế kịp thời sau khi bị cắn. Không có thuốc điều trị khi lên cơn dại. 
+Phòng bệnh bằng tiêm *****************. Bệnh dại thường gia tăng vào mùa hè.
+Bệnh dại gây ra bởi virus, và là bệnh lây truyền. Do vậy, việc phòng bệnh dại là vô cùng cần thiết.
+2. Bệnh dại lây truyền qua đường nào?
+Vi-rút dại chủ yếu được lây truyền từ nước bọt của các loài động vật bị dại sang người qua vết cắn hoặc qua vết trầy xước trên cơ thể con người.
+- 96% các trường hợp gây bệnh dại ở người tại Đông Nam Á là do chó cắn. Nơi bị chó cắn càng gần thần kinh trung ương thì nạn nhân càng phát bệnh nhanh.
+- Thế giới ghi nhận việc lây bệnh qua không khí có thể xảy ra khi ở trong hang dơi hay tiếp xúc với chất thải của dơi,
+ việc lây bệnh qua không khí này đã được ghi nhận tại 4 báo cáo về ca mắc bệnh dại ở người và liên quan tới công việc thí nghiệm với động vật. Tuy nhiên các ca mắc dạng này chưa ghi nhận tại Việt Nam.
+    Các thuốc đã thực hiện
+    - được cho bumetanide 2mg iv
+    - được cho vancomycin 1 gram
+    - được cho levofloxacin 750mg iv
+Số lượng vi rút dại xâm nhập vào
+Tình trạng miễn dịch của bệnh nhân
+Vùng bị cắn - vết thương ở đầu và cổ, cũng như những vết thương ở các khu vực đầu mút thần kinh như ngón tay, thường có thời gian ủ bệnh ngắn hơn do khoảng cách gần hơn cho vi rút xâm nhập vào mô thần kinh.
+Trường hợp của bạn nên đi đến các trung tâm tiêm chủng gần nhất để kiểm tra y tế và chích ngừa bạn nhé!

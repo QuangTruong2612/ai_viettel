@@ -1,34 +1,32 @@
-1.  Tiền sử bệnh
-    Tiền sử phẫu thuật / thủ thuật: sp TLH (tình trạng sau phẫu thuật cắt tử cung bằng nội soi toàn bộ)
-    Thuốc trước khi nhập viện lần này
-    - cipro
-    - bactrim
-    - Kháng sinh cho nhiễm khuẩn đường tiết niệu, vị trí không xác định (được bác sĩ chăm sóc chính kê đơn vào cuối tuần)
+1.  Tiền sử bệnh nội khoa
+    Các bệnh lý mạn tính
+    - Viêm loét đại tràng trong nhiều năm qua
+    - bằng chứng Bệnh gan do rượu ở vị trí 35cm
+    Tiền sử phẫu thuật / thủ thuật: đã phẫu thuật tạo hậu môn nhân tạo kiểu túi nối hồi tràng - hậu môn
 
-2.  Tiền sử bệnh bệnh hiện tại
-    Lý do nhập viện: đau bụng dưới
-    Thời điểm khởi phát triệu chứng: 7 ngày
-    Diễn biến bệnh
-    - Triệu chứng trở nên tồi tệ hơn
-    - Đau tiến triển và lan vào sườn trái và LLQ (Tứ phân vị dưới trái)
-    - Ban đầu có buồn nôn nhưng đã thuyên giảm
-    - đau cải thiện đáng kể sau khi dùng iv morphineiv morphine and toradol
+Cháu năm nay 18 tuổi. Cháu bị bệnh nấm bẹn mấy tháng nay rồi ạ. Nhưng cháu phòng ngừa nên không bị lây lan, chỉ bị hai bên bẹn nhưng cháu dùng một số loại thuốc rồi mà chỉ được một khoảng thời gian rồi lại bị tái phát lại. Bác sĩ cho cháu hỏi loại thuốc nào có thể chữa khỏi ạ?
+
+2.  Tiền sử bệnh hiện tại
+    Thời điểm khởi phát triệu chứng: 48 giờ qua
     Triệu chứng hiện tại
-    - đau bụng dưới
-    - ớn lạnh
-    - khó chịu khi đi tiểu
-    - khó chịu khi đại tiện
+    - ăn uống kém do buồn nôn
+    - đau bụng/khó chịu vùng bụng tăng dần, đặc biệt ở vùng hạ vị bên trái (LLQ)
+    - buồn nôn
+    - nôn x 1
+    - chủ quan sốt và run rẩy
+    - mất cảm giác ngon miệng/chán ăn
+    - suy nhược
+    -  Toàn trạng suy kiệt
+    - giảm lượng nước tiểu từ 1800 ml xuống còn 300 ml trong vòng 24 giờ
+    - tăng đáng kể lượng dịch từ ống thông hồi tràng từ 350 ml lên 1200 mltrong cùng khoảng thời gian
+    Đặc điểm triệu chứng
+    - Vị trí: LLQ
+    - Mức độ nghiêm trọng: đau bụng/khó chịu vùng bụng tăng dần
+    - Thời gian: 48 giờ qua
+    - Tần suất: nôn x 1
+    - Triệu chứng liên quan: chủ quan sốt và run rẩy, mất cảm giác ngon miệng/chán ăn, suy nhược, toàn trạng suy kiệt  thiểu niệu, chảy dịch từ lỗ dò tăng đáng kể
     Sự kiện trước khi nhập viện
-    - Được bác sĩ chăm sóc chính khám vào cuối tuần, được kê đơn kháng sinh cho nhiễm khuẩn đường tiết niệu, vị trí không xác định
-    - Đi khám lại bác sĩ chăm sóc chính vào hôm qua, bắt đầu dùng cipro và bactrim
-    Tình trạng ngay trước khi nhập viện
-    - đau tiến triển và lan vào sườn trái và LLQ
-    - đau liên tục, lan tỏa ra lưng và có tính chất kéo
-    - Đồng ý ớn lạnh và một số khó chịu khi đi tiểu và đại tiện
-    - Không có máu trong phân hoặc nước tiểu, đau đớn khi đi tiểu, tiểu gấp hoặc các triệu chứng tiết niệu khác
-    - Phủ nhận CPSOB (đau ngực, khó thở), NV (buồn nôn, nôn mửa), VB (chảy máu âm đạo), khí hư bất thường, thay đổi cân nặng
+    - ăn uống kém do buồn nôn, được cho là do tác dụng phụ của thuốc giảm đau opioid
+    - ngừng thuốc giảm đau opioid vào hôm qua mà không có thay đổi các triệu chứng
 
 3.  Đánh giá tại bệnh viện
-    Kết quả xét nghiệm: công thức máu (cbc) là 12 (tăng nhẹ))
-    Kết quả chẩn đoán hình ảnh: chụp cắt lớp vi tính (ct) bụng và chậu cho thấy một khoang chứa dịch phức tạp lớn kích thước 12x9x9cm nằm sâu trong vùng chậu
-    Các phát hiện chẩn đoán khác: Lo ngại về áp xe (Đã tư vấn Ngoại khoa Tổng hợp)

@@ -1,45 +1,14 @@
-1.  Tiền sử bệnh
-    bệnh nhân có tiền sử nhập viện gần đây vìviêm tụy
-    Bệnh lý mãn tính
-    - tiền sử rung nhĩ
-    - phẫu thuật cắt bỏ tuyến tiền liệt (u ác của tuyến tiền liệt)
-    - rối loạn cảm xúc lưỡng cực khác
-    Tiền sử phẫu thuật / thủ thuật: phẫu thuật cắt bỏ tuyến tiền liệt (u ác của tuyến tiền liệt)
-    Thuốc trước khi nhập viện: đang dùng eliquis (cho rung nhĩ)
-2.  Tiền sử bệnh hiện tại
-    Lý do nhập viện: sốt và đau bụng
-    Thời điểm khởi phát triệu chứng
-    - khởi phát đau bụng trên (lần nhập viện trước)
-    - Hôm nay, bệnh nhân có sốt nhẹ đến 38.3°C kèm theo đau hạ sườn phải tái phát, ngày càng nặng hơn.
-    Diễn biến bệnh
-    - Ban đầu xuất hiện đau bụng trên. sau đó nhập viện để khám và điều trị tại bệnh viện,  trong quá trình nằm viện ngày hôm qua bệnh nhân thấy  đỡ đau hơn. 
-    - Bệnh nhân Tự ý bỏ về từ  bệnh viện ngày hôm qua.
-    - Hôm nay, bệnh nhân có sốt nhẹ đến 38.3°C kèm theo đau hạ sườn phải tái phát, ngày càng nặng hơn.
-    - Được gọi lại nhập viện do có kết quả  cấy máu dương tính 
-    Triệu chứng hiện tại
-    - sốt
-    - đau bụng
-    - đau hạ sườn phải
-    - sốt nhẹ đến 38.3°C
-    - đau hạ sườn phải tái phát, ngày càng nặng hơn
-    - đau hạ sườn phải liên tục
-    Đặc điểm triệu chứng
-    - Vị trí: Vùng hạ sườn phải 
-    - Mức độ nghiêm trọng: ngày càng nặng hơn
-    - Tính chất: liên tục
-    - Triệu chứng liên quan: không thấy  buồn nôn, nôn, ớn lạnh, thay đổi chức năng ruột, đau ngực, khó thở.
-  Diễn biến  trước khi nhập viện
-    - Tự ý rời bệnh viện (AMA) ngày hôm qua sau khi cơn đau đỡ hơn ở  lần nhập viện trước.
-    - Được thực hiện siêu âm vùng gan mật tại phòng cấp cứu cho thấy túi mật căng to với dịch quanh túi mật gợi ý viêm túi mật cấp.
+Câu hỏi từ người dùng :
+
+Dạ em có một người bạn, hiện tại bạn ấy đang bị nổi các dấu mề đay rất to và ngứa khắp người, bạn em bị nổi quanh năm luôn ạ. Những dấu mề đay nổi rất khó chịu và ngứa, được biết bạn em có từng đi chữa trị và sử dụng rất nhiều thuốc nhưng không đỡ ạ. Mẹ của bạn ấy cũng bị nên em nghỉ chắc là di truyền. Cả hai người đều không phải dị ứng do thời tiết hay thức ăn, nó có thể nổi lên mọi lúc. mọi người cho em hỏi là bệnh này là bệnh gì ạ và để lâu có bị nặng hay ảnh hưởng nghiêm trọng gì không ạ. Mọi người cho em xin ý kiến và có cách nào để chữa cho bạn không ạ. Em cảm ơn rất nhiều
+
+
+Câu trả lời của bác sĩ: 
+
+Chào bạn,mình xin trả lời câu hỏi của bạn như sau
+Như bạn đã mô tả, trường hợp này bạn  thuộc MÀY ĐAY VÔ CĂN. Chúng ta không tìm được nguyên nhân gây bệnh. Đây là tình trạng hay gặp nhất của MÀY ĐAY MẠN TÍNH.
+Tổn thương mô bệnh học chủ yếu là tình trạng xâm nhập của tế bào một nhân kết hợp với lympho T và đại thực bào. Các tổn thương khó quan sát trên kính hiển vi quang học thông thường mà cần xem trên kính hiển vi điện tử. Các tế bào mast tăng số lượng vùng hạ bì với các mức độ thoát bọng khác nhau được quan sát thấy. Nhuộm huỳnh quang miễn dịch tổn thương sinh thiết không thấy có hình ảnh của lắng đọng các phức hợp miễn dịch, bổ thể hay sợi fibrin.
+Đối với bệnh lý mày đay vô căn, để lâu thường không có biến chứng gì nặng, chủ yếu bệnh làm ảnh hưởng tới chất lượng cuộc sống. Mày đay vô căn là một bệnh mạn tính, việc điều trị phải lâu dài và liên tục. Quá trình điều trị chỉ là điều trị triệu chứng.
+Điều trị phụ thuộc vào mức độ nặng và bệnh lý nền có liên quan. Cần lưu ý cân bằng giữa hiệu quả điều trị kiểm soát triệu chứng và những tác dụng gây độc của liệu pháp điều trị. **************** thể hệ sau không gây buồn ngủ là lựa chọn hàng đầu sau đó đến **************** thể hệ 1, corticoid liều thấp cách ngày hoặc hàng ngày và giảm liều chậm 2,5 – 5mg mỗi 2-3 tuần. Nếu không đỡ hoặc có chống chỉ định, xin bạn hãy đến với bác sĩ chuyên khoa da liễu để có phương pháp điều trị tốt nhất.
 3.  Đánh giá tại bệnh viện
-    Kết quả laboratory
-    - lipase là tăng lên ở mức 623 (lần nhập viện trước)
-    - tăng men gan nhẹ (lần nhập viện trước)
-    - tbr là cao tới 1.0 sau đó cải thiện (lần nhập viện trước)
-    - các xét nghiệm khác có xu hướng giảm (lần nhập viện trước)
-    - dương tính cấy máu khi tái khám với GPRs
-    Kết quả chẩn đoán hình ảnh
-    - siêu âm vùng gan mật cho thấy sỏi mật nhưng không có viêm túi mật hoặc sỏi ống mật (lần nhập viện trước)
-    - chụp ct bụng chậu là chưa phát hiện bất thường (lần nhập viện trước)
-    - siêu âm vùng gan mật hiện tại cho thấy túi mật căng to với dịch quanh túi mật gợi ý viêm túi mật cấp
-    Các phát hiện chẩn đoán khác: lo ngại viêm túi mật cấp
+    Kết quả chụp ảnh: chụp cộng hưởng từ (mri) cột sống cổ cho thấy hẹp ống sống C4-5, C5-6, C6-7 và hẹp lỗ liên hợp

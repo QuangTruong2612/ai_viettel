@@ -1,43 +1,25 @@
 1.  Tiền sử bệnh
-    Các đợt tương tự trước đây: Nhập viện trong quá khứ vì đợt cấp hen suyễn
-    Bệnh mạn tính: hen suyễn
-    Thuốc trước khi nhập viện
-    - albuterol nebs q4h tại nhà
-    - z-pack
+    Các tập tương tự trước đây
+    - Nhập viện khoa Thần kinh từ [Date] với thông não so với chụp cắt lớp vi tính (ct) đầu từ [Date].
+    - Bị tăng đau đầu cải thiện khi nằm ngửa.
+    - Nhập viện khoa Thần kinh vào thời điểm đó để điều trị chứng đau đầu.
+    - Được bác sĩ nhãn khoa khám trong quá trình nhập viện đó và không phát hiện phù gai thị.
+    Bệnh lý mãn tính: não úng thuỷ khác từ thời kỳ sơ sinh
+    Tiền sử phẫu thuật / thủ thuật
+    - Phẫu thuật đặt cảng để điều trị chứng tăng nhãn áp ở thời kỳ sơ sinh
+- Hệ thống dẫn lưu được chỉnh sửa/thay thế khi 3 tháng tuổi
+- Hệ thống dẫn lưu được chỉnh sửa/thay thế lại khi [Số] tuổi
 2.  Tiền sử bệnh hiện tại
-    Lý do nhập viện: khó thở và tiếng rít
-    Thời điểm khởi phát triệu chứng
-    - Khoảng một tuần trước: đau khi ấn xoang, ho nhẹ
-    - Triệu chứng tiếng rít và khó thở trở nên nặng hơn
-    - tiếng rít vào ban đêm
+    Lý do nhập viện: đau đầu kéo dài kèm theo mờ mắt
+    Thời điểm khởi phát triệu chứng: nhìn mờ tiến triển trong 2 tuần qua
     Diễn biến bệnh
-    - Một tuần trước: đau khi ấn xoang, ho nhẹ
-    - tiếng rít và khó thở trở nên tồi tệ hơn
-    - tiếng rít vào ban đêm
-   2. Bệnh sử hiện tạiBệnh nhân được bác sĩ chăm sóc ban đầu khám cách đây khoảng 1 tuần vì khó thở, khò khè và các triệu chứng đường hô hấp trên. 
-Bệnh nhân được kê prednisone giảm liều và amoxicillin. Tuy nhiên, bệnh nhân không dung nạp amoxicillin do xuất hiện tiêu chảy nên được chuyển sang sử dụng azithromycin.Bệnh nhân đã dùng prednisone 40 mg/ngày trong 3 ngày, sau đó giảm xuống 30 mg vào ngày trước nhập viện. Sau liều prednisone đầu tiên, bệnh nhân xuất hiện đau đầu. Triệu chứng tiếp tục tiến triển tăng dần. Đêm trước nhập viện, bệnh nhân xuất hiện đau đầu dữ dội, khò khè nhiều, nghe tiếng rít về đêm, mất ngủ và đau vùng hạ vị.
-Triệu chứng khi nhập viện:
-Khó thở.
-Khò khè.
-Tiếng rít về đêm.
-Đau vùng xoang.
-Ho nhẹ.
-Đau đầu dữ dội.
-Đau hạ vị.
-Các sự kiện trước khi nhập viện:
-Được khám bởi bác sĩ chăm sóc ban đầu khoảng 1 tuần trước.
-Được chỉ định prednisone giảm liều và amoxicillin.
-Ngừng amoxicillin do tiêu chảy.
-Chuyển sang điều trị bằng azithromycin.
-Đã dùng prednisone 40 mg/ngày trong 3 ngày, sau đó 30 mg vào ngày trước nhập viện.
-Tình trạng ngay trước khi nhập viện:
-Đau đầu dữ dội.Khò khè nhiều, đặc biệt về đêm.
-Mất ngủ.
-Đau hạ vị.
-3.  Đánh giá tại bệnh viện
-    Kết quả chẩn đoán hình ảnh: chụp x-quang ngực không cho thấy bằng chứng của viêm phổi hoặc các đám mờ
-    Các thủ thuật đã thực hiện
-    - combivent nebs x3 every 20 minutes
-    - iv magnesium
-    - 30 mg of prednisone (total of 60 mg bổ sung hôm nay)
-    - lưu lượng đỉnh thở ra đo được từ 240 đến 260
+    - Bệnh nhân bị não úng tuỷ từ thời kỳ sơ sinh, được điều trị bằng cách đặt dẫn lưu shunt
+    - Trước đây đã từng nhập viện với chẩn đoán não úng thủy, có biểu hiện tăng đau đầu , triệu chứng cải thiện khi nằm ngửa.
+    - Nhập viện trước đây vào khoa Thần kinh để điều trị chứng đau đầu.
+    - Khám nhãn khoa trong quá trình nhập viện trước đó cho thấy không có phù gai thị.
+    - Đến hôm nay, bệnh nhân bị mờ mắt ở cả hai mắt, bên trái nặng hơn bên phải, tiến triển trong 2 tuần qua.
+Chẩn đoán phân biệt: 
+CT ngực là phương pháp hữu ích, nhạy cảm để giúp chẩn đoán xác định VPHT, đánh giá độ lan rộng của bệnh, và còn giúp phát hiện bất thường bẩm sinh kèm theo hay dị vật đường thở bỏ quên nếu có. Hiện nay, hầu hết các nghiên cứu đều chẩn đoán xác định VPHT bằng CT ngực. Các hình ảnh chính trong VPHT như sau:
+- Có vùng đông đặc phổi nhưng không giảm thể tích.
+- Phá hủy cấu trúc nhu mô phổi bình thường với sự hiện diện của vùng giảm bắt thuốc cản quang. 
+    - Phù gai thị (theo báo cáo của bác sĩ nhãn khoa)
