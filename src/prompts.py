@@ -229,6 +229,10 @@ Các pattern dưới đây **LUÔN** là `CHẨN_ĐOÁN` (có ICD code), **KHÔN
 <strict_negative_rules>
 ## 2. CÁC LỆNH CẤM BẤT KHẢ XÂM PHẠM (STRICT NEGATIVE RULES - CHỐNG TÀO LAO)
 
+⚠️ **NGUYÊN TẮC CỐT LÕI — ĐỌC ĐẦU TIÊN**: **DEFAULT = TRÍCH XUẤT**. Các lệnh CẤM bên dưới chỉ áp dụng cho các token ĐỘC LẬP rõ ràng KHÔNG phải entity. Nếu bệnh án có triệu chứng, chẩn đoán, thuốc, xét nghiệm HỢP LỆ → BẮT BUỘC extract. **TUYỆT ĐỐI KHÔNG được trả `[]` rỗng khi bệnh án có thông tin y khoa** (vd bệnh Kawasaki có sốt cao, phát ban, viêm kết mạc, sưng hạch → PHẢI extract đầy đủ).
+
+🔥 **ĐỊNH DẠNG OUTPUT**: Chỉ trả về JSON array (vd `[{...}, {...}]`). KHÔNG thêm bất kỳ text nào TRƯỚC hoặc SAU JSON (không "Lý do:", không giải thích, không markdown code block). Nếu không có entity nào → trả `[]` (array rỗng, KHÔNG kèm text).
+
 ✅ **QUY TẮC 1: Xử lý Sinh hiệu gộp khám lâm sàng (Vital Signs Dump)**
 - Nếu gặp chuỗi sinh hiệu gộp số liệu hoặc mã đo khám lâm sàng như `VS98.3 12987 56 18 99RA`, `VS 98.3...` ở phần Khám lâm sàng → BẮT BUỘC TRÍCH XUẤT vào loại `KẾT_QUẢ_XÉT_NGHIỆM`.
 - Nếu có tên chỉ số rõ ràng (`HA 160/90 mmHg`) → ưu tiên tách thành cặp: TÊN="HA" (`TÊN_XÉT_NGHIỆM`), KQ="160/90 mmHg" (`KẾT_QUẢ_XÉT_NGHIỆM`).
@@ -300,43 +304,46 @@ Các pattern dưới đây **LUÔN** là `CHẨN_ĐOÁN` (có ICD code), **KHÔN
 - Lý do: Nếu text khác gold (mở rộng), WER tăng → final_score giảm. Scoring dựa trên text matching character-by-character / word-by-word.
 - Ngoại lệ DUY NHẤT: Khi input KHÔNG CÓ viết tắt, chỉ có tên đầy đủ → extract bình thường.
 
-⛔ **CẤM 12 (R38 - 2026-07-22): CẤM trích xuất cells / anatomical parts / chemical processes làm TRIỆU_CHỨNG**
+⛔ **CẤM 12 (R38 - 2026-07-22): TRÁNH trích xuất cells / anatomical parts / chemical processes làm TRIỆU_CHỨNG**
 - Bệnh án hay giải thích CƠ CHẾ BỆNH bằng cách nhắc tới tế bào, cơ quan, quá trình hóa học.
-- Đây KHÔNG phải triệu chứng (BN không "cảm thấy" tế bào/quá trình) → **KHÔNG BAO GIỜ extract làm TRIỆU_CHỨNG**:
+- Thường KHÔNG phải triệu chứng (BN không "cảm thấy" tế bào/quá trình) → **TRÁNH extract làm TRIỆU_CHỨNG**:
   - **Tế bào / thành phần máu**: `hồng cầu`, `bạch cầu`, `tiểu cầu`, `huyết sắc tố`, `hemoglobin`
   - **Quá trình hóa học / sinh học**: `oxy hóa`, `khử oxy`, `chuyển hóa`, `đông máu`, `tan huyết`, `phá hủy`, `quá trình oxy hóa`
-- Câu hỏi kiểm tra: **"Bệnh nhân có CẢM NHẬN được điều này không?"** → KHÔNG → DROP.
+- Câu hỏi kiểm tra: **"Bệnh nhân có CẢM NHẬN được điều này không?"** → KHÔNG → TRÁNH extract.
 - Ví dụ SAI: `"Khi thiếu men này, hồng cầu trở nên mong manh và dễ bị phá hủy"` → KHÔNG extract `hồng cầu`, `oxy hóa`, `phá hủy` làm TRIỆU_CHỨNG.
 - Hướng xử lý: Nếu mô tả dẫn tới 1 TRIỆU CHỨNG THẬT (vd "phá hủy → vàng da"), chỉ extract triệu chứng thật, bỏ qua phần giải thích cơ chế.
+- NGOẠI LỆ: Nếu "hồng cầu" / "bạch cầu" / "tiểu cầu" là 1 phần của chẩn đoán (`giảm tiểu cầu`, `tăng bạch cầu`, `hồng cầu bị phá hủy hàng loạt`) → extract bình thường (là CHẨN_ĐOÁN/TRIỆU_CHỨNG hợp lệ).
 
-⛔ **CẤM 13 (R38 - 2026-07-22): CẤM trích xuất trigger substances / causal agents làm TRIỆU_CHỨNG**
+⛔ **CẤM 13 (R38 - 2026-07-22): TRÁNH trích xuất trigger substances / causal agents làm TRIỆU_CHỨNG**
 - Trong bệnh án về bệnh tan huyết (G6PD, dị ứng, ngộ độc...), bệnh án hay liệt kê các **TÁC NHÂN GÂY BỆNH** cần tránh: `đậu tằm`, `băng phiến` (long não), `hóa chất`, `thuốc`, `thực phẩm`, `mủ cao su`, `phấn hoa`.
-- Đây là **CAUSES / TRIGGERS**, KHÔNG phải triệu chứng. BN không "bị đậu tằm" mà bị "tan huyết do đậu tằm".
-- Câu hỏi kiểm tra: **"Đây là cái GÂY RA bệnh hay là cái BIỂU HIỆN bệnh?"** → Gây ra → DROP.
-- Ví dụ SAI: `"Khi trẻ bị thiếu men G6PD và ăn đậu tằm..."` → KHÔNG extract `đậu tằm`, `ăn đậu tằm` làm TRIỆU_CHỨNG.
+- Thường là **CAUSES / TRIGGERS**, KHÔNG phải triệu chứng. BN không "bị đậu tằm" mà bị "tan huyết do đậu tằm".
+- Câu hỏi kiểm tra: **"Đây là cái GÂY RA bệnh hay là cái BIỂU HIỆN bệnh?"** → Gây ra → TRÁNH extract.
+- Ví dụ SAI: `"Khi trẻ bị thiếu men G6PD và ăn đậu tằm..."` → TRÁNH extract `đậu tằm`, `ăn đậu tằm` làm TRIỆU_CHỨNG.
+- NGOẠI LỆ: Nếu trong câu CÓ NEGATION rõ ràng ("Không dùng long não, băng phiến", "Tránh đậu tằm") → extract với `isNegated` để ghi nhận lời khuyên. Đây là context y khoa quan trọng.
 
-⛔ **CẤM 14 (R38 - 2026-07-22): CẤM trích xuất generic categories / actions / body sites làm TÊN_XÉT_NGHIỆM**
-- TÊN_XÉT_NGHIỆM PHẢI là CHỈ ĐỊNH CẬN LÂM SÀNG cụ thể (X-quang ngực, ECG, công thức máu, ...). KHÔNG phải:
-  - **Generic categories**: `thực phẩm`, `hóa chất`, `thuốc` (trừ khi đứng riêng trong list test names)
+⛔ **CẤM 14 (R38 - 2026-07-22): TRÁNH trích xuất generic categories / actions / body sites làm TÊN_XÉT_NGHIỆM**
+- TÊN_XÉT_NGHIỆM PHẢI là CHỈ ĐỊNH CẬN LÂM SÀNG cụ thể (X-quang ngực, ECG, công thức máu, ...). TRÁNH extract các token chung chung:
+  - **Generic categories**: `thực phẩm`, `hóa chất`, `thuốc` (khi đứng riêng — không phải là chỉ định CLS)
   - **Actions / verbs**: `phân tích`, `lấy máu`, `thu thập`, `kiểm tra` (chỉ là hành động)
   - **Body sites / sample locations**: `gót chân`, `gót chân trẻ`, `máu khô`, `tĩnh mạch` (là vị trí lấy mẫu, không phải tên test)
-- Câu hỏi kiểm tra: **"Đây là TÊN 1 test/procedure cụ thể hay chỉ là DIỄN TẢ chung?"** → Diễn tả chung → DROP.
-- Ví dụ SAI: `"Các bác sĩ sẽ lấy máu khô ở gót chân trẻ để phân tích"` → KHÔNG extract `gót chân trẻ`, `phân tích` làm TÊN_XÉT_NGHIỆM. Thay vào đó extract `xét nghiệm máu` hoặc `xét nghiệm G6PD` (nếu rõ).
+- Câu hỏi kiểm tra: **"Đây là TÊN 1 test/procedure cụ thể hay chỉ là DIỄN TẢ chung?"** → Diễn tả chung → TRÁNH extract.
+- Ví dụ: `"Các bác sĩ sẽ lấy máu khô ở gót chân trẻ để phân tích"` → TRÁNH extract `gót chân trẻ`, `phân tích` làm TÊN_XÉT_NGHIỆM. Thay vào đó extract `xét nghiệm máu` hoặc `xét nghiệm G6PD` (nếu rõ trong input).
 
-⛔ **CẤM 15 (R38 - 2026-07-22): CẤM extract narrative consumption phrases**
-- Các cụm mô tả HÀNH ĐỘNG TIÊU THỤ/TIẾP XÚC không phải entity y khoa:
+⛔ **CẤM 15 (R38 - 2026-07-22): TRÁNH extract narrative consumption phrases**
+- Thường thì các cụm mô tả HÀNH ĐỘNG TIÊU THỤ/TIẾP XÚC không phải entity y khoa:
   - `ăn đậu tằm`, `ăn uống bình thường`, `tiếp xúc với băng phiến`, `sử dụng thuốc`, `việc ăn uống`, `dùng thuốc nam`, `uống thuốc`
   - `hạ sốt` (hành động điều trị, không phải triệu chứng hay thuốc cụ thể)
-- Câu hỏi kiểm tra: **"Đây là HÀNH ĐỘNG (verb) hay THỰC THỂ (noun)?"** → Hành động → DROP.
+- Câu hỏi kiểm tra: **"Đây là HÀNH ĐỘNG (verb) hay THỰC THỂ (noun)?"** → Hành động → TRÁNH extract.
 - Trừ khi `ăn X` / `tiếp xúc X` đi kèm với tên CHẤT/THUỐC cụ thể (vd `tiếp xúc với băng phiến` → chỉ extract `băng phiến` nếu nó là entity, còn `tiếp xúc với` DROP).
 
-⛔ **CẤM 16 (R38 - 2026-07-22): CẤM extract body-part-alone + descriptive fragments**
-- **Body part đơn lẻ** (không kèm triệu chứng): `ngực`, `bụng`, `đầu`, `lưng`, `chân`, `tay`, `cổ`, `mặt`, `mắt`, `họng` — KHÔNG phải TRIỆU_CHỨNG.
+⛔ **CẤM 16 (R38 - 2026-07-22): TRÁNH extract body-part-alone + descriptive fragments**
+- **Body part đơn lẻ** (không kèm triệu chứng): `ngực`, `bụng`, `đầu`, `lưng`, `chân`, `tay`, `cổ`, `mặt`, `mắt`, `họng` — thường KHÔNG phải TRIỆU_CHỨNG (trừ khi là 1 phần của chẩn đoán như `đau ngực`, `đau bụng`).
 - **Cụm mô tả không hoàn chỉnh**:
-  - `thiếu men này`, `thiếu máu`, `dễ bị phá hủy`, `dễ bị vỡ`
+  - `thiếu men này`, `thiếu máu` (đứng riêng không kèm "do"/"bởi"), `dễ bị phá hủy`, `dễ bị vỡ`
   - `hồng cầu trở nên mong manh`, `hồng cầu rất dễ bị phá hủy`, `có tính oxy hóa cao`
-  - `thực phẩm chứa chất oxy hóa`, `trẻ bị thiếu men G6PD` (xem CẤM 18)
-- Câu hỏi kiểm tra: **"Cụm này MÔ TẢ đầy đủ 1 triệu chứng/bệnh/xét nghiệm, hay chỉ là 1 MẢNH của 1 câu dài?"** → Mảnh → DROP.
+  - `thực phẩm chứa chất oxy hóa`
+- Câu hỏi kiểm tra: **"Cụm này MÔ TẢ đầy đủ 1 triệu chứng/bệnh/xét nghiệm, hay chỉ là 1 MẢNH của 1 câu dài?"** → Mảnh → TRÁNH extract.
+- NGOẠI LỆ: `trẻ bị thiếu men G6PD` → extract làm CHẨN_ĐOÁN (pattern "bị <disease>" xem STAGE2).
 </strict_negative_rules>
 
 <classification_principles>
@@ -1049,7 +1056,8 @@ def build_stage1_user_prompt(input_text: str) -> str:
         "   - **Descriptive fragments**: `thiếu men này`, `thiếu máu` (đứng riêng), `dễ bị phá hủy`, `hồng cầu trở nên mong manh`, `có tính oxy hóa cao`, `thực phẩm chứa chất oxy hóa`\n"
         "   Test VÀNG: \"BN có CẢM NHẬN được cái này không?\" → KHÔNG → DROP. \"Cái này GÂY RA bệnh hay BIỂU HIỆN bệnh?\" → Gây ra → DROP.\n\n"
         f"INPUT:\n{input_text}\n\n"
-        "OUTPUT JSON ARRAY (chỉ trả về [{'text': '...', 'position': [start, end)}], không kèm lời giải thích):"
+        "🚨 ĐỊNH DẠNG OUTPUT: Trả về JSON array (vd `[{{'text': '...', 'position': [start, end]}}, ...]`). KHÔNG thêm text nào trước/sau JSON. KHÔNG dùng markdown code block. KHÔNG giải thích. Nếu bệnh án có thông tin y khoa (sốt, đau, phát ban, thuốc, xét nghiệm, chẩn đoán...) → BẮT BUỘC extract, KHÔNG trả `[]` rỗng trừ khi input thực sự không có entity nào.\n\n"
+        "OUTPUT JSON ARRAY:"
     )
 
 
@@ -1076,7 +1084,10 @@ def build_stage2_user_prompt(input_text: str, mentions: list[dict]) -> str:
     return STAGE2_PROMPT.format(
         input_text=input_text,
         mentions_list=mentions_str,
-    )
+    ) + """
+
+🚨 **ĐỊNH DẠNG OUTPUT BẮT BUỘC**: Trả về JSON array (vd `[{...}, {...}]`). KHÔNG thêm bất kỳ text nào TRƯỚC hoặc SAU JSON (không "Lý do:", không giải thích, không markdown code block). Nếu mention không rõ type → vẫn PHẢI trả entry với best guess type (KHÔNG được bỏ sót mention nào).
+"""
 
 
 ICD_LLM_FALLBACK_PROMPT = """Bạn là bác sĩ chuyên gia. Hãy đề xuất ICD-10 code phù hợp nhất.
