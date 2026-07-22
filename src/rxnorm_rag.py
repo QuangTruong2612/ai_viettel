@@ -1197,7 +1197,16 @@ class RxNormVectorSearch:
     ) -> None:
         # NOTE: JSONL files LUÔN dùng local (Kaggle không có JSONL data source).
         self._jsonl_path = jsonl_path or (DATA_DIR / "rxnorm.jsonl")
-        self._embeddings_path = embeddings_path or (DATA_DIR / "rxnorm_embeddings.npy")
+        # Embeddings file: cho phép Kaggle dataset override qua env var
+        # ``RXNORM_EMBEDDINGS_PATH``, hoặc auto-detect từ ``/kaggle/input/...``
+        # (hữu ích khi file lớn được upload như Kaggle Dataset thay vì git LFS).
+        if embeddings_path:
+            self._embeddings_path = embeddings_path
+        else:
+            from src import resolve_data_path
+            self._embeddings_path = resolve_data_path(
+                "rxnorm_embeddings.npy", env_var="RXNORM_EMBEDDINGS_PATH",
+            )
 
         self.codes: list[str] = []
         self.names: list[str] = []
@@ -1300,7 +1309,13 @@ class RxNormVectorSearch:
                     convert_to_numpy=True,
                 )
                 np.save(self._embeddings_path, self._embeddings)
-                logger.info("Saved RxNorm embeddings → %s", self._embeddings_path.name)
+                # Trên Kaggle, embeddings_path có thể nằm trong /kaggle/input
+                # (read-only mount) → redirect save sang writable location.
+                from src import get_writable_cache_path
+                save_path = get_writable_cache_path(self._embeddings_path.name)
+                np.save(save_path, self._embeddings)
+                self._embeddings_path = save_path
+                logger.info("Saved RxNorm embeddings → %s", save_path.name)
             except Exception as exc:
                 logger.error("Lỗi sinh embeddings: %s", exc)
                 return []

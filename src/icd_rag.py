@@ -2512,7 +2512,16 @@ class ICD10VectorSearch:
         # Fallback 2: ICD10_Data.json (cũ).
         # Fallback 3: icd10.jsonl cũ (EN only).
         self._jsonl_path = jsonl_path or self._pick_default_jsonl()
-        self._embeddings_path = embeddings_path or (DATA_DIR / "icd10_embeddings.npy")
+        # Embeddings file: cho phép Kaggle dataset override qua env var
+        # ``ICD_EMBEDDINGS_PATH``, hoặc auto-detect từ ``/kaggle/input/...``
+        # (hữu ích khi file lớn được upload như Kaggle Dataset thay vì git LFS).
+        if embeddings_path:
+            self._embeddings_path = embeddings_path
+        else:
+            from src import resolve_data_path
+            self._embeddings_path = resolve_data_path(
+                "icd10_embeddings.npy", env_var="ICD_EMBEDDINGS_PATH",
+            )
 
         self.codes: list[str] = []
         self.descs_raw: list[str] = []
@@ -2714,10 +2723,16 @@ class ICD10VectorSearch:
                 if self._embeddings is None or len(self._embeddings) == 0:
                     return []
                 try:
-                    np.save(self._embeddings_path, self._embeddings)
+                    # Trên Kaggle, embeddings_path có thể nằm trong /kaggle/input
+                    # (read-only mount). Redirect save sang writable location.
+                    from src import get_writable_cache_path
+                    save_path = get_writable_cache_path(self._embeddings_path.name)
+                    np.save(save_path, self._embeddings)
+                    # Cập nhật path để các lần load sau dùng đúng chỗ
+                    self._embeddings_path = save_path
                     logger.info(
                         "Đã lưu ma trận nhúng ra %s (%.2fs)",
-                        self._embeddings_path,
+                        save_path,
                         time.time() - t0,
                     )
                 except Exception as exc_save:
