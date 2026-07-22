@@ -233,6 +233,36 @@ Các pattern dưới đây **LUÔN** là `CHẨN_ĐOÁN` (có ICD code), **KHÔN
 
 🔥 **ĐỊNH DẠNG OUTPUT**: Chỉ trả về JSON array (vd `[{...}, {...}]`). KHÔNG thêm bất kỳ text nào TRƯỚC hoặc SAU JSON (không "Lý do:", không giải thích, không markdown code block). Nếu không có entity nào → trả `[]` (array rỗng, KHÔNG kèm text).
 
+⛔ **CẤM SPAN OVERLAP (R39 - 2026-07-22): TUYỆT ĐỐI KHÔNG extract 2 entities span chồng lấn nhau**
+- Mỗi cụm từ trong input thuộc về **TỐI ĐA 1 entity duy nhất**. KHÔNG BAO GIỜ extract 2 spans mà 1 span nằm trọn trong span kia.
+- Câu hỏi kiểm tra: **"Span ngắn hơn có nằm hoàn toàn bên trong span dài hơn không?"** → CÓ → DROP span ngắn.
+- Ví dụ SAI (cross-type overlap):
+  - `"phình giãn động mạch vành"` (CHẨN_ĐOÁN) + `"động mạch vành"` (TÊN_XÉT_NGHIỆM) → SAI. "động mạch vành" bị trùng lặp với span dài hơn.
+  - `"viêm phổi nặng"` (CHẨN_ĐOÁN) + `"viêm phổi"` (TRIỆU_CHỨNG) → SAI.
+  - `"đau thắt ngực sau xương ức"` (TRIỆU_CHỨNG) + `"đau thắt ngực"` (TRIỆU_CHỨNG) → SAI.
+- Nguyên tắc: KHI ĐÃ EXTRACT 1 span đầy đủ với type đúng → KHÔNG extract lại span con bên trong nó, kể cả khi type khác. Span con là redundant và gây overlap scoring penalty.
+- Ví dụ ĐÚNG:
+  - Input `"phình giãn động mạch vành"` → CHỈ extract 1 entity: `text="phình giãn động mạch vành"`, type=CHẨN_ĐOÁN.
+  - Input `"viêm phổi nặng do tụ cầu vàng"` → CHỈ extract `viêm phổi nặng` (CHẨN_ĐOÁN), KHÔNG extract riêng `viêm phổi` hay `tụ cầu vàng`.
+- Áp dụng cho TẤT CẢ cặp type (CHẨN_ĐOÁN vs TÊN_XÉT_NGHIỆM, TRIỆU_CHỨNG vs CHẨN_ĐOÁN, ...): nếu 1 span nằm trong span khác → DROP span ngắn.
+
+⛔ **CẤM ANATOMICAL-TERM-AS-TEST (R39 - 2026-07-22): Tên giải phẫu đơn lẻ KHÔNG phải TÊN_XÉT_NGHIỆM**
+- Các cụm tên GIẢI PHẪU đứng một mình (không kèm chỉ định CLS) **KHÔNG phải TÊN_XÉT_NGHIỆM**:
+  - `động mạch vành`, `động mạch chủ`, `động mạch cảnh`, `động mạch phổi`
+  - `tĩnh mạch cửa`, `tĩnh mạch chủ`, `tĩnh mạch cảnh`
+  - `buồng tim`, `thùy phổi`, `thận`, `gan`, `lá lách`, `tụy`, `tuyến giáp`
+  - `xoang`, `hang`, `vách`, `lòng mạch`, `thành ngực`
+- Câu hỏi kiểm tra: **"Đây là CƠ QUAN / MẠCH MÁU (anatomy) hay CHỈ ĐỊNH CẬN LÂM SÀNG (test)?"** → Anatomy → KHÔNG gán TÊN_XÉT_NGHIỆM.
+- Ví dụ SAI:
+  - `"chụp CT động mạch vành"` → CHỈ extract `CT động mạch vành` (hoặc `CT`) làm TÊN_XÉT_NGHIỆM. KHÔNG extract riêng `động mạch vành` làm TÊN_XÉT_NGHIỆM.
+  - `"siêu âm tim qua thành ngực"` → CHỈ extract `siêu âm tim` (TÊN_XÉT_NGHIỆM). KHÔNG extract `tim` hay `thành ngực` riêng.
+- Ngoại lệ: Khi tên giải phẫu là 1 phần của test name compound (`siêu âm tim`, `X-quang ngực`, `MRI sọ não`) → giữ nguyên trong test name, KHÔNG tách riêng.
+
+⛔ **CẤM MODIFIER-ONLY-AS-DISEASE (R39 - 2026-07-22): Chỉ modifier "phình/giãn/hẹp/hở/teo/viêm" không tạo entity riêng**
+- Khi bệnh án ghi `"phình giãn động mạch vành"`, `"hở van hai lá"`, `"viêm phổi nặng"`: chỉ có **1 entity duy nhất** với text đầy đủ + type CHẨN_ĐOÁN. Modifier `phình`/`giãn`/`hẹp`/`hở`/`nặng`/`teo` KHÔNG tạo entity riêng.
+- Ví dụ SAI: `"phình giãn động mạch vành"` → KHÔNG extract `"phình giãn"` riêng, KHÔNG extract `"động mạch vành"` riêng.
+- Ví dụ ĐÚNG: `"phình giãn động mạch vành"` → 1 entity: text=`"phình giãn động mạch vành"`, type=CHẨN_ĐOÁN.
+
 ✅ **QUY TẮC 1: Xử lý Sinh hiệu gộp khám lâm sàng (Vital Signs Dump)**
 - Nếu gặp chuỗi sinh hiệu gộp số liệu hoặc mã đo khám lâm sàng như `VS98.3 12987 56 18 99RA`, `VS 98.3...` ở phần Khám lâm sàng → BẮT BUỘC TRÍCH XUẤT vào loại `KẾT_QUẢ_XÉT_NGHIỆM`.
 - Nếu có tên chỉ số rõ ràng (`HA 160/90 mmHg`) → ưu tiên tách thành cặp: TÊN="HA" (`TÊN_XÉT_NGHIỆM`), KQ="160/90 mmHg" (`KẾT_QUẢ_XÉT_NGHIỆM`).
@@ -1045,16 +1075,18 @@ def build_stage1_user_prompt(input_text: str) -> str:
         "5. QUÉT HẾT TỪNG LẦN LẶP LẠI: Nếu một triệu chứng hay thuốc xuất hiện 3-4 lần ở các câu khác nhau từ Tiền sử đến Cấp cứu đến Khám, PHẢI xuất đủ 3-4 lần với positions tương ứng!\n"
         "6. LOẠI TRỪ RÁC PHI Y KHOA (NOISE REJECTION): TUYỆT ĐỐI KHÔNG trích xuất các cụm mốc thời gian độc lập (`trong tuần qua`, `cách đây 3 ngày`, `20 giây`, `từ sáng hôm nay`) hoặc thói quen sinh hoạt phi lâm sàng (`rượu bia`, `thuốc lá`, `ăn uống bình thường`).\n"
         "7. BẮT BUỘC TRÍCH XUẤT TỪ VIẾT TẮT Y KHOA (MANDATORY ACRONYM EXTRACTION): Hồ sơ bệnh án Việt Nam viết tắt rất nhiều. Bạn BẮT BUỘC phải trích xuất đầy đủ và chính xác tất cả các từ viết tắt bệnh lý/xét nghiệm (`THA` = Tăng huyết áp, `ĐTĐ` / `ĐTĐ tuýp 2` = Đái tháo đường, `NMCT` = Nhồi máu cơ tim, `RLLL` = Rối loạn lipid máu, `COPD` = Bệnh phổi tắc nghẽn mạn tính, `CKD` = Bệnh thận mạn, `BTMV`, `TBMMN`, `ECG`...) như những thực thể y khoa độc lập!\n"
-        "8. QUÉT KIỆT ĐỂ 7 PHẦN BỆNH ÁN (EXHAUSTIVE SECTION COVERAGE): Bạn PHẢI quét tuần tự qua 7 phần (Lý do vào viện, Tiền sử, Diễn biến, Khám lâm sàng, Cận lâm sàng/ECG/Holter, Chẩn đoán xác định, Điều trị/Thuốc ra viện). Mọi thuốc, chẩn đoán, triệu chứng, tên xét nghiệm và chỉ số/kết quả bình thường đều phải được lấy đủ 100%! Không được lười biếng hay bỏ sót các entities ở phần giữa và cuối hồ sơ.\n\n"
-        "🚨 9. CẤM TRÍCH XUẤT CƠ CHẾ/TRIGGER/GENERIC (R38 - 2026-07-22): KHÔNG BAO GIỜ trích xuất các token sau làm entity (dù Stage 2 sẽ phân loại lại, giai đoạn extract KHÔNG nên đưa vào để tránh noise):\n"
+        "8. QUÉT KIỆT ĐỂ 7 PHẦN BỆNH ÁN (EXHAUSTIVE SECTION COVERAGE): Bạn PHẢI quét tuần tự qua 7 phần (Lý do vào viện, Tiền sử, Diễn biến, Khám lâm sàng, Cận lâm sàng/ECG/Holter, Chẩn đoán xác định, Điều trị/Thuốc ra viện). Mọi thuốc, chẩn đoán, triệu chứng, tên xét nghiệm và chỉ số/kết quả bình thường đều phải được lấy đủ 100%! Không được lười biếng hay bỏ sót các entities ở phần giữa và cuối hồ sơ.\n"
+        "9. 🚨 TUYỆT ĐỐI KHÔNG SPAN OVERLAP (R39 - 2026-07-22): Mỗi cụm từ chỉ thuộc về 1 entity duy nhất. KHÔNG BAO GIỜ extract 2 spans chồng lấn nhau. Vd: nếu đã extract `phình giãn động mạch vành` (25 chars) thì KHÔNG extract riêng `động mạch vành` (14 chars) làm entity khác — span ngắn nằm trọn trong span dài là redundant. Trước khi output, KIỂM TRA: có 2 spans nào overlap (1 span nằm trong span kia) không? Nếu có → XOÁ span ngắn hơn.\n\n"
+        "🚨 10. CẤM TRÍCH XUẤT CƠ CHẾ/TRIGGER/GENERIC/ANATOMY (R38+R39 - 2026-07-22): KHÔNG BAO GIỜ trích xuất các token sau làm entity:\n"
         "   - **Cells / chemical processes** (BN không cảm nhận được): `hồng cầu`, `bạch cầu`, `tiểu cầu`, `oxy hóa`, `khử oxy`, `chuyển hóa`, `đông máu`, `tan huyết`, `phá hủy`, `quá trình oxy hóa`\n"
-        "   - **Trigger substances** (gây bệnh, không phải biểu hiện): `đậu tằm`, `băng phiến` (long não), `hóa chất`, `mủ cao su`, `phấn hoa`\n"
-        "   - **Generic categories** (không phải tên test/thuốc cụ thể): `thực phẩm`, `thuốc` (khi đứng riêng), `hóa chất`\n"
+        "   - **Trigger substances**: `đậu tằm`, `băng phiến` (long não), `hóa chất`, `mủ cao su`, `phấn hoa`\n"
+        "   - **Generic categories**: `thực phẩm`, `thuốc` (khi đứng riêng), `hóa chất`\n"
         "   - **Actions / body sites**: `phân tích`, `lấy máu`, `gót chân`, `gót chân trẻ`, `máu khô`, `tĩnh mạch`\n"
+        "   - **Anatomical terms alone** (KHÔNG phải test name): `động mạch vành`, `động mạch chủ`, `tĩnh mạch cửa`, `buồng tim`, `thùy phổi`, `thành ngực`. Nếu là 1 phần của test name compound (`siêu âm tim`, `X-quang ngực`, `CT động mạch vành`) → giữ nguyên trong test name, KHÔNG tách riêng.\n"
         "   - **Narrative consumption phrases**: `ăn đậu tằm`, `tiếp xúc với băng phiến`, `sử dụng thuốc`, `hạ sốt`, `việc ăn uống`\n"
         "   - **Body part alone**: `ngực`, `bụng`, `đầu`, `lưng`, `chân`, `tay` (đứng một mình, không có tính từ/động từ đi kèm)\n"
         "   - **Descriptive fragments**: `thiếu men này`, `thiếu máu` (đứng riêng), `dễ bị phá hủy`, `hồng cầu trở nên mong manh`, `có tính oxy hóa cao`, `thực phẩm chứa chất oxy hóa`\n"
-        "   Test VÀNG: \"BN có CẢM NHẬN được cái này không?\" → KHÔNG → DROP. \"Cái này GÂY RA bệnh hay BIỂU HIỆN bệnh?\" → Gây ra → DROP.\n\n"
+        "   Test VÀNG: \"BN có CẢM NHẬN được cái này không?\" → KHÔNG → DROP. \"Cái này GÂY RA bệnh hay BIỂU HIỆN bệnh?\" → Gây ra → DROP. \"Đây là ANATOMY hay TEST?\" → Anatomy → DROP (trừ khi là 1 phần compound test name).\n\n"
         f"INPUT:\n{input_text}\n\n"
         "🚨 ĐỊNH DẠNG OUTPUT: Trả về JSON array (vd `[{{'text': '...', 'position': [start, end]}}, ...]`). KHÔNG thêm text nào trước/sau JSON. KHÔNG dùng markdown code block. KHÔNG giải thích. Nếu bệnh án có thông tin y khoa (sốt, đau, phát ban, thuốc, xét nghiệm, chẩn đoán...) → BẮT BUỘC extract, KHÔNG trả `[]` rỗng trừ khi input thực sự không có entity nào.\n\n"
         "OUTPUT JSON ARRAY:"
