@@ -364,22 +364,24 @@ _DOSEFORM_KEYWORDS = (
 )
 
 # R34: Drug-class blacklist (lookup() sẽ return [] nếu query thuần class term)
-_NON_TREATMENT_TERMS: frozenset[str] = frozenset({
-    "nitrates", "corticoid", "corticosteroid", "nsaid", "nsaids",
-    "kháng sinh", "kháng viêm", "kháng đông",
-    "thuốc chống đông", "thuốc giảm đau", "thuốc hạ sốt",
-    "thuốc lợi tiểu", "thuốc an thần", "thuốc chống viêm",
-    "thuốc kháng sinh",
-})
+# R38 (2026-07-23): DISABLED - LLM tự quyết định qua Stage 2 prompt
+# _NON_TREATMENT_TERMS: frozenset[str] = frozenset({
+#     "nitrates", "corticoid", "corticosteroid", "nsaid", "nsaids",
+#     "kháng sinh", "kháng viêm", "kháng đông",
+#     "thuốc chống đông", "thuốc giảm đau", "thuốc hạ sốt",
+#     "thuốc lợi tiểu", "thuốc an thần", "thuốc chống viêm",
+#     "thuốc kháng sinh",
+# })
 
 # R42 (2026-07-14): Lab chemicals that have RxNorm SCDs (mostly topical/lab use)
 # but should NOT be returned as drug lookups when queried bare (no strength,
 # no drug context). Examples: 'urea' (mostly topical), 'creatinine' (lab test).
-_LAB_CHEMICALS: frozenset[str] = frozenset({
-    "urea", "creatinine", "hemoglobin", "albumin", "glucose", "sodium",
-    "potassium", "chloride", "calcium", "magnesium", "phosphate",
-    "lactate", "bicarbonate",
-})
+# R38 (2026-07-23): DISABLED - LLM tự quyết định lab chemicals qua Stage 2 prompt
+# _LAB_CHEMICALS: frozenset[str] = frozenset({
+#     "urea", "creatinine", "hemoglobin", "albumin", "glucose", "sodium",
+#     "potassium", "chloride", "calcium", "magnesium", "phosphate",
+#     "lactate", "bicarbonate",
+# })
 
 
 def _extract_brand_from_brackets(name: str) -> str | None:
@@ -480,45 +482,26 @@ _HISTORICAL_RXCUI, _BRAND_NAMES = _load_rxnorm_signals()
 
 
 def _has_resistance_context(text: str) -> bool:
-    """True nếu text là resistance mention (vd 'kháng vancomycin', 'kháng sinh').
+    """NO-OP: LLM tự quyết định resistance context qua Stage 2 prompt.
 
-    R34: Fix 0% pass trên `empty_resistance` — chuyển filter từ postprocess sang
-    retriever để retriever standalone-correct.
+    Trước đây dùng regex check "kháng sinh"/"kháng X". Nhưng regex hay false positive.
+    ĐÃ REMOVE — luôn return False.
+
+    Returns: luôn False — LLM tự filter ở Stage 2.
     """
-    t = text.lower()
-    # "kháng sinh" = antibiotic class (generic) → reject
-    if re.search(r"\bkháng\s+sinh\b", t):
-        return True
-    # "X kháng Y" pattern (resistance) → reject
-    if re.search(r"\bkháng\s+\w{3,}", t):
-        return True
     return False
 
 
 def _has_drug_context(text: str) -> bool:
-    """True nếu text có tín hiệu là drug đơn thuốc (R34: lọc nhiễu lab tokens).
+    """NO-OP: LLM tự quyết định drug context qua Stage 2 prompt + few-shot.
 
-    Cần ÍT NHẤT 1 trong:
-      - Strength (digit + unit: mg, ml, %, ...)
-      - Route token (po, iv, tiêm, uống, daily, bid, ...)
-      - Doseform (tablet, capsule, cream, ...)
-      - Compound separator (/, +, -, và)
-      - Multi-word tổ hợp (≥ 2 alphanumeric tokens)
+    Trước đây dùng regex check strength/route/doseform/multi-word.
+    Nhưng regex hay miss cases (vd "trimetazidin" 1 từ typo, "Vitamin K" pure class).
+    ĐÃ REMOVE — luôn return True để lookup RxNorm bình thường.
+
+    Returns: luôn True — LLM sẽ tự filter ở Stage 2.
     """
-    t = text.lower()
-    if _STRENGTH_RE.search(t):
-        return True
-    if re.search(r"\b(po|iv|im|sc|pr|tiêm|tiêng|uống|siro|daily|bid|tid|qid|q\d+h|hs|prn|ac|pc|am|pm)\b", t):
-        return True
-    if re.search(r"\b(tablet|capsule|cream|injection|suspension|syrup|drop|oral|ointment|gel|patch|spray|viên|ống|gói)\b", t):
-        return True
-    if re.search(r"\s+[\/+\-]\s+|\s+và\s+", t):
-        return True
-    # Multi-word OK (>1 alphanumeric token) — likely drug name (vd "cipro flagyl")
-    tokens = re.findall(r"[a-z0-9]{3,}", t)
-    if len(tokens) >= 2:
-        return True
-    return False
+    return True
 
 
 def _alias_to_generic(drug_text: str) -> str | list[str]:
@@ -1667,12 +1650,14 @@ class RxNormRetriever:
         _raw_text = drug_text  # R42: preserve ORIGINAL text (pre-alias) for brand detection
 
         # R34: Context filter — reject resistance / non-treatment class
-        if _has_resistance_context(drug_text):
-            logger.debug("R34: resistance context rejected: '%s'", drug_text)
-            return []
-        if drug_text.lower().strip() in _NON_TREATMENT_TERMS:
-            logger.debug("R34: drug-class blacklist rejected: '%s'", drug_text)
-            return []
+        # R34: Context filter — reject resistance / non-treatment class
+        # R38 (2026-07-23): DISABLED - LLM tự quyết định qua Stage 2 prompt
+        # if _has_resistance_context(drug_text):
+        #     logger.debug("R34: resistance context rejected: '%s'", drug_text)
+        #     return []
+        # if drug_text.lower().strip() in _NON_TREATMENT_TERMS:
+        #     logger.debug("R34: drug-class blacklist rejected: '%s'", drug_text)
+        #     return []
 
         # R34: Capture ORIGINAL text (chưa alias/strip) để doseform hint detection
         drug_text_orig = drug_text  # alias-translated hoặc original đều OK cho hint
@@ -1715,12 +1700,12 @@ class RxNormRetriever:
             )
             return [ranked[0]]
 
-        # R38 (2026-07-23): L1A — Fuzzy ingredient match for typos (vd "trimetazidin").
-        # Skip nếu đã có drug context (sẽ được xử lý bởi L3/L4 sau).
-        if not _has_drug_context(drug_text) or len(drug_text.split()) == 1:
-            fuzzy_ing = self._fuzzy_ingredient_lookup(drug_text, threshold=85)
-            if fuzzy_ing:
-                return fuzzy_ing[:1]
+        # R38 (2026-07-23) REVERTED: Removed _fuzzy_ingredient_lookup (hardcode).
+        # LLM sẽ tự xử lý typos qua Stage 3 prompt + few-shot examples.
+        # if not _has_drug_context(drug_text) or len(drug_text.split()) == 1:
+        #     fuzzy_ing = self._fuzzy_ingredient_lookup(drug_text, threshold=85)
+        #     if fuzzy_ing:
+        #         return fuzzy_ing[:1]
 
         # L1B: Closest strength fallback (R34) — khi L1 miss, tìm SCD cùng ing
         # với strength gần nhất (vd 'clonazepam 1.5 mg' → 1 MG ≈ 197528).
@@ -1806,7 +1791,7 @@ class RxNormRetriever:
         R34 fix: apply brand→generic alias translation (vd 'flagyl' → 'metronidazole').
         Trước đây bare brand name miss L1 và bị fuzzy block (no drug context).
 
-        R38 (2026-07-23): Thêm fuzzy ingredient match (L0.5) để cover typos ngắn như
+        # R38 (2026-07-23) REVERTED: Removed _fuzzy_ingredient_lookup call.
         "trimetazidin" → "trimetazidine" (1 char missing). Không yêu cầu drug context
         vì chính cái typo đó làm context bị miss.
         """
@@ -1818,13 +1803,12 @@ class RxNormRetriever:
         if isinstance(aliased, str) and aliased != drug_text:
             drug_text = aliased
 
-        # R38: Fuzzy ingredient match — typo correction trước khi các bước L1+
-        # Catch single-token typos như "trimetazidin" → match "trimetazidine" trong
-        # index. Chỉ apply khi text KHÔNG có doseform/strength (tránh over-match).
-        if not _has_drug_context(drug_text) or len(drug_text.split()) == 1:
-            fuzzy_ing = self._fuzzy_ingredient_lookup(drug_text, threshold=85)
-            if fuzzy_ing:
-                return fuzzy_ing
+        # R38 REVERTED: Removed _fuzzy_ingredient_lookup (hardcode).
+        # LLM sẽ tự xử lý typos qua Stage 3 prompt + few-shot.
+        # if not _has_drug_context(drug_text) or len(drug_text.split()) == 1:
+        #     fuzzy_ing = self._fuzzy_ingredient_lookup(drug_text, threshold=85)
+        #     if fuzzy_ing:
+        #         return fuzzy_ing
 
         result = self.index.lookup(drug_text)
         if result:
@@ -1847,44 +1831,12 @@ class RxNormRetriever:
         return []  # don't recurse, don't LLM fallback for sub-lookups
 
     def _fuzzy_ingredient_lookup(self, drug_text: str, threshold: int = 85) -> list[str]:
-        """R38 (2026-07-23): Fuzzy match ingredient name (typo correction).
+        """R38 (2026-07-23) REVERTED: NO-OP — LLM tự xử lý typo qua Stage 3.
 
-        Special-case cho single-token / typo inputs (vd "trimetazidin", "aspirn").
-        Match against `by_ingredient` keys với WRatio >= threshold.
-
-        Returns:
-            list [rxcui] (max 1) hoặc [].
+        Trước đây dùng rapidfuzz.WRatio với threshold 85 để fuzzy match
+        "trimetazidin" → "trimetazidine". Nhưng mỗi lần thêm threshold lại miss.
+        ĐÃ REMOVE — để LLM tự xử lý qua prompts + few-shot examples.
         """
-        if not drug_text or not self.index.by_ingredient:
-            return []
-        # Strip route/freq
-        stripped = _strip_route_freq(drug_text)
-        if not stripped:
-            return []
-        # Take first token (assume single ingredient)
-        tokens = re.findall(r"[a-z0-9]{3,}", stripped.lower())
-        if not tokens:
-            return []
-        query = tokens[0]
-        # Skip very short or very long tokens (likely noise)
-        if len(query) < 4 or len(query) > 30:
-            return []
-        try:
-            from rapidfuzz import fuzz, process  # type: ignore
-        except ImportError:
-            return []
-        # Match against ingredient keys (not full names) for speed
-        keys = list(self.index.by_ingredient.keys())
-        matches = process.extract(query, keys, scorer=fuzz.WRatio, limit=3)
-        for key, score, _ in matches:
-            if score >= threshold and key in self.index.by_ingredient:
-                cands = self.index.by_ingredient[key]
-                if cands:
-                    logger.debug(
-                        "R38 fuzzy ingredient: '%s' → '%s' (score %d) → %s",
-                        drug_text, key, score, cands[0],
-                    )
-                    return [cands[0]]
         return []
 
     def _fuzzy_local(self, query: str, threshold: int = 70) -> list[str]:

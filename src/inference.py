@@ -809,17 +809,20 @@ def process_record(
     # R37 (2026-07-16) UPDATED: num_ctx=65536 cho budget 30K+ tokens cho few-shot
     # Tăng cap từ 12/14/20 lên 24/30/40 để LLM thấy nhiều pattern hơn.
     # Vẫn dynamic theo input length (input càng dài → few-shot ít hơn để tránh dilute).
+    # R38 (2026-07-23): Cap 4/5/6 examples (8/10/12 msgs) để fit trong 32K context.
+    # LLM context 32K: system prompt 6K + user input 3K + few-shot 6K + output 12K = 27K (OK).
+    # Quá nhiều few-shot sẽ overflow context → LLM mất focus vào system prompt.
     if user_prompt_len > 8000:
-        adaptive_few_shot = sorted_few_shot[:40]
-        logger.debug("[%d] Adaptive: keep 20 pairs (40 msgs) domain-ranked few-shot (input len=%d > 8000)",
+        adaptive_few_shot = sorted_few_shot[:8]    # 4 pairs
+        logger.debug("[%d] Adaptive: keep 4 pairs (8 msgs) few-shot (input len=%d > 8000)",
                       rec_id, user_prompt_len)
     elif user_prompt_len > 5000:
-        adaptive_few_shot = sorted_few_shot[:50]
-        logger.debug("[%d] Adaptive: keep 25 pairs (50 msgs) domain-ranked few-shot (input len=%d > 5000)",
+        adaptive_few_shot = sorted_few_shot[:10]   # 5 pairs
+        logger.debug("[%d] Adaptive: keep 5 pairs (10 msgs) few-shot (input len=%d > 5000)",
                       rec_id, user_prompt_len)
     else:
-        adaptive_few_shot = sorted_few_shot[:60]
-        logger.debug("[%d] Adaptive: keep 30 pairs (60 msgs) domain-ranked few-shot (input len=%d <= 5000)",
+        adaptive_few_shot = sorted_few_shot[:12]   # 6 pairs
+        logger.debug("[%d] Adaptive: keep 6 pairs (12 msgs) few-shot (input len=%d <= 5000)",
                       rec_id, user_prompt_len)
 
     # Fix #4: Log few-shot examples used (debug "which examples drove this output")
@@ -915,7 +918,10 @@ def process_record(
             logger.warning("[%d] Stage 1 không tìm thấy mention nào hợp lệ.", rec_id)
         else:
             # Stage 2: Classification in batches (max 35 mentions per call)
-            s2_history = sorted_few_shot_stage2[:16] if sorted_few_shot_stage2 else []
+            # R38 (2026-07-23): Cap 2-3 examples (4-6 msgs) cho Stage 2 few-shot.
+            # Stage 2 examples RẤT LỚN (input+mentions+output) → cap rất chặt.
+            # LLM sẽ học pattern từ 2-3 ví dụ đa dạng là đủ.
+            s2_history = sorted_few_shot_stage2[:6] if sorted_few_shot_stage2 else []
             batch_size = 35
             for i in range(0, len(validated_mentions), batch_size):
                 batch = validated_mentions[i : i + batch_size]
@@ -1208,43 +1214,14 @@ def main(argv: list[str] | None = None) -> int:
     if use_two_stage and s1_path.exists() and s2_path.exists():
         s1_ex = load_few_shot(s1_path)
         s2_ex = load_few_shot(s2_path)
-        # R38 (2026-07-23): Merge examples từ các file khác để đa dạng hóa pool.
-        # Trước đây chỉ load từ examples_stage1.jsonl (chỉ 6 examples).
-        # Giờ merge thêm examples_r38.jsonl + examples_r37.jsonl để có 50+ S1 examples.
-        for extra_file in ["examples_r38.jsonl", "examples_r37.jsonl", "examples.jsonl"]:
-            extra_path = data_dir / extra_file
-            if extra_path.exists():
-                try:
-                    extra_ex = load_few_shot(extra_path)
-                    s1_ex.extend(extra_ex)
-                    logger.info("Merged %d examples from %s", len(extra_ex), extra_file)
-                except Exception as exc:
-                    logger.warning("Skip %s: %s", extra_file, exc)
-        # Same for Stage 2
-        for extra_file in ["examples_r38.jsonl"]:
-            extra_path = data_dir / extra_file
-            if extra_path.exists():
-                try:
-                    extra_ex = load_few_shot(extra_path)
-                    s2_ex.extend(extra_ex)
-                    logger.info("Merged %d examples from %s", len(extra_ex), extra_file)
-                except Exception as exc:
-                    logger.warning("Skip %s: %s", extra_file, exc)
+        # R38 (2026-07-23) REVERTED: Chỉ load từ stage1.jsonl và stage2.jsonl.
+        # Việc merge thêm files khác gây noise — LLM phải tự quyết định qua prompts.
         few_shot = format_few_shot_messages(s1_ex)
         few_shot_stage2 = format_few_shot_stage2_messages(s2_ex)
-        logger.info("Two-Stage Pipeline mode: loaded %d S1 and %d S2 few-shot examples (merged).", len(s1_ex), len(s2_ex))
+        logger.info("Two-Stage Pipeline mode: loaded %d S1 and %d S2 few-shot examples.", len(s1_ex), len(s2_ex))
     else:
         all_examples = load_few_shot()
-        # R38 (2026-07-23): Merge all examples files khi single-pass mode
-        for extra_file in ["examples_stage1.jsonl", "examples_stage2.jsonl", "examples_r38.jsonl"]:
-            extra_path = data_dir / extra_file
-            if extra_path.exists():
-                try:
-                    extra_ex = load_few_shot(extra_path)
-                    all_examples.extend(extra_ex)
-                    logger.info("Merged %d examples from %s", len(extra_ex), extra_file)
-                except Exception as exc:
-                    logger.warning("Skip %s: %s", extra_file, exc)
+        # R38 (2026-07-23) REVERTED: Không merge extra files.
         few_shot = format_few_shot_messages(all_examples)
         few_shot_stage2 = None
         if use_two_stage:

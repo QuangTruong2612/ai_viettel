@@ -2343,12 +2343,13 @@ def _filter_lifestyle_entities(entities: list[dict]) -> list[dict]:
             continue
 
         # 3. Lọc chuỗi thời lượng / mốc thời gian độc lập (chỉ áp dụng cho CHẨN_ĐOÁN / TRIỆU_CHỨNG)
-        if etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG") and _PURE_DURATION_RE.match(text):
-            logger.debug(
-                "[%d] Drop pure duration entity '%s' (%s)",
-                _seen_count, text, etype,
-            )
-            continue
+        # R38 (2026-07-23): DISABLED - LLM tự quyết định duration entities qua Stage 2
+        # if etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG") and _PURE_DURATION_RE.match(text):
+        #     logger.debug(
+        #         "[%d] Drop pure duration entity '%s' (%s)",
+        #         _seen_count, text, etype,
+        #     )
+        #     continue
 
         # 4. Chuẩn hóa assertions: TÊN_XÉT_NGHIỆM không bao giờ bị isNegated nếu kết quả bình thường
         assertions = _normalize_assertions_list(ent.get("assertions", []))
@@ -2549,17 +2550,18 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
             return None
 
     # === BƯỚC 2: Pure duration → DROP (R28.2) ===
-    if etype in ("TRIỆU_CHỨNG", "CHẨN_ĐOÁN"):
-        if _PURE_DURATION_ENHANCED_RE.match(text_lower):
-            logger.debug("Clean: drop pure duration entity '%s'", original)
-            return None
+    # R38 (2026-07-23): DISABLED - LLM tự quyết định duration qua Stage 2 prompt
+    # if etype in ("TRIỆU_CHỨNG", "CHẨN_ĐOÁN"):
+    #     if _PURE_DURATION_ENHANCED_RE.match(text_lower):
+    #         logger.debug("Clean: drop pure duration entity '%s'", original)
+    #         return None
 
     # === BƯỚC 2b: R37 (2026-07-15) — DROP standalone dose fragment trong THUỐC ===
     # Audit phát hiện case file 50: "30 mg", "60 mg" được extract riêng → gây nhiễu.
-    # Mảnh chỉ chứa số + đơn vị, không có tên thuốc → drop.
-    if etype == "THUỐC" and _DOSE_FRAGMENT_RE.match(text.strip()):
-        logger.debug("Clean: drop standalone dose fragment '%s'", original)
-        return None
+    # R38 (2026-07-23): DISABLED - LLM tự quyết định dose fragments qua Stage 2 prompt.
+    # if etype == "THUỐC" and _DOSE_FRAGMENT_RE.match(text.strip()):
+    #     logger.debug("Clean: drop standalone dose fragment '%s'", original)
+    #     return None
 
     # === BƯỚC 3: TÊN_XÉT_NGHIỆM — strip verb prefix ===
     if etype == "TÊN_XÉT_NGHIỆM":
@@ -3423,11 +3425,10 @@ def assemble_record(
     final.sort(key=lambda e: e["position"][0])
 
     # R38 (2026-07-23): Dedupe cuối cùng theo (text_lower, type) để giảm WER.
-    # Trước đây `_expand_duplicates` emit 1 entity / occurrence → cùng text lặp 12 lần
-    # cho "Thiếu men G6PD" → scoring công thức WER trừng phạt nặng (extra unmatched).
-    # Sau dedupe: giữ 1 entity / (text, type), dùng position đầu tiên.
-    # Trade-off: mất position precision nhưng tăng J_candidates và giảm WER explosion.
-    final = _dedupe_by_text_type(final)
+    # R38 (2026-07-23): DISABLED _dedupe_by_text_type — quá aggressive, mất position info
+    # và gây regression trên Stage 3 (LLM không còn nhiều candidates per record).
+    # LLM sẽ tự xử lý duplicate detection qua prompts + few-shot examples.
+    # final = _dedupe_by_text_type(final)
 
     return final
 
