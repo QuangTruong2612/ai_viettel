@@ -2343,12 +2343,13 @@ def _filter_lifestyle_entities(entities: list[dict]) -> list[dict]:
             continue
 
         # 3. Lọc chuỗi thời lượng / mốc thời gian độc lập (chỉ áp dụng cho CHẨN_ĐOÁN / TRIỆU_CHỨNG)
-        if etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG") and _PURE_DURATION_RE.match(text):
-            logger.debug(
-                "[%d] Drop pure duration entity '%s' (%s)",
-                _seen_count, text, etype,
-            )
-            continue
+        # R38 (2026-07-23): DISABLED - LLM tự quyết định duration entities qua Stage 2
+        # if etype in ("CHẨN_ĐOÁN", "TRIỆU_CHỨNG") and _PURE_DURATION_RE.match(text):
+        #     logger.debug(
+        #         "[%d] Drop pure duration entity '%s' (%s)",
+        #         _seen_count, text, etype,
+        #     )
+        #     continue
 
         # 4. Chuẩn hóa assertions: TÊN_XÉT_NGHIỆM không bao giờ bị isNegated nếu kết quả bình thường
         assertions = _normalize_assertions_list(ent.get("assertions", []))
@@ -2549,17 +2550,18 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
             return None
 
     # === BƯỚC 2: Pure duration → DROP (R28.2) ===
-    if etype in ("TRIỆU_CHỨNG", "CHẨN_ĐOÁN"):
-        if _PURE_DURATION_ENHANCED_RE.match(text_lower):
-            logger.debug("Clean: drop pure duration entity '%s'", original)
-            return None
+    # R38 (2026-07-23): DISABLED - LLM tự quyết định duration qua Stage 2 prompt
+    # if etype in ("TRIỆU_CHỨNG", "CHẨN_ĐOÁN"):
+    #     if _PURE_DURATION_ENHANCED_RE.match(text_lower):
+    #         logger.debug("Clean: drop pure duration entity '%s'", original)
+    #         return None
 
     # === BƯỚC 2b: R37 (2026-07-15) — DROP standalone dose fragment trong THUỐC ===
     # Audit phát hiện case file 50: "30 mg", "60 mg" được extract riêng → gây nhiễu.
-    # Mảnh chỉ chứa số + đơn vị, không có tên thuốc → drop.
-    if etype == "THUỐC" and _DOSE_FRAGMENT_RE.match(text.strip()):
-        logger.debug("Clean: drop standalone dose fragment '%s'", original)
-        return None
+    # R38 (2026-07-23): DISABLED - LLM tự quyết định dose fragments qua Stage 2 prompt.
+    # if etype == "THUỐC" and _DOSE_FRAGMENT_RE.match(text.strip()):
+    #     logger.debug("Clean: drop standalone dose fragment '%s'", original)
+    #     return None
 
     # === BƯỚC 3: TÊN_XÉT_NGHIỆM — strip verb prefix ===
     if etype == "TÊN_XÉT_NGHIỆM":
@@ -3421,7 +3423,51 @@ def assemble_record(
                 rec["assertions"] = [a for a in rec["assertions"] if a != "isHistorical"]
 
     final.sort(key=lambda e: e["position"][0])
+
+    # R38 (2026-07-23): Dedupe cuối cùng theo (text_lower, type) để giảm WER.
+    # R38 (2026-07-23): DISABLED _dedupe_by_text_type — quá aggressive, mất position info
+    # và gây regression trên Stage 3 (LLM không còn nhiều candidates per record).
+    # LLM sẽ tự xử lý duplicate detection qua prompts + few-shot examples.
+    # final = _dedupe_by_text_type(final)
+
     return final
+
+
+def _dedupe_by_text_type(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """R38 (2026-07-23): Dedupe entities theo (text_lower, type), giữ FIRST occurrence.
+
+    Lý do: scoring formula ghép predicted vs gold theo (position, type) với WER word-level.
+    Nếu cùng text xuất hiện 12 lần (do `_expand_duplicates`), WER explosion vì
+    11 extras không match gold → ảnh hưởng text_score rất nặng.
+
+    Hành vi:
+      - Với mỗi (text_lower, type), giữ entity đầu tiên (position sớm nhất).
+      - Bỏ qua entities có empty text.
+      - Sort output theo position (giữ nguyên thứ tự xuất hiện trong input).
+
+    Args:
+        entities: list entity dicts từ assemble_record.
+
+    Returns:
+        list entities đã dedupe.
+    """
+    if not entities:
+        return entities
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for ent in entities:
+        text = str(ent.get("text", "")).strip()
+        etype = str(ent.get("type", ""))
+        if not text:
+            continue
+        key = (text.lower(), etype)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ent)
+    # Sort lại theo position (giữ thứ tự tự nhiên)
+    deduped.sort(key=lambda e: e.get("position", [0, 0])[0])
+    return deduped
 
 
 def _split_drug_disease_connector(

@@ -163,47 +163,41 @@ _GENERIC_DRUG_CLASS_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"^(giảm\s+đau|lợi\s+tiểu|giãn\s+cơ|an\s+thần)$", re.IGNORECASE | re.UNICODE),
     re.compile(r"^(liệu\s+pháp|phương\s+pháp|biện\s+pháp)\s+.+$", re.IGNORECASE | re.UNICODE),
     re.compile(r"^(xông|khí\s+dung|hít)$", re.IGNORECASE | re.UNICODE),
+    # R38 (2026-07-23): Thêm các drug-class terms hay gặp trong VN clinical notes
+    # Trước đây bị miss → classify thành THUỐC với candidates=[] (giảm J_candidates).
+    # "corticoid liều cao kéo dài" — phải drop vì "corticoid" là class, không phải thuốc cụ thể.
+    # Match cả phrase có kèm dose/route/freq modifier: "corticoid liều cao kéo dài",
+    # "Vitamin 3B", "kháng sinh nhóm cephalosporin".
+    re.compile(
+        r"^(corticoid|corticosteroid|nsaid|kháng\s+sinh|kháng\s+viêm|kháng\s+đông|"
+        r"thuốc\s+hạ\s+sốt|thuốc\s+giảm\s+đau|thuốc\s+kháng|thuốc\s+chống|"
+        r"vitamin|chất\s+điện\s+giải|dung\s+dịch|hormone|hóa\s+chất|kháng\s+thể)"
+        r"(\s+.+)?$",
+        re.IGNORECASE | re.UNICODE,
+    ),
+    # Special: pure English generic class
+    re.compile(
+        r"^(antibiotics?|analgesic|antipyretic|anti-inflammatory|steroid|"
+        r"anticoagulant|antihistamine|antiviral|antifungal|vitamin(\s+\w+)?)$",
+        re.IGNORECASE | re.UNICODE,
+    ),
 )
 
 
 def _is_generic_drug_class(text: str) -> bool:
-    """Detect generic drug-class terms (vd 'thuốc chống đông', 'kháng sinh').
+    """NO-OP: LLM tự quyết định drug-class generic hay không qua Stage 2 prompt.
 
-    Trả True nếu text là pure class term (vd "kháng sinh", "Thuốc chống đông"),
-    KHÔNG phải drug name (vd "Kháng sinh Cefepim" → False, cần lookup Cefepim).
+    Trước đây dùng regex `_GENERIC_DRUG_CLASS_PATTERNS` và `_DRUG_CLASS_PREFIX_RE`
+    để detect class terms (vd "kháng sinh", "thuốc hạ sốt"). Nhưng mỗi lần thêm
+    pattern lại miss (vd "corticoid", "Vitamin 3B") → output sai.
+    ĐÃ REMOVE TOÀN BỘ regex — để LLM tự phân loại qua few-shot examples.
 
-    Logic:
-      - Strip drug-class prefix (kháng sinh, thuốc chống, ...).
-      - Nếu stripped empty / same → check direct fullmatch.
-      - Nếu stripped có drug name (token ∈ INN whitelist) → False (lookup drug).
-      - Còn lại → True (class term).
-    R34: Thêm `_DRUG_CLASS_ROUTE_PATTERNS` để match "kháng sinh tĩnh mạch" (class + route).
+    Args:
+        text: drug text cần check.
+
+    Returns: luôn False — LLM sẽ tự quyết định ở Stage 2.
     """
-    if not text:
-        return False
-    tl = text.lower().strip()
-    if not tl or len(tl) > 60:
-        return False
-
-    # R34: Class + route (vd "kháng sinh tĩnh mạch") → class term, skip
-    if _DRUG_CLASS_ROUTE_PATTERNS.fullmatch(tl):
-        return True
-
-    stripped = _strip_drug_class_prefix(text)
-    if stripped is None or stripped == text:
-        # Pure class term hoặc không có class prefix → check direct fullmatch
-        return any(p.fullmatch(tl) for p in _GENERIC_DRUG_CLASS_PATTERNS)
-
-    # Stripped result exists. Check if first token is a real drug (INN whitelist).
-    stripped_lower = stripped.lower().strip()
-    stripped_tokens = stripped_lower.split()
-    if stripped_tokens:
-        first_token = stripped_tokens[0]
-        # Import lazily (avoid circular at module load)
-        from src.rxnorm_rag import _DRUG_INN_WHITELIST
-        if first_token in _DRUG_INN_WHITELIST:
-            return False  # drug name attached → lookup drug
-    return True  # no drug name → still class term
+    return False
 
 
 # R34 (2026-07-13): Strip drug-class prefix để lookup drug part
@@ -229,20 +223,16 @@ _DRUG_CLASS_ROUTE_PATTERNS = re.compile(
 
 
 def _strip_drug_class_prefix(text: str) -> str | None:
-    """R34 FIX: Strip drug-class prefix để lookup drug part.
+    """NO-OP: Trả về original text — LLM tự xử lý drug-class prefix.
+
+    Trước đây dùng regex `_DRUG_CLASS_PREFIX_RE` để strip "kháng sinh " / "thuốc ".
+    Nhưng regex hay miss drug name thật (vd "kháng sinh nhóm cephalosporin" → strip sai).
+    ĐÃ REMOVE — để LLM tự phân loại.
 
     Returns:
-        - None nếu text là pure class term (vd "kháng sinh", "thuốc chống đông")
-        - Stripped drug name nếu có drug attached (vd "Kháng sinh Cefepim" → "Cefepim")
-        - Original text nếu không match class pattern
+        Original text (no stripping). Caller phải handle via LLM.
     """
-    if not text:
-        return text
-    stripped = _DRUG_CLASS_PREFIX_RE.sub("", text, count=1).strip()
-    if not stripped:
-        # Pure class term — caller SKIP lookup
-        return None
-    return stripped
+    return text
 
 
 def _load_generic_stoplist() -> tuple[tuple[re.Pattern, ...], ...]:
@@ -259,22 +249,23 @@ def _load_generic_stoplist() -> tuple[tuple[re.Pattern, ...], ...]:
 
 
 # Re-init từ file nếu có
-try:
-    _GENERIC_DRUG_CLASS_PATTERNS, = _load_generic_stoplist()
-    logger.info("[R28] Loaded %d generic drug class patterns", len(_GENERIC_DRUG_CLASS_PATTERNS))
-except Exception:
-    pass
-
+# R38 (2026-07-23): DISABLED - LLM tự xyết định drug-class, không load từ file
+# try:
+#     _GENERIC_DRUG_CLASS_PATTERNS, = _load_generic_stoplist()
+#     logger.info("[R28] Loaded %d generic drug class patterns", len(_GENERIC_DRUG_CLASS_PATTERNS))
+# except Exception:
+#     pass
 
 
 # R34: ICD drug-class blacklist + resistance detection (R34 spec round 3)
-_ICD_DRUG_CLASS_BLACKLIST: frozenset[str] = frozenset({
-    "kháng sinh", "kháng viêm", "kháng đông",
-    "thuốc chống đông", "thuốc giảm đau", "thuốc hạ sốt",
-    "thuốc lợi tiểu", "thuốc an thần", "thuốc chống viêm",
-    "thuốc kháng sinh", "thuốc kháng viêm",
-    "nsaid", "corticoid", "corticosteroid",
-})
+# R38 (2026-07-23): DISABLED - LLM tự xử lý, không hardcode blacklist
+# _ICD_DRUG_CLASS_BLACKLIST: frozenset[str] = frozenset({
+#     "kháng sinh", "kháng viêm", "kháng đông",
+#     "thuốc chống đông", "thuốc giảm đau", "thuốc hạ sốt",
+#     "thuốc lợi tiểu", "thuốc an thần", "thuốc chống viêm",
+#     "thuốc kháng sinh", "thuốc kháng viêm",
+#     "nsaid", "corticoid", "corticosteroid",
+# })
 
 
 def _has_resistance_context_icd(text: str) -> bool:
@@ -738,98 +729,20 @@ def _filter_irrelevant_codes(
     entity_text: str,
     index=None,
 ) -> list[str]:
-    """Filter ra các ICD codes rõ ràng không liên quan đến entity text.
+    """NO-OP: LLM tự quyết định candidate nào hợp lệ qua Stage 3 prompt + few-shot.
 
-    Áp dụng nguyên tắc chung: nếu entity không đề cập concept X mà code là về X,
-    thì loại code đó.
-
-    Hiện tại filter các patterns:
-    - F10.x (alcohol-related): nếu entity không chứa "alcohol/rượu"
-    - F11-F19 (drug-related): nếu entity không chứa "drug/chất"
-    - T36-T50 (poisoning by drugs): nếu entity không phải poisoning/ngộ độc
-    - V/W/X/Y (external causes): nếu entity không phải tai nạn/chấn thương
-    - O00-O9A (pregnancy): nếu entity không phải pregnancy/mang thai
+    Trước đây hàm này filter ra F10, T36, O00, P00, Z00 bằng regex keywords.
+    Nhưng mỗi lần thêm keyword mới lại miss cases (vd G6PD/Q55.0) → output sai.
+    ĐÃ REMOVE TOÀN BỘ hardcode semantic — để LLM tự xử lý.
 
     Args:
         codes: list ICD codes (vd ["F10.159", "K72.9"])
         entity_text: VN hoặc EN text của diagnosis
-        index: ICDIndex (optional) để lookup name từ code nếu cần
+        index: ICDIndex (optional, unused)
 
-    Returns: filtered list codes.
+    Returns: codes UNCHANGED — LLM sẽ filter ở Stage 3 verdict.
     """
-    if not codes:
-        return codes
-
-    entity_lower = entity_text.lower()
-    out: list[str] = []
-
-    for code in codes:
-        # F10.x: alcohol-related
-        if code.startswith("F10"):
-            if any(kw in entity_lower for kw in (
-                "alcohol", "rượu", "alcoholic", "ethanol", "liver",
-            )):
-                out.append(code)
-            continue  # skip F10 if not alcohol-related
-
-        # F11-F19: drug-related mental disorders
-        if code.startswith(("F11", "F12", "F13", "F14", "F15", "F16", "F17", "F18", "F19")):
-            if any(kw in entity_lower for kw in (
-                "drug", "chất", "substance", "heroin", "cocaine", "amphetamine",
-            )):
-                out.append(code)
-            continue
-
-        # T36-T50: poisoning by drugs
-        if code.startswith(("T36", "T37", "T38", "T39", "T40", "T41", "T42", "T43",
-                            "T44", "T45", "T46", "T47", "T48", "T49", "T50")):
-            if any(kw in entity_lower for kw in (
-                "poisoning", "ngộ độc", "overdose", "quá liều", "toxic",
-            )):
-                out.append(code)
-            continue
-
-        # V/W/X/Y: external causes (accidents)
-        if code[0] in ("V", "W", "X", "Y"):
-            if any(kw in entity_lower for kw in (
-                "accident", "tai nạn", "chấn thương", "injury", "trauma",
-            )):
-                out.append(code)
-            continue
-
-        # O00-O9A: pregnancy & obstetric conditions
-        if code.startswith("O") and len(code) >= 2 and code[1].isdigit() and code[:2] < "O9":
-            if any(kw in entity_lower for kw in (
-                "pregnancy", "mang thai", "thai kỳ", "obstetric", "gestation",
-                "chuyển dạ", "thai", "sản", "vỡ ối", "rỉ ối", "tiền sản giật", "sinh con",
-            )):
-                out.append(code)
-            continue
-
-        # P00-P96: Perinatal / Newborn conditions (chỉ dành cho sơ sinh / thai nhi)
-        if code.startswith("P") and len(code) >= 2 and code[1].isdigit():
-            if any(kw in entity_lower for kw in (
-                "sơ sinh", "thai nhi", "newborn", "perinatal", "fetal", "fetus", "nhũ nhi",
-            )):
-                out.append(code)
-            continue
-
-        # Z00-Z99: Factors influencing health status (KHÔNG phải active diagnosis)
-        # Drop theo mặc định; CHỈ giữ khi entity ngữ cảnh gợi ý family history / screening.
-        if code.startswith("Z"):
-            family_history_kws = (
-                "tiền sử gia đình", "gia đình có", "tiền căn gia đình",
-                "screening", "tầm soát", "vaccine", "tiêm chủng",
-                "history of", "personal history", "family history",
-            )
-            if any(kw in entity_lower for kw in family_history_kws):
-                out.append(code)
-            continue  # default: drop Z
-
-        # Default: keep
-        out.append(code)
-
-    return out
+    return codes
 
 
 def build_context_query(
@@ -1459,18 +1372,21 @@ class ICDRetriever:
 
             rrf_scores: dict[str, float] = {}
             for q in queries_to_try:
-                matched_vec = self.local_search.search(q, threshold=0.50, top_k=15) or []
+                # R38 (2026-07-23): Tăng top_k 15→25 để trả nhiều candidates hơn cho LLM re-rank
+                matched_vec = self.local_search.search(q, threshold=0.50, top_k=25) or []
                 for rank, code in enumerate(matched_vec, start=1):
                     rrf_scores[code] = rrf_scores.get(code, 0.0) + (1.0 / (60 + rank))
 
                 if hasattr(self.local_search, 'bm25_index'):
-                    bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=15)
+                    # R38 (2026-07-23): Tăng top_k 15→25 cho BM25 too
+                    bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=25)
                     for rank, code in enumerate(bm25_codes or [], start=1):
                         rrf_scores[code] = rrf_scores.get(code, 0.0) + (1.0 / (60 + rank))
 
             if rrf_scores:
+                # R38 (2026-07-23): Tăng sorted_codes[:8] → [:15] để có nhiều candidates cho LLM
                 sorted_codes = sorted(rrf_scores.keys(), key=lambda c: -rrf_scores[c])
-                filtered = self._filter_and_sort_codes(sorted_codes[:8], text, other_entities=other_entities, entity_type=entity_type)
+                filtered = self._filter_and_sort_codes(sorted_codes[:15], text, other_entities=other_entities, entity_type=entity_type)
                 if filtered:
                     return self._rerank_and_select(filtered, max_k=1, text=text)
 
@@ -1512,8 +1428,9 @@ class ICDRetriever:
                     return self._rerank_and_select(filtered, max_k=1, text=text)
 
         if self.local_search is not None:
+            # R38 (2026-07-23): Tăng top_k 6→10 cho low-threshold fallback
             low_threshold_codes = self.local_search.search(
-                text, threshold=0.40, top_k=6
+                text, threshold=0.40, top_k=10
             ) or []
             if low_threshold_codes:
                 filtered = self._filter_and_sort_codes(low_threshold_codes, text, other_entities=other_entities, entity_type=entity_type)
