@@ -1039,7 +1039,38 @@ Với MỖI mention, suy nghĩ theo 4 bước:
 □ Nếu mention là tên thuốc cụ thể (generic/brand) → THUỐC.
 □ Nếu mention là tên chỉ định CLS cụ thể → TÊN_XÉT_NGHIỆM.
 □ Nếu mention là giá trị đo / kết quả → KẾT_QUẢ_XÉT_NGHIỆM.
-□ Nếu mention KHÔNG thuộc 5 loại trên (cell, process, trigger, category, action, fragment) → giữ text trong output với type GẦN NHẤT hoặc BEST GUESS (vẫn phải trả entry — KHÔNG được bỏ sót mention). Python sẽ xử lý drop ở post-process.
+
+# 🚨 R38 (2026-07-22) — BẢNG PHÂN LOẠI TYPE QUAN TRỌNG (BẮT BUỘC THEO)
+
+| Entity text pattern | Type | Lý do |
+|---------------------|------|-------|
+| `Thiếu men G6PD`, `Thiếu máu do tan huyết`, `Thiếu máu tan huyết` | **CHẨN_ĐOÁN** | Bệnh lý về máu |
+| `suy thận cấp`, `suy tim`, `suy gan`, `suy hô hấp` | **CHẨN_ĐOÁN** | Bệnh lý nặng (organ failure) |
+| `bại não`, `chậm phát triển trí tuệ`, `rối loạn vận động` | **CHẨN_ĐOÁN** | Tổn thương thần kinh / abnormal findings |
+| `nhiễm khuẩn`, `nhiễm virus`, `nhiễm trùng` | **CHẨN_ĐOÁN** | Bệnh nhiễm trùng |
+| `nhồi máu cơ tim`, `nhồi máu não`, `xuất huyết não` | **CHẨN_ĐOÁN** | Bệnh lý nặng |
+| `Glucose-6-Phosphate Dehydrogenase` (enzyme name alone) | **TÊN_XÉT_NGHIỆM** | Tên enzyme → chỉ định test |
+| `men G6PD` alone | **TÊN_XÉT_NGHIỆM** | Tên enzyme → chỉ định test |
+| `đau ngực`, `khó thở`, `sốt`, `ho` | **TRIỆU_CHỨNG** | BN cảm nhận được |
+| `Sốt cao`, `Khó thở nhẹ`, `Đau ngực trái` | **TRIỆU_CHỨNG** | Triệu chứng (có qualifier) |
+| `Hồng cầu`, `Bạch cầu`, `Tiểu cầu` (alone) | **DROP** | Cell, BN không cảm nhận |
+| `Oxy hóa`, `Tan huyết`, `Phá hủy` (alone) | **DROP** | Chemical process |
+| `Thuốc`, `Thực phẩm`, `Hóa chất` (alone) | **DROP** | Generic category |
+| `Thuốc hạ sốt`, `Kháng sinh`, `Corticoid` | **DROP** | Drug-class generic |
+| `Ăn đậu tằm`, `Tiếp xúc với băng phiến`, `Hạ sốt` | **DROP** | Narrative action |
+| `Thiếu men này`, `dễ bị phá hủy`, `mong manh` | **DROP** | Fragment |
+| `Trẻ sơ sinh`, `Người lớn` | **DROP** | Age descriptor |
+| `Phân tích`, `Chẩn đoán`, `Sàng lọc sớm` | **DROP** | Generic action |
+| `Gót chân trẻ`, `Máu khô` | **DROP** | Sample type alone |
+| `Mẹ đang cho con bú` | **DROP** | Narrative |
+
+# 🔑 CÂU HỎI VÀNG CHO MỖI MENTION (LLM phải tự hỏi):
+1. **"BN MẮC BỆNH này hay CHỈ CẢM NHẬN?"** → Mắc = CHẨN_ĐOÁN, Cảm nhận = TRIỆU_CHỨNG.
+2. **"Đây là TÊN TEST cụ thể hay ACTION/DESCRIPTION?"** → Test cụ thể = TÊN_XÉT_NGHIỆM, Action = DROP.
+3. **"Đây là DRUG CLASS hay SPECIFIC DRUG?"** → Class = DROP, Specific = THUỐC.
+4. **"Đây là CELL/PROCESS hay ENTITY?"** → Cell/Process alone = DROP.
+
+# ⚠️ QUAN TRỌNG: Nếu KHÔNG chắc chắn type, vẫn trả entry với type GẦN NHẤT (để Python xử lý drop ở post-process nếu cần). KHÔNG ĐƯỢC BỎ SÓT mention.
 
 - assertions: Mảng chuỗi các nhãn ngữ cảnh lâm sàng, BẮT BUỘC kiểm tra kỹ từng nhãn (có thể kết hợp nhiều nhãn nếu phù hợp):
   - "isNegated": Nếu mention bị phủ định bởi các từ khóa `không`, `chưa`, `âm tính`, `chưa ghi nhận`, `không thấy`, `loại trừ`. LƯU Ý QUAN TRỌNG: Nếu một câu có chuỗi nhiều triệu chứng phủ định ngăn cách bởi dấu phẩy (`không ho, sốt, hay khó thở`), thì CẢ 3 entity `ho`, `sốt`, `khó thở` ĐỀU BẮT BUỘC gán `["isNegated"]`. Tuy nhiên, các kết quả xét nghiệm bình thường (`ECG bình thường`, `nhịp xoang đều`) KHÔNG bị phủ định (để mảng rỗng `[]`).
@@ -1099,16 +1130,28 @@ def build_stage1_user_prompt(input_text: str) -> str:
         "7. BẮT BUỘC TRÍCH XUẤT TỪ VIẾT TẮT Y KHOA (MANDATORY ACRONYM EXTRACTION): Hồ sơ bệnh án Việt Nam viết tắt rất nhiều. Bạn BẮT BUỘC phải trích xuất đầy đủ và chính xác tất cả các từ viết tắt bệnh lý/xét nghiệm (`THA` = Tăng huyết áp, `ĐTĐ` / `ĐTĐ tuýp 2` = Đái tháo đường, `NMCT` = Nhồi máu cơ tim, `RLLL` = Rối loạn lipid máu, `COPD` = Bệnh phổi tắc nghẽn mạn tính, `CKD` = Bệnh thận mạn, `BTMV`, `TBMMN`, `ECG`...) như những thực thể y khoa độc lập!\n"
         "8. QUÉT KIỆT ĐỂ 7 PHẦN BỆNH ÁN (EXHAUSTIVE SECTION COVERAGE): Bạn PHẢI quét tuần tự qua 7 phần (Lý do vào viện, Tiền sử, Diễn biến, Khám lâm sàng, Cận lâm sàng/ECG/Holter, Chẩn đoán xác định, Điều trị/Thuốc ra viện). Mọi thuốc, chẩn đoán, triệu chứng, tên xét nghiệm và chỉ số/kết quả bình thường đều phải được lấy đủ 100%! Không được lười biếng hay bỏ sót các entities ở phần giữa và cuối hồ sơ.\n"
         "9. 🚨 TUYỆT ĐỐI KHÔNG SPAN OVERLAP (R39 - 2026-07-22): Mỗi cụm từ chỉ thuộc về 1 entity duy nhất. KHÔNG BAO GIỜ extract 2 spans chồng lấn nhau. Vd: nếu đã extract `phình giãn động mạch vành` (25 chars) thì KHÔNG extract riêng `động mạch vành` (14 chars) làm entity khác — span ngắn nằm trọn trong span dài là redundant. Trước khi output, KIỂM TRA: có 2 spans nào overlap (1 span nằm trong span kia) không? Nếu có → XOÁ span ngắn hơn.\n\n"
-        "🚨 10. CẤM TRÍCH XUẤT CƠ CHẾ/TRIGGER/GENERIC/ANATOMY (R38+R39 - 2026-07-22): KHÔNG BAO GIỜ trích xuất các token sau làm entity:\n"
-        "   - **Cells / chemical processes** (BN không cảm nhận được): `hồng cầu`, `bạch cầu`, `tiểu cầu`, `oxy hóa`, `khử oxy`, `chuyển hóa`, `đông máu`, `tan huyết`, `phá hủy`, `quá trình oxy hóa`\n"
-        "   - **Trigger substances**: `đậu tằm`, `băng phiến` (long não), `hóa chất`, `mủ cao su`, `phấn hoa`\n"
-        "   - **Generic categories**: `thực phẩm`, `thuốc` (khi đứng riêng), `hóa chất`\n"
-        "   - **Actions / body sites**: `phân tích`, `lấy máu`, `gót chân`, `gót chân trẻ`, `máu khô`, `tĩnh mạch`\n"
-        "   - **Anatomical terms alone** (KHÔNG phải test name): `động mạch vành`, `động mạch chủ`, `tĩnh mạch cửa`, `buồng tim`, `thùy phổi`, `thành ngực`. Nếu là 1 phần của test name compound (`siêu âm tim`, `X-quang ngực`, `CT động mạch vành`) → giữ nguyên trong test name, KHÔNG tách riêng.\n"
-        "   - **Narrative consumption phrases**: `ăn đậu tằm`, `tiếp xúc với băng phiến`, `sử dụng thuốc`, `hạ sốt`, `việc ăn uống`\n"
-        "   - **Body part alone**: `ngực`, `bụng`, `đầu`, `lưng`, `chân`, `tay` (đứng một mình, không có tính từ/động từ đi kèm)\n"
-        "   - **Descriptive fragments**: `thiếu men này`, `thiếu máu` (đứng riêng), `dễ bị phá hủy`, `hồng cầu trở nên mong manh`, `có tính oxy hóa cao`, `thực phẩm chứa chất oxy hóa`\n"
-        "   Test VÀNG: \"BN có CẢM NHẬN được cái này không?\" → KHÔNG → DROP. \"Cái này GÂY RA bệnh hay BIỂU HIỆN bệnh?\" → Gây ra → DROP. \"Đây là ANATOMY hay TEST?\" → Anatomy → DROP (trừ khi là 1 phần compound test name).\n\n"
+        "🚨 10. CẤM 13 LOẠI TOKEN PHẢI DROP (R38 - 2026-07-22, BẮT BUỘC TUÂN THỦ):\n"
+        "    - **Tế bào / thành phần máu alone**: `hồng cầu`, `bạch cầu`, `tiểu cầu` (BN không cảm nhận được → KHÔNG phải entity)\n"
+        "    - **Quá trình hóa học / sinh học**: `oxy hóa`, `khử oxy`, `chuyển hóa`, `đông máu`, `tan huyết`, `phá hủy` (process, không phải entity)\n"
+        "    - **Trigger substances**: `đậu tằm`, `băng phiến` (long não), `hóa chất`, `mủ cao su`, `phấn hoa` (causes, không phải diseases)\n"
+        "    - **Generic categories**: `thuốc` (khi đứng riêng), `thực phẩm`, `Vitamin` (khi đứng riêng), `hormone` (khi đứng riêng), `chất điện giải` (loại chung, không phải specific drug)\n"
+        "    - **Narrative actions**: `ăn đậu tằm`, `tiếp xúc với băng phiến`, `sử dụng thuốc`, `hạ sốt` (hành động trong câu, không phải entity)\n"
+        "    - **Body parts alone**: `ngực`, `bụng`, `đầu`, `lưng`, `chân`, `tay`, `gót chân trẻ`, `máu khô` (chỉ là cơ quan, không có tính từ)\n"
+        "    - **Descriptive fragments**: `thiếu men này`, `thiếu máu` (đứng riêng), `dễ bị phá hủy`, `có tính oxy hóa cao`, `thực phẩm chứa chất oxy hóa`, `mong manh` (mảnh câu, không phải entity)\n"
+        "    - **Age descriptors**: `trẻ sơ sinh`, `trẻ em`, `người lớn` (chỉ là tuổi, không phải entity)\n"
+        "    - **Generic procedures**: `phân tích`, `chẩn đoán`, `sàng lọc sớm`, `theo dõi`, `xét nghiệm chuyên sâu` (action verb, không phải tên test cụ thể)\n"
+        "    - **Drug-class generic**: `kháng sinh`, `corticoid`, `NSAID`, `kháng viêm`, `kháng đông`, `thuốc hạ sốt`, `thuốc giảm đau` (class terms, không phải specific drug)\n"
+        "    - **Mẹ đang cho con bú** (narrative, không phải entity)\n"
+        "    - **lone descriptive words**: `này` (pronoun alone, không phải entity)\n"
+        "    Test VÀNG: \"BN có CẢM NHẬN được cái này không?\" → KHÔNG → DROP. \"Cái này GÂY RA bệnh hay BIỂU HIỆN bệnh?\" → Gây ra → DROP. \"Đây là ANATOMY hay TEST?\" → Anatomy alone → DROP. \"Đây là DRUG CLASS hay SPECIFIC DRUG?\" → Class → DROP.\n\n"
+        "11. 🔥 **ENZYME / ENZYME_NAME → TÊN_XÉT_NGHIỆM** (Stage 2 sẽ classify, Stage 1 PHẢI extract): Tên enzyme thuần (`Glucose-6-Phosphate Dehydrogenase`, `G6PD`, `AST`, `ALT`, `men G6PD` alone) → TÊN_XÉT_NGHIỆM (chỉ định test enzyme). NGOẠI LỆ: Khi enzyme name đi với text bệnh lý (vd \"Thiếu men G6PD\", \"G6PD deficiency\") → CHẨN_ĐOÁN (cả cụm là bệnh).\n\n"
+        "12. 🔥 **BỆNH LÝ NẶNG / COMPLICATIONS → CHẨN_ĐOÁN** (không phải triệu chứng):\n"
+        "    - `suy thận cấp`, `suy tim`, `suy gan`, `suy hô hấp` → CHẨN_ĐOÁN (bệnh lý nặng, không phải triệu chứng)\n"
+        "    - `bại não`, `chậm phát triển trí tuệ`, `rối loạn vận động` → CHẨN_ĐOÁN (tổn thương thần kinh, abnormal findings)\n"
+        "    - `thiếu máu tan huyết`, `thiếu máu do tan huyết` → CHẨN_ĐOÁN (bệnh lý về máu)\n"
+        "    - `nhiễm khuẩn`, `nhiễm virus`, `nhiễm trùng` → CHẨN_ĐOÁN (bệnh nhiễm)\n"
+        "    - `nhồi máu cơ tim`, `nhồi máu não`, `xuất huyết não` → CHẨN_ĐOÁN (bệnh lý nặng)\n"
+        "    Test: Bệnh nhân MẮC BỆNH này hay CHỈ CẢM NHẬN? → Mắc bệnh = CHẨN_ĐOÁN.\n\n"
         f"INPUT:\n{input_text}\n\n"
         "🚨 ĐỊNH DẠNG OUTPUT: Trả về JSON array (vd `[{{'text': '...', 'position': [start, end]}}, ...]`). KHÔNG thêm text nào trước/sau JSON. KHÔNG dùng markdown code block. KHÔNG giải thích. Nếu bệnh án có thông tin y khoa (sốt, đau, phát ban, thuốc, xét nghiệm, chẩn đoán...) → BẮT BUỘC extract, KHÔNG trả `[]` rỗng trừ khi input thực sự không có entity nào.\n\n"
         "OUTPUT JSON ARRAY:"
@@ -1252,6 +1295,33 @@ TRẢ VỀ JSON array (MỖI element, KHÔNG thêm field thừa):
 3. **Brand → INN**: Brand name có thể map sang INN ingredient. VD: "Panadol" → INN acetaminophen (rxcui 161). "Augmentin" → amoxicillin-clavulanate (rxcui 197884).
 4. **Combination drugs**: Compound drug (vd "lisinopril/hydrochlorothiazide") → return MULTIPLE rxcui (mỗi component 1 rxcui). KHÔNG chỉ trả 1.
 5. **No match / typo**: Nếu candidate từ RAG không match (vd "morphineoral" - typo ghép), verdict=drop, candidates=[].
+
+# 🎯 CANDIDATE SCORING RUBRIC CHI TIẾT (BẮT BUỘC DÙNG)
+Với MỖI candidate trong danh sách RAG, chấm điểm 1-10 theo 4 tiêu chí:
+
+| Tiêu chí | Score cao (9-10) | Score trung bình (5-6) | Score thấp (1-2) |
+|----------|-------------------|------------------------|-------------------|
+| **Concept match** | Code mô tả ĐÚNG concept bệnh/thuốc | Code cùng chapter nhưng khác concept | Code hoàn toàn khác concept (vd Q55 testis defect cho G6PD anemia) |
+| **Qualifier coverage** | Code cover đầy đủ organism + lobe + severity + side | Code cover partial (vd thiếu organism) | Code không cover qualifier nào |
+| **Specificity** | Code có subcode cụ thể (vd J18.1 thay vì J18.9) | Code là parent generic | Code quá generic (chapter only) |
+| **Clinical context** | Code match với bệnh cảnh lâm sàng (vd gout → M10, không phải M11) | Code có thể match nhưng không lý tưởng | Code match sai specialty |
+
+# Ví dụ scoring:
+- "viêm phổi do Streptococcus pneumoniae" + [J15.0, J15.9, J18.9]
+  - J15.0 (pneumococcal pneumonia) → 10 (concept + organism)
+  - J15.9 (bacterial pneumonia, unspecified) → 7 (correct concept, no organism)
+  - J18.9 (pneumonia, unspecified) → 4 (correct chapter, too generic)
+- "G6PD deficiency" + [D55.0, Q55.0, D55, E55.0]
+  - D55.0 (G6PD deficiency anemia) → 10 (PERFECT)
+  - D55 (anemia from enzyme disorders) → 7 (parent, correct concept)
+  - Q55.0 (testis absence) → 1 (WRONG concept - testis defect)
+  - E55.0 (vitamin A deficiency) → 1 (WRONG concept - vitamin not blood)
+
+# CANDIDATE RANKING RULES (sau khi chấm điểm):
+1. **Sort theo score giảm dần**.
+2. **Giữ top-K candidates** có score ≥ 7 (high confidence).
+3. **Bỏ candidates score ≤ 3** (likely wrong concept / noise).
+4. **Nếu TẤT CẢ candidates score < 5**: trả `candidates: []` (entity không match code nào).
 
 # EXAMPLES (THAM KHẢO, không bắt buộc giống):
 - text="loét tá tràng" type="CHẨN_ĐOÁN" cand=[K26] → verdict=ok
@@ -1541,6 +1611,25 @@ Với MỖI entity bệnh án dưới đây, bạn nhận được 1 danh sách 
 4. **CHỌN TOP-K** candidates có score cao nhất (mặc định K=5, hoặc theo chỉ định trong input).
 5. **BỎ QUA** candidates có score < 3 — đây là những match sai do vector search.
 6. **GIỮ NGUYÊN THỨ TỰ** sort theo score giảm dần.
+
+# 🎯 CRITERIA CHI TIẾT CHO MỖI ENTITY (4 tiêu chí đánh giá):
+- **Concept match (40%)**: Code có mô tả ĐÚNG concept bệnh/thuốc trong entity không?
+- **Qualifier coverage (30%)**: Code cover đầy đủ qualifier trong entity (organism, lobe, severity, side)?
+- **Specificity (20%)**: Code có subcode cụ thể hay chỉ parent generic?
+- **Clinical context (10%)**: Code match với bệnh cảnh lâm sàng và tuổi/giới?
+
+# TOP-K SELECTION (sau khi chấm điểm):
+- K=5 mặc định (hoặc theo top_k parameter)
+- Chỉ giữ candidates có score ≥ 5 (medium confidence trở lên)
+- Nếu TẤT CẢ candidates score < 5: trả `ranked_candidates: []`
+- Sắp xếp theo score giảm dần, giữ context-aware order
+
+# EDGE CASES (rất quan trọng - LLM cần handle đúng):
+- **Tiền sử:** "Tiền sử: THA 10 năm" → code I10 vẫn valid, nhưng score giảm 1 điểm vì là isHistorical.
+- **Family history**: "Bố mẹ bị X" → code đúng concept nhưng score = 1 (KHÔNG phải của bệnh nhân).
+- **Compound diseases**: "viêm phổi thùy dưới do S. pneumoniae" → J15.1 (score 10) > J15.9 (score 5) > J18.9 (score 2).
+- **Drug-class generic**: "kháng sinh", "NSAID" → KHÔNG có code RxNorm specific, trả `[]`.
+- **Type mismatch**: text là TRIỆU_CHỨNG (vd "đau ngực") có candidate ICD (vd I20) → vẫn GIỮ I20 vì có thể useful cho diagnosis tracking, NHƯNG cảnh báo trong reason.
 
 # OUTPUT FORMAT (JSON array, MỖI element cho 1 entity theo đúng thứ tự input)
 - "Tiền sử:" trước entity → likely isHistorical, code vẫn valid nhưng confidence giảm.

@@ -1372,18 +1372,21 @@ class ICDRetriever:
 
             rrf_scores: dict[str, float] = {}
             for q in queries_to_try:
-                matched_vec = self.local_search.search(q, threshold=0.50, top_k=15) or []
+                # R38 (2026-07-23): Tăng top_k 15→25 để trả nhiều candidates hơn cho LLM re-rank
+                matched_vec = self.local_search.search(q, threshold=0.50, top_k=25) or []
                 for rank, code in enumerate(matched_vec, start=1):
                     rrf_scores[code] = rrf_scores.get(code, 0.0) + (1.0 / (60 + rank))
 
                 if hasattr(self.local_search, 'bm25_index'):
-                    bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=15)
+                    # R38 (2026-07-23): Tăng top_k 15→25 cho BM25 too
+                    bm25_codes, _ = self.local_search.bm25_index.search(bm25_query, top_k=25)
                     for rank, code in enumerate(bm25_codes or [], start=1):
                         rrf_scores[code] = rrf_scores.get(code, 0.0) + (1.0 / (60 + rank))
 
             if rrf_scores:
+                # R38 (2026-07-23): Tăng sorted_codes[:8] → [:15] để có nhiều candidates cho LLM
                 sorted_codes = sorted(rrf_scores.keys(), key=lambda c: -rrf_scores[c])
-                filtered = self._filter_and_sort_codes(sorted_codes[:8], text, other_entities=other_entities, entity_type=entity_type)
+                filtered = self._filter_and_sort_codes(sorted_codes[:15], text, other_entities=other_entities, entity_type=entity_type)
                 if filtered:
                     return self._rerank_and_select(filtered, max_k=1, text=text)
 
@@ -1425,8 +1428,9 @@ class ICDRetriever:
                     return self._rerank_and_select(filtered, max_k=1, text=text)
 
         if self.local_search is not None:
+            # R38 (2026-07-23): Tăng top_k 6→10 cho low-threshold fallback
             low_threshold_codes = self.local_search.search(
-                text, threshold=0.40, top_k=6
+                text, threshold=0.40, top_k=10
             ) or []
             if low_threshold_codes:
                 filtered = self._filter_and_sort_codes(low_threshold_codes, text, other_entities=other_entities, entity_type=entity_type)
