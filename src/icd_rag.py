@@ -163,6 +163,24 @@ _GENERIC_DRUG_CLASS_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"^(giảm\s+đau|lợi\s+tiểu|giãn\s+cơ|an\s+thần)$", re.IGNORECASE | re.UNICODE),
     re.compile(r"^(liệu\s+pháp|phương\s+pháp|biện\s+pháp)\s+.+$", re.IGNORECASE | re.UNICODE),
     re.compile(r"^(xông|khí\s+dung|hít)$", re.IGNORECASE | re.UNICODE),
+    # R38 (2026-07-23): Thêm các drug-class terms hay gặp trong VN clinical notes
+    # Trước đây bị miss → classify thành THUỐC với candidates=[] (giảm J_candidates).
+    # "corticoid liều cao kéo dài" — phải drop vì "corticoid" là class, không phải thuốc cụ thể.
+    # Match cả phrase có kèm dose/route/freq modifier: "corticoid liều cao kéo dài",
+    # "Vitamin 3B", "kháng sinh nhóm cephalosporin".
+    re.compile(
+        r"^(corticoid|corticosteroid|nsaid|kháng\s+sinh|kháng\s+viêm|kháng\s+đông|"
+        r"thuốc\s+hạ\s+sốt|thuốc\s+giảm\s+đau|thuốc\s+kháng|thuốc\s+chống|"
+        r"vitamin|chất\s+điện\s+giải|dung\s+dịch|hormone|hóa\s+chất|kháng\s+thể)"
+        r"(\s+.+)?$",
+        re.IGNORECASE | re.UNICODE,
+    ),
+    # Special: pure English generic class
+    re.compile(
+        r"^(antibiotics?|analgesic|antipyretic|anti-inflammatory|steroid|"
+        r"anticoagulant|antihistamine|antiviral|antifungal|vitamin(\s+\w+)?)$",
+        re.IGNORECASE | re.UNICODE,
+    ),
 )
 
 
@@ -813,6 +831,35 @@ def _filter_irrelevant_codes(
             )):
                 out.append(code)
             continue
+
+        # R38 (2026-07-23): Q00-Q99 = Congenital malformations, deformations,
+        # chromosomal abnormalities. CHỈ giữ khi entity có keyword bẩm sinh/di truyền.
+        # Bug fix: trước đây match "Thiếu men G6PD" (D55.0) → trả Q55.0 (testis defect)
+        # vì cùng có "thiếu". Q55 sai hoàn toàn concept.
+        if code.startswith("Q") and len(code) >= 2 and code[1].isdigit():
+            congenital_kws = (
+                "bẩm sinh", "bất thường bẩm sinh", "dị tật", "khiếm khuyết",
+                "di truyền", "di truyền lặn", "di truyền trội", "gen", "gen di truyền",
+                "nhiễm sắc thể", "thể tam nhiễm", "hội chứng down", "down",
+                "hội chứng edwards", "hội chứng patau",
+                "congenital", "hereditary", "genetic", "chromosomal", "syndrome",
+                "malformation", "deformity", "birth defect",
+            )
+            # Special exception: "Thiếu máu" + Q-code (Q55.0) → drop vì Q55 là testis,
+            # KHÔNG phải anemia. Chỉ giữ Q nếu có keyword bẩm sinh rõ ràng.
+            # Q55 = male genital organs, Q60-Q64 = urinary, etc.
+            # Kiểm tra thêm: nếu entity có keyword về máu (G6PD, thiếu máu, hồng cầu)
+            # → drop Q-code vì Q-codes không cover blood diseases.
+            blood_kws = (
+                "thiếu máu", "anemia", "máu", "hồng cầu", "hemoglobin", "hemoglobin",
+                "g6pd", "glucose-6-phosphate", "men g6pd", "đông máu", "coagulation",
+                "tiểu cầu", "bạch cầu", "leukemia", "leukemia", "lymphoma",
+            )
+            if any(kw in entity_lower for kw in blood_kws):
+                continue  # drop Q-code for blood disease entity
+            if any(kw in entity_lower for kw in congenital_kws):
+                out.append(code)
+            continue  # default: drop Q-code (entity không ngụ ý congenital)
 
         # Z00-Z99: Factors influencing health status (KHÔNG phải active diagnosis)
         # Drop theo mặc định; CHỈ giữ khi entity ngữ cảnh gợi ý family history / screening.

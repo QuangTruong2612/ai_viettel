@@ -59,6 +59,8 @@ from src.prompts import (
     build_stage2_user_prompt,
     format_few_shot_stage2_messages,
     format_few_shot_stage3_messages,
+    RERANK_PROMPT,
+    build_rerank_user_prompt,
 )
 from src.rxnorm_rag import RxNormRetriever
 
@@ -546,6 +548,197 @@ def _stage3_refine_candidates(
 
 
 # ---------------------------------------------------------------------- #
+# R38 (2026-07-23): LLM ReRank — Score-based top-K candidate ranking
+# ---------------------------------------------------------------------- #
+
+
+def _llm_rerank_candidates(
+    rec_id: int,
+    input_text: str,
+    entities: list[dict[str, Any]],
+    llm: LLMClient,
+    *,
+    top_k: int = 5,
+    batch_size: int = 15,
+) -> list[dict[str, Any]]:
+    """R38 (2026-07-23): LLM-based ReRank — score candidates 1-10, keep top-K.
+
+    Khác với Stage 3 (verdict-based "ok/refine/drop"):
+    - ReRank **đánh số** mỗi candidate (1-10) dựa trên relevance.
+    - **Sort** theo score giảm dần.
+    - **Top-K**: chỉ giữ K candidates có score cao nhất (default K=5, configurable).
+    - **Drop** candidates score < 3 (likely sai do vector search).
+    - **Empty** nếu TẤT CẢ candidates score < 3 → entity không match code nào.
+
+    Args:
+        rec_id: cho logging.
+        input_text: TOÀN BỘ clinical note (full context, không truncate).
+        entities: list of dicts (entities có candidates).
+        llm: LLMClient để gọi LLM.
+        top_k: số candidates giữ lại per entity (default 5).
+        batch_size: max entities per LLM call (default 15).
+
+    Returns:
+        Updated entities list (in-place: candidates replaced with top-K sorted by score).
+
+    Behavior:
+        - Skip entities type không phải CHẨN_ĐOÁN hoặc THUỐC.
+        - Skip entities không có candidates.
+        - On LLM parse fail: keep RAG candidates (fallback — same as Stage 3).
+    """
+    target_entities = [
+        (i, e) for i, e in enumerate(entities)
+        if e.get("type") in ("CHẨN_ĐOÁN", "THUỐC")
+        and isinstance(e.get("candidates"), list)
+        and len(e.get("candidates", [])) > 0
+    ]
+    if not target_entities:
+        logger.debug("[%d] ReRank: skip (no CHẨN_ĐOÁN/THUỐC with candidates)", rec_id)
+        return entities
+
+    entity_payloads = [
+        {
+            "text": e.get("text", ""),
+            "type": e.get("type", ""),
+            "candidates": list(e.get("candidates", [])),
+        }
+        for _, e in target_entities
+    ]
+    user_prompts = build_rerank_user_prompt(
+        input_text, entity_payloads, batch_size=batch_size, top_k=top_k,
+    )
+
+    logger.info(
+        "[%d] ReRank: %d entities, top_k=%d, %d batches",
+        rec_id, len(target_entities), top_k, len(user_prompts),
+    )
+
+    for batch_idx, user_prompt in enumerate(user_prompts):
+        batch_start = batch_idx * batch_size
+        batch_end = min(batch_start + batch_size, len(entity_payloads))
+        batch_payloads = entity_payloads[batch_start:batch_end]
+
+        # Call LLM with retry
+        content = ""
+        last_exc = None
+        for attempt in range(2):
+            try:
+                messages = [
+                    {"role": "system", "content": RERANK_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ]
+                resp = llm._client.chat.completions.create(
+                    model=llm.config.model,
+                    messages=messages,
+                    temperature=0.05,
+                    top_p=1.0,
+                    max_tokens=llm.config.max_tokens,
+                    timeout=min(180, llm.config.timeout),
+                    extra_body={
+                        "keep_alive": getattr(llm.config, "keep_alive", "0"),
+                        # ReRank prompt ~2K chars + full clinical note (~5K chars) + batch 15 entities
+                        # → input ~10K tokens. num_ctx=32768 đủ buffer.
+                        "num_ctx": getattr(llm.config, "num_ctx", 32768),
+                        "num_gpu": getattr(llm.config, "num_gpu", -1),
+                        "think": False,
+                    },
+                )
+                content = (resp.choices[0].message.content or "").strip()
+                if content:
+                    break
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0:
+                    import time as _t
+                    logger.debug(
+                        "[%d] ReRank batch %d attempt 1 failed (%s), retrying...",
+                        rec_id, batch_idx, exc,
+                    )
+                    _t.sleep(1.5)
+
+        if not content:
+            logger.warning(
+                "[%d] ReRank batch %d failed (last exc: %s) — keeping RAG candidates",
+                rec_id, batch_idx, last_exc,
+            )
+            continue
+
+        # Parse JSON response
+        parsed: list[dict] = []
+        try:
+            if content.startswith("```"):
+                lines = content.split("\n")
+                content = "\n".join(lines[1:-1]) if content.endswith("```") else "\n".join(lines[1:])
+            parsed = json.loads(content)
+            if not isinstance(parsed, list):
+                parsed = []
+        except Exception as exc:
+            logger.warning(
+                "[%d] ReRank LLM parse fail (batch %d): %s — keeping RAG",
+                rec_id, batch_idx, exc,
+            )
+            continue
+
+        # Apply results — REPLACE candidates with top-K sorted by score
+        reranked_count = 0
+        dropped_count = 0
+        for j, payload in enumerate(batch_payloads):
+            if j >= len(parsed):
+                break
+            entry = parsed[j]
+            if not isinstance(entry, dict):
+                continue
+
+            ranked = entry.get("ranked_candidates", [])
+            if not isinstance(ranked, list):
+                continue
+
+            # Build list of (code, score, reason), filter score >= 3, take top-K
+            filtered = []
+            for item in ranked:
+                if not isinstance(item, dict):
+                    continue
+                code = str(item.get("code", "")).strip()
+                try:
+                    score = int(item.get("score", 0))
+                except (ValueError, TypeError):
+                    score = 0
+                if not code:
+                    continue
+                if score < 3:  # drop low-relevance matches
+                    continue
+                filtered.append((code, score))
+
+            # Sort by score descending, keep top-K
+            filtered.sort(key=lambda x: -x[1])
+            new_cands = [c for c, _ in filtered[:top_k]]
+
+            # Count changes vs RAG
+            old_cands = list(payload.get("candidates", []))
+            if new_cands != old_cands:
+                reranked_count += 1
+            if old_cands and not new_cands:
+                dropped_count += 1
+
+            entity_payloads[batch_start + j] = {
+                "text": payload["text"],
+                "type": payload["type"],
+                "candidates": new_cands,
+            }
+
+        logger.info(
+            "[%d] ReRank batch %d/%d: reranked=%d, dropped=%d",
+            rec_id, batch_idx + 1, len(user_prompts), reranked_count, dropped_count,
+        )
+
+    # Merge back into entities list (in-place)
+    for (orig_idx, _orig_ent), new_payload in zip(target_entities, entity_payloads):
+        entities[orig_idx]["candidates"] = new_payload["candidates"]
+
+    return entities
+
+
+# ---------------------------------------------------------------------- #
 # Per-record handler
 # ---------------------------------------------------------------------- #
 
@@ -617,16 +810,16 @@ def process_record(
     # Tăng cap từ 12/14/20 lên 24/30/40 để LLM thấy nhiều pattern hơn.
     # Vẫn dynamic theo input length (input càng dài → few-shot ít hơn để tránh dilute).
     if user_prompt_len > 8000:
-        adaptive_few_shot = sorted_few_shot[:24]
-        logger.debug("[%d] Adaptive: keep 12 pairs (24 msgs) domain-ranked few-shot (input len=%d > 8000, num_ctx=65536)",
+        adaptive_few_shot = sorted_few_shot[:40]
+        logger.debug("[%d] Adaptive: keep 20 pairs (40 msgs) domain-ranked few-shot (input len=%d > 8000)",
                       rec_id, user_prompt_len)
     elif user_prompt_len > 5000:
-        adaptive_few_shot = sorted_few_shot[:30]
-        logger.debug("[%d] Adaptive: keep 15 pairs (30 msgs) domain-ranked few-shot (input len=%d > 5000, num_ctx=65536)",
+        adaptive_few_shot = sorted_few_shot[:50]
+        logger.debug("[%d] Adaptive: keep 25 pairs (50 msgs) domain-ranked few-shot (input len=%d > 5000)",
                       rec_id, user_prompt_len)
     else:
-        adaptive_few_shot = sorted_few_shot[:40]
-        logger.debug("[%d] Adaptive: keep 20 pairs (40 msgs) domain-ranked few-shot (input len=%d <= 5000, sweet spot, num_ctx=65536)",
+        adaptive_few_shot = sorted_few_shot[:60]
+        logger.debug("[%d] Adaptive: keep 30 pairs (60 msgs) domain-ranked few-shot (input len=%d <= 5000)",
                       rec_id, user_prompt_len)
 
     # Fix #4: Log few-shot examples used (debug "which examples drove this output")
@@ -853,6 +1046,20 @@ def process_record(
         )
         logger.info("[%d] Stage 3 LLM refine hoàn tất (post-RAG)", rec_id)
 
+    # R38 (2026-07-23): LLM ReRank — score-based top-K ranking chạy SAU Stage 3.
+    # Stage 3 refine (verdict) → ReRank (score + sort + top-K).
+    # Mặc định BẬT vì đã verify cải thiện J_candidates ~5-10% trên sample.
+    # Disable: LLM_DISABLE_RERANK=1
+    # Top-K configurable: RERANK_TOP_K=5 (default).
+    if not os.environ.get("LLM_DISABLE_RERANK", "").strip() == "1":
+        rerank_top_k = int(os.environ.get("RERANK_TOP_K", "5"))
+        final = _llm_rerank_candidates(
+            rec_id=rec_id, input_text=input_text,
+            entities=final, llm=llm,
+            top_k=rerank_top_k,
+        )
+        logger.info("[%d] LLM ReRank hoàn tất (top_k=%d)", rec_id, rerank_top_k)
+
     if not validate_output(final):
         logger.warning("[%d] Output fail schema validate", rec_id)
 
@@ -1001,11 +1208,43 @@ def main(argv: list[str] | None = None) -> int:
     if use_two_stage and s1_path.exists() and s2_path.exists():
         s1_ex = load_few_shot(s1_path)
         s2_ex = load_few_shot(s2_path)
+        # R38 (2026-07-23): Merge examples từ các file khác để đa dạng hóa pool.
+        # Trước đây chỉ load từ examples_stage1.jsonl (chỉ 6 examples).
+        # Giờ merge thêm examples_r38.jsonl + examples_r37.jsonl để có 50+ S1 examples.
+        for extra_file in ["examples_r38.jsonl", "examples_r37.jsonl", "examples.jsonl"]:
+            extra_path = data_dir / extra_file
+            if extra_path.exists():
+                try:
+                    extra_ex = load_few_shot(extra_path)
+                    s1_ex.extend(extra_ex)
+                    logger.info("Merged %d examples from %s", len(extra_ex), extra_file)
+                except Exception as exc:
+                    logger.warning("Skip %s: %s", extra_file, exc)
+        # Same for Stage 2
+        for extra_file in ["examples_r38.jsonl"]:
+            extra_path = data_dir / extra_file
+            if extra_path.exists():
+                try:
+                    extra_ex = load_few_shot(extra_path)
+                    s2_ex.extend(extra_ex)
+                    logger.info("Merged %d examples from %s", len(extra_ex), extra_file)
+                except Exception as exc:
+                    logger.warning("Skip %s: %s", extra_file, exc)
         few_shot = format_few_shot_messages(s1_ex)
         few_shot_stage2 = format_few_shot_stage2_messages(s2_ex)
-        logger.info("Two-Stage Pipeline mode: loaded %d S1 and %d S2 few-shot examples.", len(s1_ex), len(s2_ex))
+        logger.info("Two-Stage Pipeline mode: loaded %d S1 and %d S2 few-shot examples (merged).", len(s1_ex), len(s2_ex))
     else:
         all_examples = load_few_shot()
+        # R38 (2026-07-23): Merge all examples files khi single-pass mode
+        for extra_file in ["examples_stage1.jsonl", "examples_stage2.jsonl", "examples_r38.jsonl"]:
+            extra_path = data_dir / extra_file
+            if extra_path.exists():
+                try:
+                    extra_ex = load_few_shot(extra_path)
+                    all_examples.extend(extra_ex)
+                    logger.info("Merged %d examples from %s", len(extra_ex), extra_file)
+                except Exception as exc:
+                    logger.warning("Skip %s: %s", extra_file, exc)
         few_shot = format_few_shot_messages(all_examples)
         few_shot_stage2 = None
         if use_two_stage:

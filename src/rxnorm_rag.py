@@ -1715,6 +1715,13 @@ class RxNormRetriever:
             )
             return [ranked[0]]
 
+        # R38 (2026-07-23): L1A — Fuzzy ingredient match for typos (vd "trimetazidin").
+        # Skip nếu đã có drug context (sẽ được xử lý bởi L3/L4 sau).
+        if not _has_drug_context(drug_text) or len(drug_text.split()) == 1:
+            fuzzy_ing = self._fuzzy_ingredient_lookup(drug_text, threshold=85)
+            if fuzzy_ing:
+                return fuzzy_ing[:1]
+
         # L1B: Closest strength fallback (R34) — khi L1 miss, tìm SCD cùng ing
         # với strength gần nhất (vd 'clonazepam 1.5 mg' → 1 MG ≈ 197528).
         result_closest = self.index.closest_strength_lookup(
@@ -1798,6 +1805,10 @@ class RxNormRetriever:
 
         R34 fix: apply brand→generic alias translation (vd 'flagyl' → 'metronidazole').
         Trước đây bare brand name miss L1 và bị fuzzy block (no drug context).
+
+        R38 (2026-07-23): Thêm fuzzy ingredient match (L0.5) để cover typos ngắn như
+        "trimetazidin" → "trimetazidine" (1 char missing). Không yêu cầu drug context
+        vì chính cái typo đó làm context bị miss.
         """
         drug_text = drug_text.strip()
         if not drug_text:
@@ -1806,6 +1817,15 @@ class RxNormRetriever:
         aliased = _alias_to_generic(drug_text)
         if isinstance(aliased, str) and aliased != drug_text:
             drug_text = aliased
+
+        # R38: Fuzzy ingredient match — typo correction trước khi các bước L1+
+        # Catch single-token typos như "trimetazidin" → match "trimetazidine" trong
+        # index. Chỉ apply khi text KHÔNG có doseform/strength (tránh over-match).
+        if not _has_drug_context(drug_text) or len(drug_text.split()) == 1:
+            fuzzy_ing = self._fuzzy_ingredient_lookup(drug_text, threshold=85)
+            if fuzzy_ing:
+                return fuzzy_ing
+
         result = self.index.lookup(drug_text)
         if result:
             return result[:1]
@@ -1825,6 +1845,47 @@ class RxNormRetriever:
         if result:
             return result[:1]
         return []  # don't recurse, don't LLM fallback for sub-lookups
+
+    def _fuzzy_ingredient_lookup(self, drug_text: str, threshold: int = 85) -> list[str]:
+        """R38 (2026-07-23): Fuzzy match ingredient name (typo correction).
+
+        Special-case cho single-token / typo inputs (vd "trimetazidin", "aspirn").
+        Match against `by_ingredient` keys với WRatio >= threshold.
+
+        Returns:
+            list [rxcui] (max 1) hoặc [].
+        """
+        if not drug_text or not self.index.by_ingredient:
+            return []
+        # Strip route/freq
+        stripped = _strip_route_freq(drug_text)
+        if not stripped:
+            return []
+        # Take first token (assume single ingredient)
+        tokens = re.findall(r"[a-z0-9]{3,}", stripped.lower())
+        if not tokens:
+            return []
+        query = tokens[0]
+        # Skip very short or very long tokens (likely noise)
+        if len(query) < 4 or len(query) > 30:
+            return []
+        try:
+            from rapidfuzz import fuzz, process  # type: ignore
+        except ImportError:
+            return []
+        # Match against ingredient keys (not full names) for speed
+        keys = list(self.index.by_ingredient.keys())
+        matches = process.extract(query, keys, scorer=fuzz.WRatio, limit=3)
+        for key, score, _ in matches:
+            if score >= threshold and key in self.index.by_ingredient:
+                cands = self.index.by_ingredient[key]
+                if cands:
+                    logger.debug(
+                        "R38 fuzzy ingredient: '%s' → '%s' (score %d) → %s",
+                        drug_text, key, score, cands[0],
+                    )
+                    return [cands[0]]
+        return []
 
     def _fuzzy_local(self, query: str, threshold: int = 70) -> list[str]:
         """Fuzzy match trên name list (rapidfuzz). R34: tightened with drug context.

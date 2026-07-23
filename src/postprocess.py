@@ -3421,7 +3421,52 @@ def assemble_record(
                 rec["assertions"] = [a for a in rec["assertions"] if a != "isHistorical"]
 
     final.sort(key=lambda e: e["position"][0])
+
+    # R38 (2026-07-23): Dedupe cuối cùng theo (text_lower, type) để giảm WER.
+    # Trước đây `_expand_duplicates` emit 1 entity / occurrence → cùng text lặp 12 lần
+    # cho "Thiếu men G6PD" → scoring công thức WER trừng phạt nặng (extra unmatched).
+    # Sau dedupe: giữ 1 entity / (text, type), dùng position đầu tiên.
+    # Trade-off: mất position precision nhưng tăng J_candidates và giảm WER explosion.
+    final = _dedupe_by_text_type(final)
+
     return final
+
+
+def _dedupe_by_text_type(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """R38 (2026-07-23): Dedupe entities theo (text_lower, type), giữ FIRST occurrence.
+
+    Lý do: scoring formula ghép predicted vs gold theo (position, type) với WER word-level.
+    Nếu cùng text xuất hiện 12 lần (do `_expand_duplicates`), WER explosion vì
+    11 extras không match gold → ảnh hưởng text_score rất nặng.
+
+    Hành vi:
+      - Với mỗi (text_lower, type), giữ entity đầu tiên (position sớm nhất).
+      - Bỏ qua entities có empty text.
+      - Sort output theo position (giữ nguyên thứ tự xuất hiện trong input).
+
+    Args:
+        entities: list entity dicts từ assemble_record.
+
+    Returns:
+        list entities đã dedupe.
+    """
+    if not entities:
+        return entities
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for ent in entities:
+        text = str(ent.get("text", "")).strip()
+        etype = str(ent.get("type", ""))
+        if not text:
+            continue
+        key = (text.lower(), etype)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ent)
+    # Sort lại theo position (giữ thứ tự tự nhiên)
+    deduped.sort(key=lambda e: e.get("position", [0, 0])[0])
+    return deduped
 
 
 def _split_drug_disease_connector(
