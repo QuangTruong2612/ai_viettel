@@ -185,19 +185,43 @@ _GENERIC_DRUG_CLASS_PATTERNS: tuple[re.Pattern, ...] = (
 
 
 def _is_generic_drug_class(text: str) -> bool:
-    """NO-OP: LLM tự quyết định drug-class generic hay không qua Stage 2 prompt.
+    """Detect generic drug-class terms (vd 'thuốc chống đông', 'kháng sinh').
 
-    Trước đây dùng regex `_GENERIC_DRUG_CLASS_PATTERNS` và `_DRUG_CLASS_PREFIX_RE`
-    để detect class terms (vd "kháng sinh", "thuốc hạ sốt"). Nhưng mỗi lần thêm
-    pattern lại miss (vd "corticoid", "Vitamin 3B") → output sai.
-    ĐÃ REMOVE TOÀN BỘ regex — để LLM tự phân loại qua few-shot examples.
+    Trả True nếu text là pure class term (vd "kháng sinh", "Thuốc chống đông"),
+    KHÔNG phải drug name (vd "Kháng sinh Cefepim" → False, cần lookup Cefepim).
 
-    Args:
-        text: drug text cần check.
-
-    Returns: luôn False — LLM sẽ tự quyết định ở Stage 2.
+    Logic:
+      - Strip drug-class prefix (kháng sinh, thuốc chống, ...).
+      - Nếu stripped empty / same → check direct fullmatch.
+      - Nếu stripped có drug name (token ∈ INN whitelist) → False (lookup drug).
+      - Còn lại → True (class term).
+    R34: Thêm `_DRUG_CLASS_ROUTE_PATTERNS` để match "kháng sinh tĩnh mạch" (class + route).
     """
-    return False
+    if not text:
+        return False
+    tl = text.lower().strip()
+    if not tl or len(tl) > 60:
+        return False
+
+    # R34: Class + route (vd "kháng sinh tĩnh mạch") → class term, skip
+    if _DRUG_CLASS_ROUTE_PATTERNS.fullmatch(tl):
+        return True
+
+    stripped = _strip_drug_class_prefix(text)
+    if stripped is None or stripped == text:
+        # Pure class term hoặc không có class prefix → check direct fullmatch
+        return any(p.fullmatch(tl) for p in _GENERIC_DRUG_CLASS_PATTERNS)
+
+    # Stripped result exists. Check if first token is a real drug (INN whitelist).
+    stripped_lower = stripped.lower().strip()
+    stripped_tokens = stripped_lower.split()
+    if stripped_tokens:
+        first_token = stripped_tokens[0]
+        # Import lazily (avoid circular at module load)
+        from src.rxnorm_rag import _DRUG_INN_WHITELIST
+        if first_token in _DRUG_INN_WHITELIST:
+            return False  # drug name attached → lookup drug
+    return True  # no drug name → still class term
 
 
 # R34 (2026-07-13): Strip drug-class prefix để lookup drug part
@@ -223,16 +247,20 @@ _DRUG_CLASS_ROUTE_PATTERNS = re.compile(
 
 
 def _strip_drug_class_prefix(text: str) -> str | None:
-    """NO-OP: Trả về original text — LLM tự xử lý drug-class prefix.
-
-    Trước đây dùng regex `_DRUG_CLASS_PREFIX_RE` để strip "kháng sinh " / "thuốc ".
-    Nhưng regex hay miss drug name thật (vd "kháng sinh nhóm cephalosporin" → strip sai).
-    ĐÃ REMOVE — để LLM tự phân loại.
+    """R34 FIX: Strip drug-class prefix để lookup drug part.
 
     Returns:
-        Original text (no stripping). Caller phải handle via LLM.
+        - None nếu text là pure class term (vd "kháng sinh", "thuốc chống đông")
+        - Stripped drug name nếu có drug attached (vd "Kháng sinh Cefepim" → "Cefepim")
+        - Original text nếu không match class pattern
     """
-    return text
+    if not text:
+        return text
+    stripped = _DRUG_CLASS_PREFIX_RE.sub("", text, count=1).strip()
+    if not stripped:
+        # Pure class term — caller SKIP lookup
+        return None
+    return stripped
 
 
 def _load_generic_stoplist() -> tuple[tuple[re.Pattern, ...], ...]:
@@ -249,23 +277,21 @@ def _load_generic_stoplist() -> tuple[tuple[re.Pattern, ...], ...]:
 
 
 # Re-init từ file nếu có
-# R38 (2026-07-23): DISABLED - LLM tự xyết định drug-class, không load từ file
-# try:
-#     _GENERIC_DRUG_CLASS_PATTERNS, = _load_generic_stoplist()
-#     logger.info("[R28] Loaded %d generic drug class patterns", len(_GENERIC_DRUG_CLASS_PATTERNS))
-# except Exception:
-#     pass
+try:
+    _GENERIC_DRUG_CLASS_PATTERNS, = _load_generic_stoplist()
+    logger.info("[R28] Loaded %d generic drug class patterns", len(_GENERIC_DRUG_CLASS_PATTERNS))
+except Exception:
+    pass
 
 
 # R34: ICD drug-class blacklist + resistance detection (R34 spec round 3)
-# R38 (2026-07-23): DISABLED - LLM tự xử lý, không hardcode blacklist
-# _ICD_DRUG_CLASS_BLACKLIST: frozenset[str] = frozenset({
-#     "kháng sinh", "kháng viêm", "kháng đông",
-#     "thuốc chống đông", "thuốc giảm đau", "thuốc hạ sốt",
-#     "thuốc lợi tiểu", "thuốc an thần", "thuốc chống viêm",
-#     "thuốc kháng sinh", "thuốc kháng viêm",
-#     "nsaid", "corticoid", "corticosteroid",
-# })
+_ICD_DRUG_CLASS_BLACKLIST: frozenset[str] = frozenset({
+    "kháng sinh", "kháng viêm", "kháng đông",
+    "thuốc chống đông", "thuốc giảm đau", "thuốc hạ sốt",
+    "thuốc lợi tiểu", "thuốc an thần", "thuốc chống viêm",
+    "thuốc kháng sinh", "thuốc kháng viêm",
+    "nsaid", "corticoid", "corticosteroid",
+})
 
 
 def _has_resistance_context_icd(text: str) -> bool:
@@ -729,20 +755,124 @@ def _filter_irrelevant_codes(
     entity_text: str,
     index=None,
 ) -> list[str]:
-    """NO-OP: LLM tự quyết định candidate nào hợp lệ qua Stage 3 prompt + few-shot.
+    """Filter ra các ICD codes rõ ràng không liên quan đến entity text.
 
-    Trước đây hàm này filter ra F10, T36, O00, P00, Z00 bằng regex keywords.
-    Nhưng mỗi lần thêm keyword mới lại miss cases (vd G6PD/Q55.0) → output sai.
-    ĐÃ REMOVE TOÀN BỘ hardcode semantic — để LLM tự xử lý.
+    Áp dụng nguyên tắc chung: nếu entity không đề cập concept X mà code là về X,
+    thì loại code đó.
+
+    Hiện tại filter các patterns:
+    - F10.x (alcohol-related): nếu entity không chứa "alcohol/rượu"
+    - F11-F19 (drug-related): nếu entity không chứa "drug/chất"
+    - T36-T50 (poisoning by drugs): nếu entity không phải poisoning/ngộ độc
+    - V/W/X/Y (external causes): nếu entity không phải tai nạn/chấn thương
+    - O00-O9A (pregnancy): nếu entity không phải pregnancy/mang thai
 
     Args:
         codes: list ICD codes (vd ["F10.159", "K72.9"])
         entity_text: VN hoặc EN text của diagnosis
-        index: ICDIndex (optional, unused)
+        index: ICDIndex (optional) để lookup name từ code nếu cần
 
-    Returns: codes UNCHANGED — LLM sẽ filter ở Stage 3 verdict.
+    Returns: filtered list codes.
     """
-    return codes
+    if not codes:
+        return codes
+
+    entity_lower = entity_text.lower()
+    out: list[str] = []
+
+    for code in codes:
+        # F10.x: alcohol-related
+        if code.startswith("F10"):
+            if any(kw in entity_lower for kw in (
+                "alcohol", "rượu", "alcoholic", "ethanol", "liver",
+            )):
+                out.append(code)
+            continue  # skip F10 if not alcohol-related
+
+        # F11-F19: drug-related mental disorders
+        if code.startswith(("F11", "F12", "F13", "F14", "F15", "F16", "F17", "F18", "F19")):
+            if any(kw in entity_lower for kw in (
+                "drug", "chất", "substance", "heroin", "cocaine", "amphetamine",
+            )):
+                out.append(code)
+            continue
+
+        # T36-T50: poisoning by drugs
+        if code.startswith(("T36", "T37", "T38", "T39", "T40", "T41", "T42", "T43",
+                            "T44", "T45", "T46", "T47", "T48", "T49", "T50")):
+            if any(kw in entity_lower for kw in (
+                "poisoning", "ngộ độc", "overdose", "quá liều", "toxic",
+            )):
+                out.append(code)
+            continue
+
+        # V/W/X/Y: external causes (accidents)
+        if code[0] in ("V", "W", "X", "Y"):
+            if any(kw in entity_lower for kw in (
+                "accident", "tai nạn", "chấn thương", "injury", "trauma",
+            )):
+                out.append(code)
+            continue
+
+        # O00-O9A: pregnancy & obstetric conditions
+        if code.startswith("O") and len(code) >= 2 and code[1].isdigit() and code[:2] < "O9":
+            if any(kw in entity_lower for kw in (
+                "pregnancy", "mang thai", "thai kỳ", "obstetric", "gestation",
+                "chuyển dạ", "thai", "sản", "vỡ ối", "rỉ ối", "tiền sản giật", "sinh con",
+            )):
+                out.append(code)
+            continue
+
+        # P00-P96: Perinatal / Newborn conditions (chỉ dành cho sơ sinh / thai nhi)
+        if code.startswith("P") and len(code) >= 2 and code[1].isdigit():
+            if any(kw in entity_lower for kw in (
+                "sơ sinh", "thai nhi", "newborn", "perinatal", "fetal", "fetus", "nhũ nhi",
+            )):
+                out.append(code)
+            continue
+
+        # R38 (2026-07-23): Q00-Q99 = Congenital malformations, deformations,
+        # chromosomal abnormalities. CHỈ giữ khi entity có keyword bẩm sinh/di truyền.
+        # Bug fix: trước đây match "Thiếu men G6PD" (D55.0) → trả Q55.0 (testis defect)
+        # vì cùng có "thiếu". Q55 sai hoàn toàn concept.
+        if code.startswith("Q") and len(code) >= 2 and code[1].isdigit():
+            congenital_kws = (
+                "bẩm sinh", "bất thường bẩm sinh", "dị tật", "khiếm khuyết",
+                "di truyền", "di truyền lặn", "di truyền trội", "gen", "gen di truyền",
+                "nhiễm sắc thể", "thể tam nhiễm", "hội chứng down", "down",
+                "hội chứng edwards", "hội chứng patau",
+                "congenital", "hereditary", "genetic", "chromosomal", "syndrome",
+                "malformation", "deformity", "birth defect",
+            )
+            # Q55 = male genital organs, Q60-Q64 = urinary, etc. Blood-disease
+            # mentions must not inherit those Q-codes from lexical similarity.
+            blood_kws = (
+                "thiếu máu", "anemia", "máu", "hồng cầu", "hemoglobin",
+                "g6pd", "glucose-6-phosphate", "men g6pd", "đông máu", "coagulation",
+                "tiểu cầu", "bạch cầu", "leukemia", "lymphoma",
+            )
+            if any(kw in entity_lower for kw in blood_kws):
+                continue
+            if any(kw in entity_lower for kw in congenital_kws):
+                out.append(code)
+            continue
+
+        # Z00-Z99: Factors influencing health status (KHÔNG phải active diagnosis)
+        # Drop theo mặc định; CHỈ giữ khi entity ngữ cảnh gợi ý family history / screening.
+        if code.startswith("Z"):
+            family_history_kws = (
+                "tiền sử gia đình", "gia đình có", "tiền căn gia đình",
+                "screening", "tầm soát", "vaccine", "tiêm chủng",
+                "history of", "personal history", "family history",
+            )
+            if any(kw in entity_lower for kw in family_history_kws):
+                out.append(code)
+            continue
+
+        # Default: keep
+        out.append(code)
+
+    return out
 
 
 def build_context_query(
