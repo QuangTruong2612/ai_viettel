@@ -3413,6 +3413,96 @@ def _restore_diacritics_type(etype: str) -> str:
     return mapping.get(etype, etype)
 
 
+# R39 (2026-07-24): ICD hard-reject table — entity text → ICD codes phải loại bỏ.
+# Lý do: LLM/RAG đôi khi trả codes sai concept (vd "Thiếu men G6PD" → Q55 testis defect).
+# Áp dụng ở FINAL stage của postprocess để đảm bảo output sạch.
+_HARD_REJECT_ICD = {
+    # Enzyme deficiency → KHÔNG phải congenital
+    "thiếu men g6pd": {"Q55", "Q55.0", "Q44", "Q00", "Q01", "Q02", "Q03", "Q04",
+                       "Q05", "Q06", "Q07"},
+    "thiếu hụt men g6pd": {"Q55", "Q55.0"},
+    "g6pd": {"Q55", "Q55.0"},
+    "men g6pd": {"Q55", "Q55.0"},
+    "glucose-6-phosphate dehydrogenase": {"Q55", "Q55.0"},
+    # Myocarditis → KHÔNG phải viral pericarditis
+    "viêm tim": {"B33.2", "B33", "B34"},
+    "viêm cơ tim": {"B33.2", "B33", "B34"},
+    "viêm màng ngoài tim": {"B33.2", "B33"},
+    "viêm nội tâm mạc": {"B33.2", "B33"},
+    # Coronary aneurysm → KHÔNG intracranial abscess
+    "phình giãn động mạch vành": {"G07", "I67", "I60"},
+    "phình động mạch vành": {"G07", "I67", "I60"},
+    # Anemia → KHÔNG congenital
+    "thiếu máu": {"Q55", "Q44", "Q00", "Q01", "Q02", "Q03", "Q04"},
+    "thiếu máu tan huyết": {"Q55", "Q44"},
+    "thiếu máu do tan huyết": {"Q55", "Q44"},
+    # Adult RA → KHÔNG juvenile
+    "viêm khớp dạng thấp": {"M08", "M08.0", "M08.1"},
+    "viêm khớp": {"Q"},
+    # Pneumonia → KHÔNG congenital
+    "viêm phổi": set(),  # thường OK; specific exclude nếu cần
+    "viêm phổi mắc phải cộng đồng": set(),
+    # Kawasaki → KHÔNG generic vasculitis
+    "kawasaki": {"I77", "L52"},
+    "bệnh kawasaki": {"I77", "L52"},
+    # Cancer → KHÔNG factors
+    "ung thư": {"Z00", "Z01", "Z02", "Z03", "Z04", "Z05"},
+    # Headache → KHÔNG stroke
+    "đau đầu": {"I60", "I61", "I62", "I63", "I64", "I65", "I66", "I67", "I68", "I69"},
+    "đau nửa đầu": {"I60", "I61", "I62", "I63"},
+    # Migraine
+    "migraine": {"I60", "I61", "I63"},
+    # Common diseases → correct ICD
+    "viêm gan b": {"K74"},  # viêm gan b → B16-B18, NOT K74 xơ gan
+    "tăng huyết áp": {"I11", "I12", "I13", "I15"},  # THA primary → I10
+    "đái tháo đường type 2": {"E10", "E10.0"},  # type 2 → E11, not E10
+    # Pediatric
+    "tay chân miệng": {"A09", "B34"},
+    "sởi": {"A09", "B01"},
+    "thủy đậu": {"A09", "B01"},
+    "ho gà": {"A09", "B05"},
+}
+
+
+def _apply_hard_reject_icd(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """R39 (2026-07-24): Apply HARD REJECT ICD codes cho từng entity.
+
+    Với mỗi CHẨN_ĐOÁN entity, loại bỏ candidate codes nằm trong `_HARD_REJECT_ICD`
+    blacklist (nếu text match). Nếu sau khi loại bỏ còn candidate → giữ.
+    Nếu không còn → trả `candidates = []`.
+
+    Args:
+        entities: list entity dicts (sẽ modify in-place).
+
+    Returns:
+        list entities đã filter candidates.
+    """
+    if not entities:
+        return entities
+
+    n_filtered = 0
+    for ent in entities:
+        if ent.get("type") not in ("CHẨN_ĐOÁN", "CHAN_DOAN"):
+            continue
+        text = str(ent.get("text", "")).strip().lower()
+        # Normalize Vietnamese chars for matching
+        normalized = re.sub(r"\s+", " ", text)
+        blacklist = _HARD_REJECT_ICD.get(normalized)
+        if blacklist:
+            candidates = ent.get("candidates", []) or []
+            new_candidates = [c for c in candidates if c.split(".")[0] not in blacklist and c not in blacklist]
+            if len(new_candidates) != len(candidates):
+                n_filtered += (len(candidates) - len(new_candidates))
+                ent["candidates"] = new_candidates
+                logger.debug(
+                    "[R39] Hard reject ICD for '%s': %s → %s",
+                    text[:30], candidates, new_candidates,
+                )
+    if n_filtered:
+        logger.info("[R39] Total hard-rejected ICD codes: %d", n_filtered)
+    return entities
+
+
 def _enforce_position_strict(input_text: str, ent: dict[str, Any]) -> dict[str, Any] | None:
     """R39 (2026-07-24): Position enforcement cuối cùng — đảm bảo input[pos_start:pos_end] == ent.text.
 
@@ -4116,6 +4206,11 @@ def assemble_record(
             logger.debug("[R39] Boosted %d entities (recall)", len(boosted))
     except Exception as exc:
         logger.warning("[R39] Recall booster failed: %s", exc)
+
+    # R39 (2026-07-24): HARD-REJECT ICD codes cho FALSE-POSITIVE cases.
+    # Một số ICD codes dễ bị LLM/rag trả nhầm concept → filter cuối cùng.
+    # Đảm bảo output không chứa code sai concept.
+    cleaned_final = _apply_hard_reject_icd(cleaned_final)
 
     # R39 (2026-07-24): DEDUP by (text_normalized, type) trong CÙNG paragraph.
     # NHƯNG KHÔNG dedupe nếu entities ở KHÁNG section (cách nhau > 500 chars).
