@@ -2534,7 +2534,19 @@ def _clean_entity_text(text: str, etype: str) -> str | None:
     original = text
     text_lower = text.strip().lower()
 
-    # === BƯỚC 0: R35 (2026-07-14) — DROP TRIỆU_CHỨNG chỉ là body part đơn lẻ ===
+    # === BƯỚC 0a: DROP standalone biological process / narrative noise terms ===
+    _STANDALONE_PROCESS_NOISE = {
+        "tan huyết", "oxy hóa", "khử oxy", "phá hủy", "chuyển hóa", "đông máu",
+        "hồng cầu", "bạch cầu", "tiểu cầu", "đậu tằm", "băng phiến", "long não",
+        "ăn đậu tằm", "tiếp xúc với băng phiến", "tiếp xúc băng phiến",
+        "sử dụng thuốc", "k dùng", "k dùng thuốc", "k dùng thuốc nam",
+        "mẹ đang cho con bú", "vận động", "trí tuệ",
+    }
+    if text_lower in _STANDALONE_PROCESS_NOISE:
+        logger.debug("Clean: drop standalone process/mechanism term '%s'", original)
+        return None
+
+    # === BƯỚC 0b: R35 (2026-07-14) — DROP TRIỆU_CHỨNG chỉ là body part đơn lẻ ===
     # Safety net cuối cùng. Prompt đã enforce; set này chỉ cover các token
     # mà LLM vẫn miss dù đã có rule trong prompt.
     if etype == "TRIỆU_CHỨNG" and text_lower in _BODY_PARTS_ALONE:
@@ -2839,6 +2851,12 @@ def _retype_entity(text: str, etype: str) -> str:
     if etype != "THUỐC" and text_lower in _DRUG_BRANDS:
         logger.debug("Retype: '%s' %s → THUỐC (brand name)", text, etype)
         return "THUỐC"
+
+    # 0b. R40: Bệnh lý thần kinh/bẩm sinh → CHẨN_ĐOÁN
+    if "chậm phát triển" in text_lower or "bại não" in text_lower or "rối loạn vận động" in text_lower:
+        if etype != "CHẨN_ĐOÁN":
+            logger.debug("Retype: '%s' %s → CHẨN_ĐOÁN (neurological)", text, etype)
+            return "CHẨN_ĐOÁN"
 
     # 1. Abnormal findings → CHẨN_ĐOÁN (override TRIỆU_CHỨNG hoặc KQ_XN)
     if etype in ("TRIỆU_CHỨNG", "KẾT_QUẢ_XÉT_NGHIỆM"):

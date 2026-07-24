@@ -1888,7 +1888,6 @@ class ICDRetriever:
             "glucose-6-phosphate dehydrogenase": ["D55.0"],
             "thiếu men pyruvate kinase": ["D55.2"],
             "thiếu men": ["D55", "D55.9"],
-            "tan huyết": ["D58", "D58.9"],
             "thiếu máu tan huyết": ["D58", "D58.9"],
             "thiếu máu do tan huyết": ["D58", "D58.9"],
             "vàng da sơ sinh": ["P59", "P59.9"],
