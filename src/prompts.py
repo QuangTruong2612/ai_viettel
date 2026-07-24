@@ -72,6 +72,11 @@ _GOLD_QUESTIONS = """
       → Tác nhân KHÔNG phải entity bệnh → không extract làm CHẨN_ĐOÁN/TRIỆU_CHỨNG
   Q5. Bệnh ACQUIRED (mắc phải) hay BẨM SINH cấu trúc?
       → Acquired → D/I/J/N/M | Bẩm sinh cấu trúc → Q
+  Q6. Từ "K" ở đây là UNG THƯ hay KHÔNG (Phủ định)?
+      → K + cơ quan ("K vú", "K phổi", "K dạ dày") = Ung thư → CHẨN_ĐOÁN
+      → K + động từ/triệu chứng ("K dùng", "K sốt", "K ho") = KHÔNG (Phủ định).
+        "K dùng" = không dùng → NARRATIVE ACTION → DROP (type: null).
+        "K sốt" = không sốt → core symptom "sốt" với isNegated=true (KHÔNG trích chữ "K").
 """
 
 SYSTEM_PROMPT = """<role>
@@ -931,6 +936,7 @@ PHẦN 3 — 5 CÂU HỎI VÀNG & BỘ LỌC SEMANTIC REASONING
 4. **Drug-Class generic → DROP**: "kháng sinh", "corticoid", "NSAID", "thuốc hạ sốt" (nhóm thuốc, không tên cụ thể) → DROP. Cụ thể "aspirin", "metoprolol" → THUỐC ✓.
 5. **Standalone dose / Qualifier → DROP**: "30 mg", "không đặc hiệu" đứng riêng → DROP.
 6. **Core symptom extraction**: Cắt bỏ verb dẫn ("cảm thấy", "xuất hiện", "bị") và thời gian kéo dài. Lấy core: "mệt mỏi", "đau ngực", "khó thở".
+7. **[Q6] "K dùng" / Phủ định "K" → DROP**: "K dùng" = "không dùng" (mệnh đề tự sự) → DROP. "K" + động từ/lối sống/mẹ cho bú ("K dùng thuốc nam", "Mẹ đang cho con bú") → DROP. NGOẠI LỆ: "K" + cơ quan ("K vú", "K phổi", "K dạ dày") = Ung thư → CHẨN_ĐOÁN ✓.
 
 ## QUY TẮC PHỤ:
 - **Duplicates (R10 STRICT)**: Mỗi lần xuất hiện ở vị trí khác nhau trong input = 1 entity riêng biệt với position `[start, end)`.
@@ -1008,9 +1014,13 @@ PHẦN 2 — 5 CÂU HỎI VÀNG & CLASSIFICATION SEMANTICS
 
 4. **Noise / Process / Trigger → DROP** (`type: null`):
    - Tế bào / Quá trình đứng riêng ("hồng cầu", "oxy hóa", "tan huyết", "phá hủy") → DROP
-   - Trigger substances / Causes ("đậu tằm", "băng phiến") → DROP
-   - Time / Duration / Lifestyle ("trong tuần qua", "rượu bia", "thuốc lá") → DROP
+   - Trigger substances / Causes ("đậu tằm", "băng phiến", "ăn đậu tằm") → DROP
+   - Time / Duration / Lifestyle / Family context ("trong tuần qua", "rượu bia", "thuốc lá", "Mẹ đang cho con bú") → DROP
    - Standalone body parts ("ngực", "đầu", "bụng" đứng một mình) → DROP
+
+5. **[Q6] Từ viết tắt "K" (Ung thư vs Phủ định "Không")**:
+   - `K` + cơ quan ("K vú", "K phổi", "K dạ dày", "K gan", "K giáp") → **CHẨN_ĐOÁN** (Ung thư)
+   - `K` + động từ / tự sự ("K dùng", "K dùng thuốc nam", "K tiếp xúc") → `K` = `Không` (Không dùng) → **DROP** (`type: null`)
 
 # ĐẦU VÀO
 Văn bản gốc đầy đủ (để hiểu ngữ cảnh):
