@@ -1874,24 +1874,24 @@ def build_rerank_user_prompt(
             else:
                 cand_str = "(no candidates — score all as 1)"
             lines.append(
-                f"{{j+1}}. text=\"{{e.get('text','')}}\" "
-                f"type=\"{{e.get('type','')}}\" "
-                f"candidates=[{{cand_str}}]"
+                f"{j+1}. text=\"{e.get('text','')}\" "
+                f"type=\"{e.get('type','')}\" "
+                f"candidates=[{cand_str}]"
             )
 
         entities_str = "\n".join(lines)
 
         prompt = (
             f"# Clinical note (full context)\n"
-            f"{{input_text}}\n\n"
+            f"{input_text}\n\n"
             f"---\n\n"
-            f"# Entities cần re-rank (top-{{top_k}} mỗi entity)\n"
-            f"Batch {{i // batch_size + 1}}: {{len(batch)}} entities\n\n"
-            f"{{entities_str}}\n\n"
+            f"# Entities cần re-rank (top-{top_k} mỗi entity)\n"
+            f"Batch {i // batch_size + 1}: {len(batch)} entities\n\n"
+            f"{entities_str}\n\n"
             f"# Output\n"
             f"Trả JSON array (MỖI element cho 1 entity theo thứ tự trên). "
             f"Mỗi entity có `ranked_candidates` sort theo score giảm dần, "
-            f"chỉ giữ score >= 3, tối đa top-{{top_k}}."
+            f"chỉ giữ score >= 3, tối đa top-{top_k}."
         )
         batches.append(prompt)
     return batches
