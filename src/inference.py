@@ -876,9 +876,9 @@ def process_record(
         for chunk_idx, (chunk_text, chunk_offset) in enumerate(chunks):
             if not chunk_text.strip():
                 continue
-            prev_summary = accumulated_previous_text[-2500:] if chunk_idx > 0 else ""
+            prev_summary = ""  # Disabled cumulative context to reduce input length for small models
             chunk_prompt = build_stage1_user_prompt(chunk_text, previous_chunks_summary=prev_summary)
-            accumulated_previous_text += chunk_text + "\n"
+            # accumulated_previous_text += chunk_text + "\n"
             _log_token_budget(rec_id, llm, chunk_prompt, adaptive_few_shot)
             try:
                 chunk_raw = _call_with_retry(

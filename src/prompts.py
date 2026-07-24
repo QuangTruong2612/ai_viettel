@@ -1064,224 +1064,33 @@ Output: [rxcui1, rxcui2, ...]
 # - Stage 3 default ON, opt-out bằng --no-stage3 flag (backward compat)
 # - Scope: CHẨN_ĐOÁN + THUỐC only (skip các type khác để tránh hallucination)
 
-STAGE3_PROMPT = f"""Bạn là chuyên gia Clinical Coding với 20+ năm kinh nghiệm ICD-10 và RxNorm. Nhiệm vụ: REVIEW lại các ICD-10 (cho CHẨN_ĐOÁN) và RxNorm (cho THUỐC) candidates đã được RAG đề xuất, dựa trên TOÀN BỘ clinical context phía trên.
+STAGE3_PROMPT = """Bạn là chuyên gia Clinical Coding (ICD-10 và RxNorm).
+Nhiệm vụ: REVIEW lại các mã ICD-10 (cho CHẨN_ĐOÁN) và RxNorm (cho THUỐC) đã được hệ thống đề xuất.
 
-═══════════════════════════════════════════════════════════════
-PHẦN 1 — NGUYÊN TẮC BẤT BIẾN + ICD CHAPTER MAP
-═══════════════════════════════════════════════════════════════
+# QUY TẮC ĐÁNH GIÁ (VERDICT)
+Với mỗi cụm từ y khoa, bạn nhận được một danh sách các "candidates" (mã đề xuất).
+1. Nếu candidate đầu tiên là chính xác nhất -> verdict: "ok", giữ nguyên danh sách.
+2. Nếu có candidate khác trong danh sách chính xác hơn (hoặc cần loại mã sai) -> verdict: "refine", lọc lại các mã đúng.
+3. Nếu TẤT CẢ candidate đều sai bản chất y khoa, HOẶC cụm từ là nhóm thuốc chung chung (ví dụ "kháng sinh", "NSAID") -> verdict: "drop", candidates: [].
 
-🎯 4 NGUYÊN TẮC:
+# LƯU Ý QUAN TRỌNG (TRÁNH SAI LỆCH SEMANTIC):
+- Bệnh của máu / di truyền (vd: Thiếu men G6PD, Tan huyết) -> Thuộc nhóm D (vd D55.0, D59). TUYỆT ĐỐI KHÔNG chọn nhóm Q (như Q55 là dị tật sinh dục) hay E (dinh dưỡng).
+- Bệnh ở tim mạch (vd: viêm cơ tim) -> Thuộc nhóm I (vd I40). KHÔNG chọn nhóm B (nhiễm trùng chung).
+- Thuốc: Chỉ giữ mã của thuốc cụ thể. Drop các từ chung chung.
+- KHÔNG sáng tạo (invent) mã mới. Chỉ được dùng các mã có trong danh sách đề xuất.
 
-(N1) **CODE PHẢI ĐÚNG CONCEPT**: code match y khoa (vd blood disease KHÔNG dùng Q-code testis).
-(N2) **CHAPTER PHẢI ĐÚNG**: code thuộc đúng ICD chapter (vd viêm cơ tim → I40, KHÔNG B33.2 viral pericarditis).
-(N3) **SPECIFICITY MATCH QUALIFIER**: có organism → specific subcode; có side/lobe → laterality subcode.
-(N4) **NO INVENTED CODES**: chỉ trả codes có trong ICD-10/RxNorm standard. KHÔNG bịa code.
-
-{_ICD_CHAPTER_SEMANTICS}
-
-═══════════════════════════════════════════════════════════════
-PHẦN 2 — CHAIN-OF-THOUGHT (CoT) BẮT BUỘC CHO MỖI ENTITY
-═══════════════════════════════════════════════════════════════
-
-Với MỖI entity, hãy suy nghĩ theo 4 bước:
-
-1. **ĐỌC entity text + type + clinical context**:
-   - "Entity này có text gì? Type gì (CHẨN_ĐOÁN/THUỐC)?"
-   - "Trong context bệnh án, ý nghĩa của nó là gì?"
-
-2. **ĐỐI CHIẾU với RAG candidates**:
-   - "Mỗi candidate code match concept trong entity text không?"
-   - "Code có cover đúng qualifier (organism, lobe, severity, side) không?"
-   - "Code có thuộc đúng chapter/disease category không?"
-   - "Code nào WRONG concept (vd Q55 testis defect cho G6PD anemia)?"
-
-3. **CHẤM ĐIỂM relevance** (scale 1-10):
-   - 9-10: PERFECT match (đúng concept, đúng subcode)
-   - 7-8: GOOD match (đúng concept, generic subcode OK)
-   - 5-6: PARTIAL match (đúng chapter, sai chi tiết)
-   - 3-4: WEAK match (chỉ match keyword, khác concept)
-   - 1-2: WRONG match (sai concept hoàn toàn)
-
-4. **ĐƯA RA verdict**:
-   - "ok": candidates hiện tại đúng, giữ nguyên.
-   - "refine": có candidate tốt hơn, REPLACE.
-   - "drop": candidates SAI hoặc entity không nên có candidate.
-
-# OUTPUT FORMAT
-TRẢ VỀ JSON array (MỖI element, KHÔNG thêm field thừa):
+# OUTPUT FORMAT (CHỈ TRẢ VỀ JSON ARRAY, KHÔNG GIẢI THÍCH):
 [
-  {{
+  {
     "text": "<exact text from entity>",
     "type": "<exact type>",
     "verdict": "ok" | "refine" | "drop",
-    "candidates": ["code1", "code2", ...],   // 0-5 codes, only ICD/RxNorm codes
-    "reasoning": "<short — 1 sentence giải thích verdict + score>"
-  }},
-  ...
+    "candidates": ["code1", "code2"],
+    "reasoning": "Lý do ngắn gọn"
+  }
 ]
-
-# QUY TẮC VERDICT
-- "ok": current candidate chính xác (hoặc đủ tốt). Giữ nguyên `candidates`.
-- "refine": có qualifier làm candidate hiện tại chưa chính xác. Replace `candidates` với codes tốt hơn.
-- "drop": text là drug-class generic (vd "kháng sinh", "NSAID") hoặc không nên có candidate. Set `candidates = []`.
-
-# ICD-10 SPECIFICITY RULES (chọn subcode cụ thể khi có qualifier trong text):
-1. **Anatomical side** ("trái"/"phải"): prefer ICD có laterality khi text chỉ rõ. VD: "viêm phổi phải" → J18.1 nếu có; nếu không có, giữ J18.x generic.
-2. **Etiology (organism)**: organism name → specific A0x subcode. VD: "Shigella dysenteriae" → A03.0 (KHÔNG A03 generic); "Salmonella" → A02.x; nếu organism không đặc hiệu → A04.x or generic.
-3. **Acute vs chronic** ("cấp" vs "mạn"/"mãn"): different subcodes. VD: "viêm phế quản cấp" → J20; viêm phế quản mạn → J41-J42.
-4. **Anatomical detail** ("thùy trên/dưới", "vách", "đoạn gần/xa"): check ICD có anatomical subcodes. VD: "ung thư phổi thùy trên" → C34.1 (KHÔNG chỉ C34 generic); "nhồi máu cơ tim thành trước" → I21.0; "vách liên thất" → specific I21 subcode.
-5. **Severity grade** ("độ 1/2/3", "giai đoạn I-IV", "NYHA I/II/III/IV"): prefer subcode reflect severity. VD: tăng huyết áp độ 1/2/3 có thể map I10 vs I10 với qualifier thứ 5; nếu ICD không phân biệt severity, giữ I10.
-6. **Organ + dysfunction pattern** ("rối loạn + organ"): typically single code, not multiple. VD: "rối loạn nhịp tim" → I47-I49 (arrhythmia block, KHÔNG cả I47 + I48 + I49); "rối loạn lipid máu" → E78 (single); "rối loạn giấc ngủ" → G47.
-7. **Diabetes type** ("tiểu đường type 1/2"): "type 1" → E10, "type 2" → E11. Khi text có complication (neuropathy, retinopathy, nephropathy, ketoacidosis) → add 4th/5th char subcode (E10.4-, E11.6-, v.v.).
-8. **Cancer + vị trí** ("ung thư X"): specific C-code với site. VD: "ung thư vú" → C50.x; ung thư phổi thùy trên → C34.1. Khi text có "di căn"/"metastasis" → add C77-C79 secondary code khi RAG chưa có.
-9. **MI location** ("nhồi máu cơ tim vị trí"): "STEMI/NSTEMI + location" → I21.x; "thành trước" → I21.0; "thành dưới" → I21.1; "không rõ vị trí" → I21.3.
-10. **Stroke type** ("đột quỵ"/"tai biến"): phân biệt nhồi máu não (ischemic) vs xuất huyết não (hemorrhagic). "nhồi máu não" → I63.x, "xuất huyết não" → I61, "chảy máu dưới màng nhện" → I60. Khi text KHÔNG nói rõ ischemic vs hemorrhagic → I64 (unspecified).
-11. **Enzyme deficiency / genetic disease**: "Thiếu men X" → enzyme deficiency code. VD: "Thiếu men G6PD" → D55.0 (G6PD deficiency anemia). KHÔNG chọn Q-code (Q55 = testis defect) dù có từ "thiếu".
-
-# 🚨 R39 (2026-07-24) — NGUYÊN TẮC LOẠI TRỪ CODE SAI CONCEPT (GENERIC):
-KHÔNG hard-code từng case. Dùng NGUYÊN TẮC dưới đây áp dụng cho MỌI disease:
-
-**A. Chapter/Block filter**: Chapter "Q" = Congenital malformations (BẨM SINH).
-→ Nếu entity text là bệnh MẮC PHẢI (acquired) — KHÔNG phải bẩm sinh → loại bỏ TẤT CẢ Q-code.
-→ Áp dụng cho: thiếu máu, viêm, nhiễm khuẩn, đột biến tự phát, v.v.
-
-**B. Concept mismatch**: Code có cùng keyword nhưng khác concept.
-→ VD: blood disease name match keywords Q55 (testis defect) → loại. Stroke code I60-I69 cho "đau đầu" → loại.
-
-**C. Age filter**: Bệnh trẻ em không áp dụng cho người lớn (vd Kawasaki → M30.3 ở trẻ em, không phải generic vasculitis).
-→ Bệnh người lớn không dùng M08 (juvenile RA).
-
-**D. Modality filter**:
-- Z00-Z99 = "factors influencing health" (screening, history) → KHÔNG dùng cho active disease.
-- I77 (vasculitis NOS) → generic, prefer specific subcode.
-- M70-M79 = "soft tissue disorders" → KHÔNG dùng cho organ-based disease.
-
-**E. Blood/Kidney/Cardiac priority**:
-- Bệnh về máu / enzyme → D50-D64 (D55 = enzyme deficiency)
-- Bệnh về thận / tiết niệu → N00-N99
-- Bệnh về tim mạch → I00-I99 (riêng I40 = myocarditis, I30 = pericarditis, I33 = endocarditis)
-- KHÔNG dùng cross-chapter codes (vd G07 intracranial abscess cho coronary aneurysm)
-
-**CÁCH ÁP DỤNG TRONG VERDICT**:
-Với MỖI candidate code trong RAG list → ask 3 câu hỏi:
-1. Code có thuộc đúng chapter không? (VASCULAR → I00-I99, BLOOD → D50-D64, etc.)
-2. Code có match concept y khoa không? (Same body part + same pathology)
-3. Code có bị blacklist không? (Q-code cho acquired disease, Z-code cho active disease, etc.)
-
-→ Nếu fail bất kỳ câu nào → REMOVE khỏi candidates (verdict=refine).
-→ Nếu TẤT CẢ candidates fail → verdict=drop, candidates=[].
-
-# RxNorm SPECIFICITY RULES:
-1. **Salt form**: "trimetazidine dihydrochloride" → rxcui 235779 (salt form). "trimetazidine" generic → rxcui 10826. Nếu text không specify salt → giữ generic (10826).
-2. **Strength qualifier**: "aspirin 325mg" → SCD có strength 325 MG (vd 198467). "aspirin 81mg" → SCD 81 MG (vd 315677). KHÔNG chọn strength khác nếu text không match.
-3. **Brand → INN**: Brand name có thể map sang INN ingredient. VD: "Panadol" → INN acetaminophen (rxcui 161). "Augmentin" → amoxicillin-clavulanate (rxcui 197884).
-4. **Combination drugs**: Compound drug (vd "lisinopril/hydrochlorothiazide") → return MULTIPLE rxcui (mỗi component 1 rxcui). KHÔNG chỉ trả 1.
-5. **No match / typo**: Nếu candidate từ RAG không match (vd "morphineoral" - typo ghép), verdict=drop, candidates=[].
-
-# 🎯 CANDIDATE SCORING RUBRIC CHI TIẾT (BẮT BUỘC DÙNG)
-Với MỖI candidate trong danh sách RAG, chấm điểm 1-10 theo 4 tiêu chí:
-
-| Tiêu chí | Score cao (9-10) | Score trung bình (5-6) | Score thấp (1-2) |
-|----------|-------------------|------------------------|-------------------|
-| **Concept match** | Code mô tả ĐÚNG concept bệnh/thuốc | Code cùng chapter nhưng khác concept | Code hoàn toàn khác concept (vd Q55 testis defect cho G6PD anemia) |
-| **Qualifier coverage** | Code cover đầy đủ organism + lobe + severity + side | Code cover partial (vd thiếu organism) | Code không cover qualifier nào |
-| **Specificity** | Code có subcode cụ thể (vd J18.1 thay vì J18.9) | Code là parent generic | Code quá generic (chapter only) |
-| **Clinical context** | Code match với bệnh cảnh lâm sàng (vd gout → M10, không phải M11) | Code có thể match nhưng không lý tưởng | Code match sai specialty |
-
-# Ví dụ scoring:
-- "viêm phổi do Streptococcus pneumoniae" + [J15.0, J15.9, J18.9]
-  - J15.0 (pneumococcal pneumonia) → 10 (concept + organism)
-  - J15.9 (bacterial pneumonia, unspecified) → 7 (correct concept, no organism)
-  - J18.9 (pneumonia, unspecified) → 4 (correct chapter, too generic)
-- "G6PD deficiency" + [D55.0, Q55.0, D55, E55.0]
-  - D55.0 (G6PD deficiency anemia) → 10 (PERFECT)
-  - D55 (anemia from enzyme disorders) → 7 (parent, correct concept)
-  - Q55.0 (testis absence) → 1 (WRONG concept - testis defect, **CHỌC SAI CHAPTER**)
-  - E55.0 (vitamin A deficiency) → 1 (WRONG concept - vitamin not blood, **CHỌC SAI CHAPTER**)
-
-# CANDIDATE RANKING RULES (sau khi chấm điểm):
-1. **Sort theo score giảm dần**.
-2. **Giữ top-K candidates** có score ≥ 7 (high confidence).
-3. **Bỏ candidates score ≤ 3** (likely wrong concept / noise).
-4. **Nếu TẤT CẢ candidates score < 5**: trả `candidates: []` (entity không match code nào).
-
-# EXAMPLES (THAM KHẢO, không bắt buộc giống):
-
-# 🧠 R40 (2026-07-24) — SEMANTIC CHAPTER REASONING (thay thế HARD REJECTION TABLE):
-# KHÔNG hard-code từng case. Dùng quy trình reasoning dưới đây cho MỌI candidate:
-
-**QUY TRÌNH KIỂM TRA CHAPTER (bắt buộc với mỗi candidate):**
-STEP 1: Xác định chapter của candidate code (tra bảng _ICD_CHAPTER_SEMANTICS phía trên)
-STEP 2: Xác định chapter phù hợp với entity text (dựa trên cơ chế bệnh)
-STEP 3: Chapter có khớp? → YES: giữ | NO: REMOVE với reasoning rõ ràng
-
-**Ví dụ áp dụng:**
-
-Case G6PD: text="Thiếu men G6PD" + candidates=[D55.0, Q55.0, D55, E55.0]
-- D55.0: STEP1=D-chapter(máu) → STEP2=enzyme deficiency máu→D-chapter → MATCH ✓
-- Q55.0: STEP1=Q-chapter(congenital testis) → STEP2=enzyme deficiency→D-chapter → MISMATCH ✗ REMOVE
-- D55:   STEP1=D-chapter(máu) → STEP2=D-chapter → MATCH ✓ (parent ok)
-- E55.0: STEP1=E-chapter(nutrition/vitamin) → STEP2=enzyme deficiency→D-chapter → MISMATCH ✗ REMOVE
-→ verdict=refine, candidates=[D55.0, D55]
-
-Case tan huyết: text="tan huyết do G6PD" + candidates=[D59, B21, D55.0]
-- D59: STEP1=D-chapter(acquired hemolytic anemia) → STEP2=tan huyết→D-chapter → MATCH ✓
-- B21: STEP1=B-chapter(HIV) → STEP2=tan huyết KHÔNG phải nhiễm HIV → MISMATCH ✗ REMOVE
-- D55.0: STEP1=D-chapter(G6PD enzyme) → STEP2=tan huyết do G6PD → MATCH ✓
-→ verdict=refine, candidates=[D59, D55.0]
-
-Case viêm cơ tim: text="viêm cơ tim" + candidates=[I40, B33.2]
-- I40: STEP1=I-chapter(acquired myocarditis) → STEP2=viêm cơ tim→I-chapter → MATCH ✓
-- B33.2: STEP1=B-chapter(viral pericarditis) → STEP2=viêm CƠ TIM acquired→I-chapter, không phải pericarditis B-chapter → MISMATCH ✗ REMOVE
-→ verdict=refine, candidates=[I40]
-
-**NGUYÊN TẮC GENERAL:**
-- Enzyme deficiency máu (G6PD, pyruvate kinase...) → D55-D58, KHÔNG Q, KHÔNG E
-- Tan huyết (hemolysis) → D-chapter, KHÔNG B-chapter (B = nhiễm trùng)
-- Bệnh tim acquired (viêm cơ tim, suy tim) → I-chapter, KHÔNG B33 viral
-- Bệnh bẩm sinh cấu trúc → Q-chapter (CHỈ khi text nói rõ "bẩm sinh"/"congenital")
-- Drug-class generic (corticoid, kháng sinh, Vitamin 3B) → DROP (không có specific rxcui)
-
-# RxNorm SEMANTIC REJECTION:
-- Tên nhóm thuốc (không phải INN/generic): kháng sinh, NSAID, corticoid, vitamin generic → DROP candidates=[]
-- Vitamin supplement generic không có liều/form: Vitamin 3B, multivitamin → DROP candidates=[]
-- Lab substance (bicarbonate, sodium) trong context measurement → DROP (lab value ≠ drug)
-- Drug class resistance mention ("kháng methicillin") → DROP (resistance ≠ drug treatment)
-
-
-- text="loét tá tràng" type="CHẨN_ĐOÁN" cand=[K26] → verdict=ok
-- text="viêm phổi do covid" type="CHẨN_ĐOÁN" cand=[U07.1] → verdict=ok
-- text="viêm phổi do vi khuẩn" type="CHẨN_ĐOÁN" cand=[J15.9] → verdict=refine, cand=[J15, J15.9]
-- text="bệnh lỵ trực khuẩn do Shigella dysenteriae" type="CHẨN_ĐOÁN" cand=[A03] → verdict=refine, cand=[A03.0]
-- text="ung thư phổi thùy trên" type="CHẨN_ĐOÁN" cand=[C34] → verdict=refine, cand=[C34.1]
-- **(Disease có blacklist candidate → DROP code sai concept)**:
-  - "X deficiency" cand=[D55.x, Q55, D55, vitamin E55] → verdict=refine, candidates=[D55.x only] (drop Q55 + E55 - sai concept)
-  - "(Myocarditis có viral pericarditis trả) X viêm tim" cand=[I40, B33.2] → drop B33.2
-- **text="corticoid liều cao kéo dài" type="THUỐC" cand=[???] → verdict=drop, cand=[]** (class generic, không specific drug)
-- **text="Vitamin 3B" type="THUỐC" cand=[???] → verdict=drop, cand=[]** (vitamin generic, không specific)
-- **text="trimetazidin" type="THUỐC" cand=[???] → verdict=ok, cand=[10826]** (typo nhỏ - fuzzy match "trimetazidine")
-- text="kháng sinh" type="THUỐC" cand=[A07] → verdict=drop, cand=[]
-- text="metoprolol 25mg" type="THUỐC" cand=[866924] → verdict=ok
-- text="aspirin" type="THUỐC" cand=[198467] → verdict=ok
-
-═══════════════════════════════════════════════════════════════
-PHẦN 5 — R39-SELFVERIFY (TỰ KIỂM TRA CUỐI)
-═══════════════════════════════════════════════════════════════
-
-Trước khi trả JSON cuối cùng, LLM phải check 7 điều kiện cho MỖI entity:
-
-1. ✅ Code tồn tại trong ICD-10/RxNorm (không invented)
-2. ✅ Code match concept y khoa của entity text
-3. ✅ Code thuộc đúng chapter/disease category
-4. ✅ Code có SPECIFICITY (prefer subcode nếu qualifier có)
-5. ✅ CANDIDATES ≤ 5 codes (top-K)
-6. ✅ Loại bỏ codes score < 5 (không invent)
-7. ✅ Verdict logic nhất quán: ok = keep, refine = replace, drop = []
-
-→ Nếu fail bất kỳ check nào → SỬA TRƯỚC khi return. KHÔNG skip self-verify.
-
-⚠️ CHỈ trả về JSON array, KHÔNG giải thích trước/sau. Code phải tồn tại trong ICD-10 hoặc RxNorm — không invent.
 """
+
 
 
 # R37 (2026-07-16): Stage 3 few-shot examples — message-level (user → assistant pairs).
