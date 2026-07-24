@@ -3631,6 +3631,48 @@ def _is_chatbot_artifact(text: str) -> bool:
     return bool(_CHATBOT_ARTIFACT_PATTERNS.search(text))
 
 
+# R39 (2026-07-24) — EXTENDED NOISE PATTERNS (LLM hay miss trong must-drop).
+# Các text này KHÔNG phải entity y khoa — chỉ là noun/adjective/filler.
+_R39_EXTRA_NOISE_PATTERNS = re.compile(
+    r"(?:mong\s+manh|"
+    r"dễ\s+bị\s+(?:phá\s+hủy|vỡ|tổn\s+thương|"
+    r"\w+(?:\s+\w+)?)|"
+    r"có\s+tính\s+\w+(?:\s+\w+)?\s+cao|"
+    r"thực\s+phẩm(?:\s+(?:chế\s+biến|chứa|có|hay)\s+\w+(?:\s+\w+)?)?|"
+    r"hóa\s+chất|"
+    r"sử\s+dụng\s+thuốc|"
+    r"hạ\s+sốt|"
+    r"tiếp\s+xúc\s+với(?:\s+\w+){0,2}|"
+    r"phân\s+tích(?:\s+\w+)?|"
+    r"chẩn\s+đoán(?:\s+\w+)?|"
+    r"sàng\s+lọc\s+sớm|"
+    r"theo\s+dõi(?:\s+\w+)?|"
+    r"xét\s+nghiệm\s+chuyên\s+sâu|"
+    r"vẫn\s+có\s+thể\s+\w+|"
+    r"đã\s+từng(?:\s+\w+)?|"
+    r"bệnh\s+viện|"
+    r"bệnh\s+(?:gì|nào)\s*\??|"
+    r"trong\s+tuần\s+qua|"
+    r"cách\s+đây\s+\d+\s+\w+|"
+    r"^\s*(?:này|đó|kia)\s*$|"
+    r"\bK\s+(?:dùng|dùng\s+\w+))",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _is_extra_noise_entity(text: str) -> bool:
+    """R39 (2026-07-24): True nếu text thuộc MUST-DROP nhưng chưa được catch.
+
+    LLM hay miss các descriptor/adjective/filler sau:
+    - "mong manh", "dễ bị phá hủy", "có tính oxy hóa cao"
+    - "thực phẩm", "hóa chất" (nouns alone)
+    - "sử dụng thuốc", "hạ sốt", "tiếp xúc với" (action phrases)
+    """
+    if not text or len(text) > 80:
+        return False
+    return bool(_R39_EXTRA_NOISE_PATTERNS.search(text))
+
+
 # R39 (2026-07-24): RECALL BOOSTER PATTERNS — patterns LLM hay MISS.
 # Mỗi pattern cung cấp một hàm infer_type(text) → CHAN_DOAN/TRIEU_CHUNG/TEN_XET_NGHIEM.
 # Đây là "nhắc lại" cho LLM — nếu LLM miss các entity phổ biến, ta bổ sung.
@@ -4176,6 +4218,12 @@ def assemble_record(
         # 4) Drop overly long narrative (trước khi enforce position để tránh tốn)
         if _is_overly_long_narrative(text, etype):
             logger.debug("[R39] Drop overly long narrative '%s' (%s)", text[:80], etype)
+            continue
+
+        # 5) Drop extra noise entities (MUST-DROP mà prompt chưa catch):
+        #    "mong manh", "dễ bị phá hủy", "thực phẩm alone", "sử dụng thuốc", etc.
+        if _is_extra_noise_entity(text):
+            logger.debug("[R39] Drop extra noise '%s' (%s)", text[:80], etype)
             continue
 
         # 3) Drop chatbot artifacts
