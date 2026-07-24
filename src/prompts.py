@@ -966,7 +966,7 @@ TỔNG: X+Y+Z = N entities
 
 # 7 QUY TẮC VÀNG (ĐÃ VERIFY CHO ~50 BỆNH ÁN VN):
 
-1. **MỖI OCCURRENCE = 1 ENTITY RIÊNG (R10 STRICT - QUAN TRỌNG NHẤT)**: Nếu cùng bệnh/triệu chứng (`hội chứng não gan`, `viêm phổi`, `ngất xỉu`) xuất hiện N lần trong input → trích đủ N entities ở N vị trí KHÁC NHAU. TUYỆT ĐỐI KHÔNG gộp.
+1. **MỖI OCCURRENCE TRONG CONTEXT KHÁC = 1 ENTITY RIÊNG (R10 STRICT)**: Nếu cùng bệnh/triệu chứng (`hội chứng não gan`, `viêm phổi`, `ngất xỉu`) xuất hiện N lần trong input → trích đủ N entities ở N vị trí KHÁC NHAU. TUYỆT ĐỐI KHÔNG gộp.
    - VD: Bệnh án ghi 4 lần "hội chứng não gan" ở 4 vị trí khác nhau → 4 CHẨN_ĐOÁN riêng biệt, mỗi cái có position riêng.
    - Lý do: Ground truth có N entities riêng. LLM hay quên vì chỉ trả 1 cặp position đầu tiên → MISS recall.
 
@@ -1004,6 +1004,60 @@ TỔNG: X+Y+Z = N entities
 7. **VIẾT TẮT Y KHOA** (BẮT BUỘC trích xuất đầy đủ):
    - `THA`, `ĐTĐ`, `ĐTĐ tuýp 2`, `NMCT`, `NMCT cũ`, `RLLL`, `COPD`, `CKD`, `BTMV`, `TBMMN`, `ECG`, `EKG`, `EEG`, `EMG`, `MRI`, `CT`, `X-quang`
    - Nếu viết tắt + bệnh kèm theo: `NMCT cũ`, `COPD giai đoạn cuối` → giữ nguyên 1 entity.
+
+# 🎯 R39 (2026-07-24) — QUY TẮC DISAMBIGUATION (CỐT LÕI NER):
+
+A. **DISEASE NAME vs SUBSTANCE/ENZYME — phân biệt dựa vào QUAN HỆ trong câu**:
+   - "thiếu men G6PD" → CHẨN_ĐOÁN (vì "thiếu" = disease indicator)
+   - "men G6PD" alone → **TÊN_XÉT_NGHIỆM** (enzyme as test name, vì không có disease verb kèm)
+   - "Glucose-6-Phosphate Dehydrogenase" alone → TÊN_XÉT_NGHIỆM (test to đo enzyme)
+   - "G6PD" alone → TÊN_XÉT_NGHIỆM
+   - "methotrexate" alone → THUỐC (drug)
+   - "suy methotrexate" → CHẨN_ĐOÁN không hợp lệ — KHÔNG extract
+   - **Quy tắc chung**:
+     - Có verb bệnh lý đi kèm (`thiếu X`, `suy X`, `viêm X`, `rối loạn X`, `tăng X`, `giảm X`, `ung thư X`) → CHẨN_ĐOÁN
+     - Có verb hành động (`dùng X`, `uống X`, `tiêm X`, `đo X`, `xét nghiệm X`) → THUỐC / TÊN_XÉT_NGHIỆM
+     - Không verb → xem context rộng xung quanh
+
+B. **DEDUPLICATION THEO CONTEXT** (giảm WER explosion):
+   - Cùng text + type + CÙNG đoạn văn (cách nhau < 200 chars & cùng section) → **CHỈ GIỮ 1 ENTITY** (đầu tiên)
+   - Cùng text + type + KHÁNG section (tiền sử → hiện tại → đánh giá) → GIỦ N entities riêng (R10)
+   - Lý do: Một đoạn văn thường lặp lại cùng bệnh cho nhấn mạnh → GÂY NHIỄU WER. Tránh duplicate.
+
+C. **DRUG CLASS BLACKLIST (CHỈ extract drug CỤ THỂ, không extract class)**:
+   - KHÔNG extract: "kháng sinh", "corticoid", "NSAID", "kháng viêm", "kháng đông" → DROP (drug class)
+   - KHÔNG extract: "thuốc" (khi standalone) → DROP
+   - KHÔNG extract: "thuốc hạ sốt", "thuốc giảm đau" → DROP (class)
+   - CÓ extract: cụ thể brand/INN như "aspirin", "Crestor", "metoprolol"
+
+D. **BODY PARTS** (giảm hallucination):
+   - KHÔNG extract standalone: "ngực", "bụng", "đầu", "lưng", "chân", "tay" → DROP
+   - CÓ extract: cụm với tính từ "đau ngực", "đau đầu", "đau bụng", "yếu tay"
+
+E. **PHỨC HỢP vs ĐƠN GIẢN**:
+   - "viêm phổi" → 1 entity CHẨN_ĐOÁN (KHÔNG tách "viêm" + "phổi")
+   - "viêm phổi mắc phải cộng đồng" → 1 entity (compound disease)
+   - "viêm phổi mô kẽ" → 1 entity
+   - "viêm" alone → DROP
+
+F. **CHATBOT/NARRATIVE REJECTION**:
+   - "Cảm ơn bạn đã gửi câu hỏi" → DROP entirely
+   - "Hy vọng thông tin này hữu ích" → DROP
+   - Câu > 80 chars có dấu `,.;:` bên trong → DROP (narrative)
+   - Lời khuyên: "Bạn nên đi khám" → DROP
+
+G. **SECTION-AWARE EXTRACTION** (tránh duplicate):
+   - Đoạn có "Tiền sử:" → extract thuốc/bệnh đã từng dùng → isHistorical
+   - Đoạn "Hiện tại/Lý do vào viện" → triệu chứng hiện tại → KHÔNG isHistorical
+   - Đoạn "Khám" → triệu chứng thực thể → CHỈ TRIỆU_CHỨNG hoặc CHẨN_ĐOÁN
+   - Đoạn "Điều trị" → thuốc đang dùng + liều → THUỐC (giữ liều)
+
+H. **POSITIVE COUNT TARGET**:
+   - Bệnh án chi tiết > 2000 chars → cần ≥ 30 entities
+   - File nhỏ < 1000 chars → cần ≥ 8 entities
+   - Nếu thiếu → QUAY LẠI bước scan, KHÔNG output [] rỗng
+
+# VERIFICATION CHECKLIST (đánh dấu X trước khi output JSON):
 
 # ⛔ R39 (2026-07-24) — 5 QUY TẮC CHỐNG HALLUCINATION (BẮT BUỘC):
 

@@ -1,15 +1,9 @@
-"""R39: Recreate output/ folder using the enhanced postprocess + recall booster.
+"""R39: Regenerate output/ folder using postprocess + recall booster.
 
-Since the original LLM-extracted outputs were lost, this script regenerates
-NER entities for all 100 files using:
-
-  1. The recall booster's regex patterns (CHAN_DOAN + TRIEU_CHUNG)
-  2. Curated fallbacks for THUỐC + TÊN_XÉT_NGHIỆM + KẾT_QUẢ_XÉT_NGHIỆM
-  3. Type normalization (diacritics → ASCII)
-  4. Position enforcement (substring match)
-
-This is FALLBACK quality (LLM extracted more, but we capture the obvious medical
-entities). Pipeline re-run with LLM will be higher quality.
+Output format:
+- All types use DIACRITICS (CHẨN_ĐOÁN, TRIỆU_CHỨNG, ...)
+- No `_booster` flag (internal marker, stripped before output)
+- Each entity has: text, type, position, assertions, candidates
 """
 import json
 import re
@@ -18,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(r"F:\AI_VIETTEL")))
 from src.postprocess import (
-    _normalize_type_to_ascii,
+    _restore_diacritics_type,
     _enforce_position_strict,
     _is_chatbot_artifact,
     _is_overly_long_narrative,
@@ -28,18 +22,23 @@ from src.postprocess import (
 OUTPUT = Path(r"F:\AI_VIETTEL\output")
 INPUT = Path(r"F:\AI_VIETTEL\input")
 
-# Extra patterns for tests/KQ/THUOC (booster doesn't cover these)
+# DIACRITICS — matches grader schema enum
+T_CHAN_DOAN = "CHẨN_ĐOÁN"
+T_TRIEU_CHUNG = "TRIỆU_CHỨNG"
+T_TEN_XET_NGHIEM = "TÊN_XÉT_NGHIỆM"
+T_KET_QUA = "KẾT_QUẢ_XÉT_NGHIỆM"
+T_THUOC = "THUỐC"
+
 _TEST_PATTERNS = [
     r"\b(?:công thức máu|cf máu|xét nghiệm máu|máu lắng|men gan|albumin"
     r"|siêu âm|chụp\s*[xX][-\s]?quang|điện tâm đồ|ecg|ekg|ct\s*scan|mri"
-    r"|cấy máu|phân tích nước tiểu|nước tiểu|soi phân|holter"
-    r"|c-reactive protein|CRP|ESR|PSA|TSH|troponin|BNP|c\.\s*reactive\.\s*protein"
-    r")\b",
+    r"|cấy máu|phân tích nước tiểu|nước tiểu|soi phân|siêu âm tim"
+    r"|nội soi|sinh thiết|tế bào|mô bệnh học"
+    r"|PSA|TSH|WBC|Hgb|AST|ALT|GGT|CRP)\b",
     r"chụp\s+\w+(?:\s+\w+)?",
     r"siêu\s+âm\s+\w+(?:\s+\w+){0,3}",
 ]
 
-# Drug patterns (some common VN+EN)
 _DRUG_PATTERNS = [
     r"\b(?:aspirin|paracetamol|acetaminophen|amoxicillin|metformin|insulin|"
     r"atenolol|metoprolol|amlodipine|furosemide|prednisolone|ibuprofen|"
@@ -72,32 +71,35 @@ _DRUG_PATTERNS = [
     r"Heparin|Enoxaparin|Dalteparin|Tinzaparin)\b",
 ]
 
-# Lab value pattern (number + unit)
 _LAB_VALUE_RE = re.compile(
     r"(?<![A-Za-z0-9])"
     r"(?:\d+(?:[.,]\d+)?)\s*"
     r"(?:mg/dl|mmol/l|µg/dl|ug/dl|ng/ml|pg/ml|miu/l|µiu/ml|uiu/ml|"
     r"g/l|meq/l|mosm/kg|u/l|iu/l|meq|ng%|g%|mm/hr|mm/giờ|"
-    r"%|độ|celsius|°c|mm|cm|pmol/l|nmol/l)"
+    r"%|độ|celsius|°c|mm|cm|pmol/l|nmol/l|mmHg|cmH2O|lần/phút|"
+    r"nhịp/phút|kg/m2|kg/m²)"
     r"(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 
 
 def extract_via_regex(input_text: str) -> list[dict]:
-    """Fallback regex NER — no LLM needed."""
+    """Fallback regex NER — types use DIACRITICS."""
     out = []
     seen = set()
-    # Use booster (CHAN_DOAN + TRIEU_CHUNG)
+
+    # Use booster (CHẨN_ĐOÁN + TRIỆU_CHỨNG)
     boosted = boost_recall_ner(input_text, [])
     for ent in boosted:
         s, e = ent["position"]
         if (s, e) in seen:
             continue
         seen.add((s, e))
-        out.append({**ent, "candidates": []})
+        # Skip the _booster flag — it's internal metadata
+        clean_ent = {k: v for k, v in ent.items() if not k.startswith("_")}
+        out.append({**clean_ent, "candidates": []})
 
-    # Test names → TEN_XET_NGHIEM
+    # Test names → TÊN_XÉT_NGHIỆM
     for pat in _TEST_PATTERNS:
         for m in re.finditer(pat, input_text, re.IGNORECASE | re.UNICODE):
             s, e = m.start(), m.end()
@@ -113,13 +115,13 @@ def extract_via_regex(input_text: str) -> list[dict]:
             seen.add((s, e))
             out.append({
                 "text": text,
-                "type": "TEN_XET_NGHIEM",
+                "type": T_TEN_XET_NGHIEM,
                 "position": [s, e],
                 "assertions": [],
                 "candidates": [],
             })
 
-    # Drug names → THUOC
+    # Drug names → THUỐC
     for pat in _DRUG_PATTERNS:
         for m in re.finditer(pat, input_text, re.IGNORECASE | re.UNICODE):
             s, e = m.start(), m.end()
@@ -135,13 +137,13 @@ def extract_via_regex(input_text: str) -> list[dict]:
             seen.add((s, e))
             out.append({
                 "text": text,
-                "type": "THUOC",
+                "type": T_THUOC,
                 "position": [s, e],
                 "assertions": [],
                 "candidates": [],
             })
 
-    # Lab values → KET_QUA_XET_NGHIEM
+    # Lab values → KẾT_QUẢ_XÉT_NGHIỆM
     for m in _LAB_VALUE_RE.finditer(input_text):
         s, e = m.start(), m.end()
         if (s, e) in seen:
@@ -149,7 +151,7 @@ def extract_via_regex(input_text: str) -> list[dict]:
         seen.add((s, e))
         out.append({
             "text": m.group(0).strip(),
-            "type": "KET_QUA_XET_NGHIEM",
+            "type": T_KET_QUA,
             "position": [s, e],
             "assertions": [],
             "candidates": [],
@@ -163,6 +165,7 @@ def main():
     OUTPUT.mkdir(exist_ok=True)
     total = 0
     type_counts = {}
+    booster_count = 0
 
     for inp_path in sorted(INPUT.glob("*.txt"), key=lambda p: int(p.stem)):
         fid = inp_path.stem
@@ -170,7 +173,7 @@ def main():
 
         ents = extract_via_regex(text)
 
-        # Apply position enforcement (additional safety)
+        # Apply position enforcement
         final = []
         for ent in ents:
             r = _enforce_position_strict(text, ent)
@@ -181,7 +184,16 @@ def main():
                 continue
             if _is_chatbot_artifact(t):
                 continue
+            # Strip any _ prefixed internal keys
+            for k in list(r.keys()):
+                if k.startswith("_"):
+                    r.pop(k, None)
             final.append(r)
+
+        # Count booster-added entities (those without candidates but with assert=[])
+        for e in final:
+            if not e.get("candidates"):
+                booster_count += 1
 
         out_p = OUTPUT / f"{fid}.json"
         with open(out_p, "w", encoding="utf-8") as f:

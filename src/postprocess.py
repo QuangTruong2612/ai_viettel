@@ -3545,6 +3545,20 @@ def _is_chatbot_artifact(text: str) -> bool:
 # Mỗi pattern cung cấp một hàm infer_type(text) → CHAN_DOAN/TRIEU_CHUNG/TEN_XET_NGHIEM.
 # Đây là "nhắc lại" cho LLM — nếu LLM miss các entity phổ biến, ta bổ sung.
 _R39_DISEASE_PATTERNS = [
+    # === Critical common diseases (HIGH RECALL) ===
+    # These are missing from initial patterns but very common in VN clinical notes.
+    # Use compound forms (not standalone) to avoid false matches.
+    r"\btăng\s+huyết\s+áp\b",
+    r"\bhuyết\s+áp\s+cao\b",
+    r"\bTHA\b",  # Vietnamese abbreviation
+    r"\b(?:suy|yếu|giảm)\s+(?:tim|cơ\s+tim|thận|gan|hô\s+hấp|tuyến\s+giáp)",
+    r"\bsuy\s+thận\s+(?:cấp|mạn|mãn)\b",
+    r"\bsuy\s+tim(?:\s+(?:sung\s+huyết|mạn|cấp|trái|phải))?",
+    # Compound organ + disease patterns (canonical)
+    r"\b(?:viêm|ung\s+thư|suy|thoái\s+hóa|rối\s+loạn|phình|hẹp|tắc|nhiễm|"
+    r"hoại\s+tử|xơ|teo|giãn|to)\s+(?:phổi|gan|thận|đại\s+tràng|dạ\s+dày|"
+    r"tụy|tim|thanh\s+quản|phế\s+quản|tiết\s+niệu|thần\s+kinh|"
+    r"khớp|cơ|mạch\s+máu|máu|tủy\s+xương)\b",
     # Kawasaki variants
     r"bệnh\s+kawasaki", r"\bkawasaki\b", r"viêm\s+mạch\s+máu\s+kawasaki",
     # Heart/cardiovascular
@@ -3557,9 +3571,19 @@ _R39_DISEASE_PATTERNS = [
     r"huyết\s+khối(?:\s+\w+){0,3}",
     r"thuyên\s+tắc(?:\s+\w+){0,3}",
     r"đột\s+tử", r"ngừng\s+tim", r"loạn\s+nhịp\s+tim",
-    # Blood / enzyme
-    r"thiếu\s+men\s+\w+", r"thiếu\s+g6pd", r"tan\s+huyết",
-    r"thiếu\s+máu(?:\s+\w+){0,3}",
+    # Blood / enzyme — R39 fix: require specific disease names, exclude vague narrative.
+    # "thiếu men X" matched too greedy (catches "thiếu men này", "thiếu máu thường sẽ ổn")
+    # → exclude common narrative suffixes via negative lookahead.
+    r"thiếu\s+men\s+(?:g6pd|pyruvate\s+kinase|galactokinase|"
+    r"galactose[\s-]1[\s-]phosphate|phosphofructokinase)",
+    r"\bg6pd\s+deficiency\b",
+    r"\bthiếu\s+hụt\s+men\s+g6pd\b",
+    r"\btan\s+huyết\b",
+    r"\bthiếu\s+máu\s+tan\s+huyết\b",
+    r"\bthiếu\s+máu\s+do\s+tan\s+huyết\b",
+    r"\bthiếu\s+máu\s+(?:cấp|mạn|mãn|nặng|nhẹ|sau)\b",
+    # Blood cells count
+    r"\b(?:thiếu|hạ)\s+(?:hồng\s+cầu|bạch\s+cầu|tiểu\s+cầu)\b",
     # Eye / ENT
     r"viêm\s+kết\s+mạc", r"đau\s+mắt\s+đỏ", r"viêm\s+(?:tai|họng|amidan|xoang)",
     r"điếc(?:\s+\w+){0,2}", r"ù\s+tai", r"viêm\s+thính\s+giác",
@@ -3601,8 +3625,19 @@ _R39_DISEASE_PATTERNS = [
     # Autoimmune
     r"\b(?:lupus|sjogren|sjogren's|sjögren|viêm\s+khớp\s+dạng\s+thấp)\b",
     r"viêm\s+khớp\s+dạng\s+thấp", r"viêm\s+đa\s+khớp",
-    # Specific syndromes
-    r"(?:hội\s+chứng|bệnh|h/c)(?:\s+\w+){1,4}",
+    # Specific syndromes — R39 fix: REMOVE broad `bệnh/hội chứng/h/c (?:\s+\w+){1,4}`
+    # pattern vì match quá rộng — bắt cả narrative/câu dài (`bệnh viện`, `bệnh gì`,
+    # `bệnh cho trẻ ngay sau`, `bệnh di truyền lặn liên`). Thay bằng danh sách CỤ THỂ.
+    r"(?:hội\s+chứng\s+(?:down|edwards|patau|turner|klinefelter|cushing|"
+    r"guillain[\s-]barré|meniere|reye|williams|marfan|downer|reiter)|"
+    r"bệnh\s+(?:kawasaki|parkinson|alzheimer|hodgkin|still|addison|cushing|"
+    r"paget|sjogren|sjögren|huyết\s+sắc\s+tố|thalassemia|"
+    r"viêm\s+khớp\s+dạng\s+thấp|loãng\s+xương|"
+    r"thận\s+mạn|tim\s+mạch\s+vành|"
+    r"hen\s+suyễn)\b)",
+    # Generic "bệnh" required SPECIFIC suffix (organ or modifier)
+    r"bệnh\s+(?:parkinson|alzheimer|kawasaki|still|paget|hashimoto|"
+    r"sjogren|crohn|meniere|hodgkin|cushing|addison)",
     # Fever, jaundice
     r"(?:sốt\s+cao|sốt\s+\d{2,3}°?(?:C|c)|vàng\s+da|vàng\s+mắt|tăng\s+bilirubin)",
     # Pediatric
@@ -3763,34 +3798,38 @@ def boost_recall_ner(input_text: str, current_entities: list[dict[str, Any]]) ->
         existing_positions.add((s, e))
         booster.append({
             "text": t,
-            "type": _normalize_type_to_ascii(etype),
+            # R39 (2026-07-24): Use DIACRITICS (matching grader schema).
+            # Earlier versions used _normalize_type_to_ascii which strips
+            # diacritics → output ASCII types → fail grader schema validation.
+            # Grader schema enum includes both, but DIACRITICS preferred.
+            "type": etype,
             "position": [s, e],
             "assertions": [],
             "_booster": True,
         })
 
-    # Pattern matching — CHAN_DOAN
+    # Pattern matching — CHẨN_ĐOÁN (R39: diacritics, matches grader enum)
     for pat in _R39_DISEASE_PATTERNS:
         for m in re.finditer(pat, input_text, re.IGNORECASE | re.UNICODE):
-            _maybe_add(m.group(0), m.start(), m.end(), "CHAN_DOAN")
+            _maybe_add(m.group(0), m.start(), m.end(), "CHẨN_ĐOÁN")
 
-    # TRIEU_CHUNG
+    # TRIỆU_CHỨNG
     for pat in _R39_SYMPTOM_PATTERNS:
         for m in re.finditer(pat, input_text, re.IGNORECASE | re.UNICODE):
-            _maybe_add(m.group(0), m.start(), m.end(), "TRIEU_CHUNG")
+            _maybe_add(m.group(0), m.start(), m.end(), "TRIỆU_CHỨNG")
 
-    # R39: TEN_XET_NGHIEM (test names)
+    # R39: TÊN_XÉT_NGHIỆM (test names)
     for pat in _R39_TEST_PATTERNS:
         for m in re.finditer(pat, input_text, re.IGNORECASE | re.UNICODE):
             t = m.group(0).strip()
             # Filter overly long matches
             if len(t) > 60:
                 continue
-            _maybe_add(t, m.start(), m.end(), "TEN_XET_NGHIEM")
+            _maybe_add(t, m.start(), m.end(), "TÊN_XÉT_NGHIỆM")
 
-    # R39: KET_QUA_XET_NGHIEM (lab values like "120/80 mmHg", "5.6 mmol/l")
+    # R39: KẾT_QUẢ_XÉT_NGHIỆM (lab values like "120/80 mmHg", "5.6 mmol/l")
     for m in _R39_LAB_RESULT_RE.finditer(input_text):
-        _maybe_add(m.group(0), m.start(), m.end(), "KET_QUA_XET_NGHIEM")
+        _maybe_add(m.group(0), m.start(), m.end(), "KẾT_QUẢ_XÉT_NGHIỆM")
 
     # Sort by position
     booster.sort(key=lambda e: e["position"][0])
@@ -4078,6 +4117,23 @@ def assemble_record(
     except Exception as exc:
         logger.warning("[R39] Recall booster failed: %s", exc)
 
+    # R39 (2026-07-24): DEDUP by (text_normalized, type) trong CÙNG paragraph.
+    # NHƯNG KHÔNG dedupe nếu entities ở KHÁNG section (cách nhau > 500 chars).
+    # Lý do: LLM hay repeat "thiếu men G6PD" 5-13 lần trong cùng đoạn văn → WER explosion.
+    # Quy tắc:
+    # - Cùng (text_lower, type) + span overlap > 50% → DROP later
+    # - Cùng (text_lower, type) + distance < 300 chars (cùng paragraph) → DROP later, KEEP first
+    # - Khác section (distance > 500 chars hoặc context khác) → KEEP all
+    cleaned_final = _dedupe_by_proximity(cleaned_final)
+
+    # R39 (2026-07-24): FINAL CLEANUP — Strip tất cả internal keys (prefix `_`)
+    # như `_booster` trước khi output. Đây là metadata debug, không nên xuất ra file
+    # vì grader / validator có thể reject.
+    for e in cleaned_final:
+        for k in list(e.keys()):
+            if k.startswith("_"):
+                e.pop(k, None)
+
     return cleaned_final
 
 
@@ -4114,6 +4170,87 @@ def _dedupe_by_text_type(entities: list[dict[str, Any]]) -> list[dict[str, Any]]
         seen.add(key)
         deduped.append(ent)
     # Sort lại theo position (giữ thứ tự tự nhiên)
+    deduped.sort(key=lambda e: e.get("position", [0, 0])[0])
+    return deduped
+
+
+def _dedupe_by_proximity(entities: list[dict[str, Any]], same_para_dist: int = 300) -> list[dict[str, Any]]:
+    """R39 (2026-07-24): Dedup entities cùng (text_lower, type) theo PROXIMITY.
+
+    Khác `_dedupe_by_text_type` (strict dedup): function này thông minh hơn:
+    - Chỉ dedup nếu 2 entities gần nhau (< same_para_dist chars) → cùng paragraph → DROP later
+    - Nếu cùng text + KHÁNG section (distance > same_para_dist) → KEEP all (R10 STRICT)
+    - Đây là safety net chính — LLM hay repeat bệnh nhiều lần trong cùng đoạn văn
+      → gây WER explosion.
+
+    Args:
+        entities: list entity dicts.
+        same_para_dist: max distance chars for "same paragraph" (default 300).
+
+    Returns:
+        list entities đã dedupe.
+    """
+    if not entities:
+        return entities
+
+    # Sort by position first
+    sorted_ents = sorted(entities, key=lambda e: e.get("position", [0, 0])[0])
+
+    # Track FIRST occurrence for each (text_lower, type)
+    seen: dict[tuple[str, str], dict] = {}
+    deduped: list[dict[str, Any]] = []
+    dropped = 0
+
+    for ent in sorted_ents:
+        text = str(ent.get("text", "")).strip()
+        etype = str(ent.get("type", ""))
+        if not text:
+            continue
+
+        # Normalize text (lowercase + collapse whitespace) để so sánh
+        import re as _re
+        norm_text = _re.sub(r"\s+", " ", text.lower()).strip()
+        key = (norm_text, etype)
+
+        pos = ent.get("position", [0, 0])
+        if not (isinstance(pos, list) and len(pos) == 2):
+            deduped.append(ent)
+            continue
+        try:
+            s = int(pos[0])
+        except (ValueError, TypeError):
+            deduped.append(ent)
+            continue
+
+        if key in seen:
+            # Same text+type seen before. Check proximity.
+            first_ent = seen[key]
+            first_pos = first_ent.get("position", [0, 0])
+            try:
+                first_s = int(first_pos[0])
+            except (ValueError, TypeError):
+                first_s = s
+            distance = abs(s - first_s)
+            if distance <= same_para_dist:
+                # Cùng paragraph → DROP (LLM lặp lại)
+                dropped += 1
+                logger.debug(
+                    "[R39] Dedup proximity: drop '%s' (%s) at pos %d (first at %d, dist=%d)",
+                    text[:40], etype, s, first_s, distance,
+                )
+                continue
+            else:
+                # Khác section → KEEP (R10 STRICT)
+                deduped.append(ent)
+                # Update seen — actually keep first, allow multiple occurrences in different sections
+                # So we don't update seen[key]
+        else:
+            seen[key] = ent
+            deduped.append(ent)
+
+    if dropped:
+        logger.info("[R39] Dropped %d duplicate entities via proximity", dropped)
+
     deduped.sort(key=lambda e: e.get("position", [0, 0])[0])
     return deduped
 
