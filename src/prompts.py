@@ -1119,10 +1119,7 @@ def build_stage2_user_prompt(input_text: str, mentions: list[dict]) -> str:
                 pass
         lines.append(f"- {i+1}. text=\"{text}\" position={pos}{snippet}")
     mentions_str = "\n".join(lines)
-    return STAGE2_PROMPT.format(
-        input_text=input_text,
-        mentions_list=mentions_str,
-    ) + """
+    return STAGE2_PROMPT.replace("{input_text}", input_text).replace("{mentions_list}", mentions_str) + """
 
 🚨 **ĐỊNH DẠNG OUTPUT BẮT BUỘC**: Trả về JSON array (vd `[{...}, {...}]`). KHÔNG thêm bất kỳ text nào TRƯỚC hoặc SAU JSON (không "Lý do:", không giải thích, không markdown code block). Nếu mention không rõ type → vẫn PHẢI trả entry với best guess type (KHÔNG được bỏ sót mention nào).
 """
