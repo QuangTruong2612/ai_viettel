@@ -2875,16 +2875,50 @@ class ICD10VectorSearch:
                 # Embeddings may be STALE if icd10.jsonl rebuilt without regenerating embeddings.
                 # Mismatch: file tồn tại + load OK nhưng số vectors khác ICD codes → coi như stale,
                 # bỏ qua và regenerate để đảm bảo consistency.
+                #
+                # R39 (2026-07-24): ENV override `TRUST_EMBEDDINGS=1` để BỎ QUA stale check.
+                # Khi user upload lên Kaggle file embeddings mới build từ data lớn hơn
+                # (vd BYT 62928 codes) nhưng local icd10.jsonl chỉ có 15732 → vẫn dùng embeddings
+                # đó (sub-select rows tương ứng khi search), KHÔNG regenerate từ đầu.
+                #
+                # Ngoài ra: nếu embeddings có NHIỀU rows hơn codes (user upload mới hơn data)
+                # → SUB-SELECT rows đầu tiên khớp với code count.
+                import os as _os
+                trust_embeddings = _os.environ.get("TRUST_EMBEDDINGS", "0") == "1"
                 expected_count = len(self.descs_raw) if self.descs_raw else None
                 if expected_count and self._embeddings.shape[0] != expected_count:
-                    logger.warning(
-                        "ICD10VectorSearch: Embeddings STALE — file %s có shape (%d, ...) "
-                        "nhưng ICD data hiện có %d codes. Force regenerate.",
-                        self._embeddings_path.name,
-                        self._embeddings.shape[0],
-                        expected_count,
-                    )
-                    self._embeddings = None  # Force regenerate
+                    if trust_embeddings:
+                        logger.info(
+                            "ICD10VectorSearch: Embeddings %s có %d rows nhưng data chỉ có %d codes. "
+                            "TRUST_EMBEDDINGS=1 → sub-select %d rows đầu.",
+                            self._embeddings_path.name,
+                            self._embeddings.shape[0],
+                            expected_count,
+                            expected_count,
+                        )
+                        # Sub-select first N rows to match data count
+                        self._embeddings = self._embeddings[:expected_count]
+                    elif self._embeddings.shape[0] > expected_count:
+                        # NEW (R39): User uploaded LARGER embedding file (BYT 62928 vs WHO 15732).
+                        # Use it without regeneration by sub-selecting.
+                        logger.info(
+                            "ICD10VectorSearch: Embeddings %s có %d rows > %d codes. "
+                            "Sub-select first %d rows (TRUST mode mặc định cho larger files).",
+                            self._embeddings_path.name,
+                            self._embeddings.shape[0],
+                            expected_count,
+                            expected_count,
+                        )
+                        self._embeddings = self._embeddings[:expected_count]
+                    else:
+                        logger.warning(
+                            "ICD10VectorSearch: Embeddings STALE — file %s có shape (%d, ...) "
+                            "nhưng ICD data hiện có %d codes. Force regenerate.",
+                            self._embeddings_path.name,
+                            self._embeddings.shape[0],
+                            expected_count,
+                        )
+                        self._embeddings = None  # Force regenerate
                 else:
                     logger.info(
                         "ICD10VectorSearch: Đã tải ma trận embeddings %s (shape: %r)",
