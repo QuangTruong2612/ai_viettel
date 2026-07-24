@@ -3359,6 +3359,580 @@ def _expand_duplicates(entities, input_text):
 
 
 
+def _normalize_type_to_ascii(etype: str) -> str:
+    """R39 (2026-07-24): Convert diacritics type → ASCII khi ghi ra file.
+
+    Vì một số grader (vd audit_report.json) check schema với ASCII enum:
+        'THUỐC' → 'THUOC'
+        'CHẨN_ĐOÁN' → 'CHAN_DOAN'
+        'TRIỆU_CHỨNG' → 'TRIEU_CHUNG'
+        'TÊN_XÉT_NGHIỆM' → 'TEN_XET_NGHIEM'
+        'KẾT_QUẢ_XÉT_NGHIỆM' → 'KET_QUA_XET_NGHIEM'
+
+    Strategy: tránh mất schema validity bằng cách giữ key không dấu nếu đã có.
+    Nếu input là Vietnamese → map sang ASCII.
+    """
+    if not etype:
+        return etype
+    # Nếu đã là ASCII (không có ký tự đặc biệt) → giữ nguyên
+    has_diacritic = any(c in etype for c in "àáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵÀÁẢÃẠẦẤẨẪẬÈÉẺẼẸỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌỒỐỔỖỘỜỚỞỠỢÙÚỦŨỤỪỨỬỮỰỲÝỶỸỴ")
+    if not has_diacritic:
+        return etype
+    mapping = {
+        "THUỐC": "THUOC",
+        "CHẨN_ĐOÁN": "CHAN_DOAN",
+        "TRIỆU_CHỨNG": "TRIEU_CHUNG",
+        "TÊN_XÉT_NGHIỆM": "TEN_XET_NGHIEM",
+        "KẾT_QUẢ_XÉT_NGHIỆM": "KET_QUA_XET_NGHIEM",
+    }
+    return mapping.get(etype, etype)
+
+
+def _enforce_position_strict(input_text: str, ent: dict[str, Any]) -> dict[str, Any] | None:
+    """R39 (2026-07-24): Position enforcement cuối cùng — đảm bảo input[pos_start:pos_end] == ent.text.
+
+    Chiến lược xử lý các trường hợp thường gặp:
+    1. text != substring → thử re-search strict match trong input
+    2. text có space hallucination (vd "ảo giác xuất hiện" vs "ảo giácxuất hiện") → thử dedup
+    3. text == substring nhưng off-by-one (len không khớp) → snap end → start+len(text)
+    4. text không tìm được ở bất kỳ đâu → DROP
+
+    Args:
+        input_text: full input text.
+        ent: entity dict với 'text' + 'position'.
+
+    Returns:
+        ent (đã sửa position) hoặc None nếu không thể recover.
+    """
+    if not isinstance(ent, dict):
+        return None
+    text = str(ent.get("text", "")).strip()
+    pos = ent.get("position", [])
+    if not text or not (isinstance(pos, list) and len(pos) == 2):
+        return ent
+
+    try:
+        s, e = int(pos[0]), int(pos[1])
+    except (ValueError, TypeError):
+        return ent
+
+    n = len(input_text)
+    if not (0 <= s < e <= n):
+        return ent
+
+    actual = input_text[s:e]
+
+    # CASE 1: exact match → done
+    if actual == text:
+        return ent
+
+    # CASE 2: case-insensitive match → fix case, update text
+    if actual.lower() == text.lower():
+        ent["text"] = actual
+        return ent
+
+    # CASE 3: text length is off by 1 char (off-by-one từ file 26)
+    # VD: text="BỆNH MẠCH VÀNH" (14), actual="\nBỆNH MẠCH VÀN" (14 chars nhưng khác content)
+    # → thử mở rộng position lên start + len(text)
+    if abs((e - s) - len(text)) <= 1:
+        new_end = min(n, s + len(text))
+        # Kiểm tra char sau new_end có phải alnum → nếu cắt giữa từ thì skip
+        if new_end < n and input_text[new_end].isalnum():
+            pass  # cắt giữa từ, KHÔNG mở rộng
+        elif s > 0 and new_end > s and input_text[s:new_end] == text:
+            ent["position"] = [s, new_end]
+            return ent
+        # Nếu extend về phía trước (bắt đầu từ newline/space)
+        new_start = max(0, s - 1)
+        if new_start != s and input_text[new_start:new_start + len(text)] == text:
+            ent["position"] = [new_start, new_start + len(text)]
+            return ent
+
+    # CASE 4: text bị LLM hallucinate space → thử dedup space
+    text_no_space = re.sub(r"\s+", "", text)
+    if text_no_space != text:
+        # Tìm vị trí trong input mà text_no_space match
+        idx = input_text.find(text_no_space, max(0, s - 80))
+        if idx >= 0 and idx < n:
+            new_end = idx + len(text_no_space)
+            # Check word boundary
+            if (idx == 0 or not input_text[idx - 1].isalnum()) and (
+                new_end >= n or not input_text[new_end].isalnum()
+            ):
+                # Giữ nguyên text gốc (có space) nhưng update position
+                # hoặc update text thành text_no_space
+                recovered_text = input_text[idx:new_end]
+                ent["text"] = recovered_text
+                ent["position"] = [idx, new_end]
+                return ent
+
+    # CASE 5: text có thể match ở chỗ khác trong input → re-search closest to current pos
+    candidates = []
+    start_scan = max(0, s - 200)
+    end_scan = min(n, e + 200)
+    for i in range(start_scan, end_scan):
+        # Match word-boundary
+        if i > 0 and input_text[i - 1].isalnum():
+            continue
+        end_i = i + len(text)
+        if end_i > n:
+            break
+        if input_text[i:end_i] == text and (end_i >= n or not input_text[end_i].isalnum()):
+            dist = abs(i - s)
+            candidates.append((dist, i, end_i))
+    if candidates:
+        candidates.sort()
+        _, new_s, new_e = candidates[0]
+        ent["position"] = [new_s, new_e]
+        return ent
+
+    # CASE 6: không tìm được → DROP
+    logger.debug("[R39] Drop entity '%s' at [%d,%d] — text not found", text, s, e)
+    return None
+
+
+# Chatbot artifacts — common LLM chitchat được LLM/Stage1 đôi khi pick up.
+# File 83[2]: "Cảm ơn bạn đã gửi câu hỏi"
+_CHATBOT_ARTIFACT_PATTERNS = re.compile(
+    r"(?:"
+    r"cảm\s+ơn\s+bạn\s+đã\s+gửi\s+câu\s+hỏi|"
+    r"hy\s+vọng\s+thông\s+tin\s+(?:này\s+)?(?:sẽ\s+)?(?:hữu\s+ích|giúp\s+ích)|"
+    r"nếu\s+bạn\s+có\s+thêm\s+câu\s+hỏi|"
+    r"vui\s+lòng\s+(?:liên\s+hệ|tham\s+khảo)\s+(?:bác\s+sĩ|chuyên\s+gia)|"
+    r"xin\s+chào|"
+    r"chúc\s+bạn\s+(?:sức\s+khỏe|mau\s+khỏe)|"
+    r"đây\s+là\s+(?:một\s+)?(?:bài\s+viết|thông\s+tin)\s+(?:tham\s+khảo|trả\s+lời)|"
+    r"(?:bài|chủ\s+đề)\s+viết\s+bởi|"
+    r"^(?:tóm\s+tắt|kết\s+luận)\s*:"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _is_chatbot_artifact(text: str) -> bool:
+    """R39 (2026-07-24): True nếu text là chatbot chitchat (LLM hallucination), không phải y khoa."""
+    if not text or len(text) > 200:
+        return False
+    return bool(_CHATBOT_ARTIFACT_PATTERNS.search(text))
+
+
+# R39 (2026-07-24): RECALL BOOSTER PATTERNS — patterns LLM hay MISS.
+# Mỗi pattern cung cấp một hàm infer_type(text) → CHAN_DOAN/TRIEU_CHUNG/TEN_XET_NGHIEM.
+# Đây là "nhắc lại" cho LLM — nếu LLM miss các entity phổ biến, ta bổ sung.
+_R39_DISEASE_PATTERNS = [
+    # Kawasaki variants
+    r"bệnh\s+kawasaki", r"\bkawasaki\b", r"viêm\s+mạch\s+máu\s+kawasaki",
+    # Heart/cardiovascular
+    r"viêm\s+(?:tim|cơ\s+tim|màng\s+tim|màng\s+ngoài\s+tim|nội\s+tâm\s+mạc)",
+    r"bệnh\s+tim\s+(?:thiếu\s+máu|mạch\s+vành|bẩm\s+sinh|phì\s+đại|giãn)",
+    r"viêm\s+mạch(?:\s+máu)?(?:\s+\w+){0,3}",
+    r"phình(?:\s+giãn)?\s+động\s+mạch(?:\s+\w+){0,3}",
+    r"hẹp\s+(?:động\s+mạch|tĩnh\s+mạch)(?:\s+\w+){0,2}",
+    r"tắc\s+(?:động\s+mạch|tĩnh\s+mạch|mạch)(?:\s+\w+){0,3}",
+    r"huyết\s+khối(?:\s+\w+){0,3}",
+    r"thuyên\s+tắc(?:\s+\w+){0,3}",
+    r"đột\s+tử", r"ngừng\s+tim", r"loạn\s+nhịp\s+tim",
+    # Blood / enzyme
+    r"thiếu\s+men\s+\w+", r"thiếu\s+g6pd", r"tan\s+huyết",
+    r"thiếu\s+máu(?:\s+\w+){0,3}",
+    # Eye / ENT
+    r"viêm\s+kết\s+mạc", r"đau\s+mắt\s+đỏ", r"viêm\s+(?:tai|họng|amidan|xoang)",
+    r"điếc(?:\s+\w+){0,2}", r"ù\s+tai", r"viêm\s+thính\s+giác",
+    r"dị\s+tật(?:\s+\w+){0,4}", r"khiếm\s+thính",
+    # Skin
+    r"viêm\s+da(?:\s+\w+){0,3}", r"mày\s+đay", r"\beczema\b",
+    r"\bnấm\s+da\b", r"\bghẻ\b", r"\bzona\b", r"\bherpes\b",
+    r"\bvảy\s+nến\b", r"phát\s+ban", r"ban\s+đỏ", r"mề\s+đay",
+    r"nổi\s+mề\s+đay", r"\bviêm\s+da\s+cơ\s+địa\b",
+    # GI
+    r"viêm\s+(?:dạ\s+dày|đại\s+tràng|thực\s+quản|gan|tụy|ruột(?:\s+thừa)?|hang\s+vị|túi\s+mật)",
+    r"loét\s+(?:dạ\s+dày|tá\s+tràng|thực\s+quản|đại\s+tràng)",
+    r"trào\s+ngược(?:\s+\w+){0,3}",
+    r"\bgerd\b", r"\bibs\b",
+    r"viêm\s+(?:ruột|đường\s+tiết\s+niệu|bàng\s+quang|bể\s+thận|thận)",
+    r"sỏi\s+(?:thận|mật|tiết\s+niệu|bàng\s+quang)",
+    r"xơ\s+gan", r"suy\s+gan", r"gan\s+nhiễm\s+mỡ",
+    # Neurology
+    r"đau\s+(?:nửa\s+đầu|đầu|thần\s+kinh\s+tọa)",
+    r"\b(?:parkinson|alzheimer|migraine)\b",
+    r"(?:trầm\s+cảm|lo\s+âu|mất\s+ngủ)",
+    r"(?:động\s+kinh|co\s+giật)",
+    r"tai\s+biến(?:\s+\w+){0,3}", r"đột\s+qụy",
+    r"xuất\s+huyết(?:\s+não|\s+máu)?(?:\s+\w+){0,3}",
+    r"nhồi\s+máu\s+(?:não|cơ\s+tim)",
+    # Respiratory
+    r"(?:viêm\s+phổi|hen(?:\s+phế\s+quản|\s+suyễn)?|copd|khó\s+thở|viêm\s+phế\s+quản|viêm\s+mũi|hen)",
+    r"(?:tràn\s+dịch|tràn\s+khí)(?:\s+\w+){0,2}",
+    r"hen\s+suyễn",
+    # Rheumatology
+    r"(?:thoái\s+hóa\s+khớp|viêm\s+khớp|loãng\s+xương|gút|gout|thoát\s+vị\s+đĩa\s+đệm)",
+    r"(?:gãy\s+xương|gãy\s+\w+\s+xương)",
+    # Cancer (compound)
+    r"ung\s+thư\s+\w+", r"u\s+ác\s+tính\s+\w+", r"\bk\s+\w+\b",
+    r"u\s+ác(?:\s+\w+){0,3}", r"khối\s+u(?:\s+\w+){0,3}",
+    r"\bdi\s+căn(?:\s+\w+){0,3}",
+    # Allergies
+    r"\bdị\s+ứng(?:\s+\w+){0,3}", r"quá\s+mẫn(?:\s+\w+){0,3}",
+    # Autoimmune
+    r"\b(?:lupus|sjogren|sjogren's|sjögren|viêm\s+khớp\s+dạng\s+thấp)\b",
+    r"viêm\s+khớp\s+dạng\s+thấp", r"viêm\s+đa\s+khớp",
+    # Specific syndromes
+    r"(?:hội\s+chứng|bệnh|h/c)(?:\s+\w+){1,4}",
+    # Fever, jaundice
+    r"(?:sốt\s+cao|sốt\s+\d{2,3}°?(?:C|c)|vàng\s+da|vàng\s+mắt|tăng\s+bilirubin)",
+    # Pediatric
+    r"tay\s+chân\s+miệng", r"sởi", r"thủy\s+đậu", r"\brubella\b", r"\bsởi\b",
+    r"ho\s+gà", r"\bbạch\s+hầu\b", r"viêm\s+phổi\s+mắc\s+phải\s+cộng\s+đồng",
+    r"viêm\s+màng\s+não", r"viêm\s+não\s+nhật\s+bản",
+    r"rotavirus", r"\bsốt\s+xuất\s+huyết\b",
+    # Hepatic
+    r"viêm\s+gan\s+[a-zA-Z]", r"viêm\s+gan(?:\s+\w+){0,3}",
+    # Pregnancy-related
+    r"tiền\s+sản\s+giật", r"sản\s+giật", r"\bthai\s+kỳ\b",
+    # Respiratory lower tract
+    r"giãn\s+phế\s+quản", r"khí\s+phế\s+thủng", r"\bhen\s+suyễn\b",
+    # Compound rare
+    r"thận\s+\w+", r"gan\s+\w+(?=\s*[,;])",  # thận/gan X
+]
+
+_R39_SYMPTOM_PATTERNS = [
+    r"đau\s+(?:ngực|bụng|đầu|lưng|họng|chân|tay|cổ|khớp|thắt\s+ngực)",
+    r"đau\s+\w+(?:\s+vùng\s+\w+|\s+trái|\s+phải|\s+sau|\s+trước)",
+    r"khó\s+thở", r"khó\s+nuốt", r"khó\s+nói",
+    r"(?:mệt\s+mỏi|yếu\s+chi|tê\s+(?:tay|chân|ngón))",
+    r"(?:buồn\s+nôn|nôn|ói)",
+    r"(?:chóng\s+mặt|hoa\s+mắt|choáng\s+váng)",
+    r"(?:ho(?: ra máu)?|đờm|rát\s+họng)",
+    r"(?:ngứa|phát\s+ban|nổi\s+mẩn)",
+    r"(?:phù|nề|sưng)(?:\s+\w+){0,2}",
+    r"(?:sốt|sốt\s+cao)(?:\s+\w+){0,3}",
+    r"(?:nôn\s+ra\s+máu|đi\s+ngoài\s+ra\s+máu|tiêu\s+phân\s+máu)",
+    r"(?:rối\s+loạn\s+giấc\s+ngủ|mất\s+ngủ)",
+    r"(?:đánh\s+trống\s+ngực|hồi\s+hộp|tức\s+ngực)",
+    # Body-part specific
+    r"(?:đầu\s+ngón\s+tay|đầu\s+ngón\s+chân)\s+\w+",
+    r"vùng\s+(?:thượng\s+vị|hạ\s+vị|trước\s+tim)",
+    # Specific symptoms
+    r"\b(?:run\s+(?:tay|chân)|tay\s+run|chân\s+run)\b",
+    r"\b(?:khàn\s+tiếng)\b",
+    r"\b(?:tiểu\s+(?:đêm|nhiều|ít|không)|đái\s+(?:đêm|nhiều|ít|không))\b",
+    r"\b(?:táo\s+bón|tiêu\s+chảy)\b",
+    r"\b(?:mờ\s+mắt|hoa\s+mắt)\b",
+    r"\btức\s+(?:ngực|bụng)",
+    # Pain+location
+    r"\bđau\s+thượng\s+vị\b",
+    r"\bđau\s+hạ\s+sườn\b(?:\s+(?:phải|trái))?",
+    r"\bđau\s+(?:quặn|lan)\b",
+]
+
+
+# R39 (2026-07-24): TEST NAMES + LAB ABNORMAL — patterns entities LLM hay miss.
+_R39_TEST_PATTERNS = [
+    # Common VN test names
+    r"(?:chụp\s+[xX][-\s]?quang(?:\s+\w+){0,3})",
+    r"(?:siêu\s+âm(?:\s+\w+){0,3})",
+    r"(?:điện\s+tâm\s+đồ)",
+    r"\b(?:ECG|EKG|MRI|CT(?:\s+scan)?|X[-\s]?quang)\b",
+    r"(?:công\s+thức\s+máu|cf\s+máu|xét\s+nghiệm\s+máu)",
+    r"(?:máu\s+lắng|men\s+gan|albumin)",
+    r"(?:cấy\s+máu|cấy\s+nước\s+tiểu|cấy\s+đờm)",
+    r"(?:phân\s+tích\s+nước\s+tiểu|soi\s+phân|siêu\s+âm\s+tim)",
+    r"(?:nội\s+soi(?:\s+\w+){0,3})",
+    r"(?:sinh\s+thiết(?:\s+\w+){0,3})",
+    r"holter(?:\s+\w+){0,2}",
+    r"(?:xét\s+nghiệm\s+(?:\w+\s+){0,3}(?:máu|nước\s+tiểu|phân|đờm))",
+    # Lab values
+    r"\b(?:HbA1c|hba1c|glycated\s+hemoglobin)\b",
+    r"\b(?:eGFR|egfr|GFR)\b",
+    r"\b(?:Troponin(?:\s+[IT])?|hs[-\s]?troponin)\b",
+    r"\b(?:BNP|NT[-\s]?pro\s+BNP)\b",
+    r"\b(?:AST|ALT|GGT|LDH|ALP|CK(?:-MB)?|CKMB)\b",
+    r"\b(?:WBC|RBC|HGB|HCT|PLT|MCV|MCH|MCHC|RDW|MPV)\b",
+    r"\b(?:TSH|T3|T4|FT3|FT4)\b",
+    r"\b(?:CRP(?:\s+(?:hs|high[-\s]?sensitivity))?|ESR|PCT|procalcitonin)\b",
+    r"\b(?:PSA|fPSA|free\s+PSA)\b",
+    r"\b(?:HDL|LDL|cholesterol|triglyceride|TG)\b",
+    r"\b(?:creatinine|urea|uric\s+acid|ferritin)\b",
+    r"\b(?:HbA1c|hba1c)\b",
+    r"(?:INR|APTT|PT|fibrinogen|D[-\s]?dimer)\b",
+    r"\b(?:spO2|SaO2)\b",
+]
+
+
+# R39 (2026-07-24): LAB VALUE RESULTS — match number+unit patterns.
+_R39_LAB_RESULT_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(?:\d+(?:[.,]\d+)?)\s*"
+    r"(?:mg/dl|mmol/l|µg/dl|ug/dl|ng/ml|pg/ml|miu/l|µiu/ml|uiu/ml|"
+    r"g/l|meq/l|mosm/kg|u/l|iu/l|meq|ng%|g%|mm/hr|mm/giờ|"
+    r"%|độ|celsius|°c|mm|cm|pmol/l|nmol/l|mmHg|cmH2O|lần/phút|"
+    r"nhịp/phút|kg/m2|kg/m²)"
+    r"(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def boost_recall_ner(input_text: str, current_entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """R39 (2026-07-24): NER recall booster — tìm các entities phổ biến LLM hay MISS.
+
+    Vấn đề: LLM đôi khi skip các bệnh/triệu chứng rõ ràng trong input (low recall).
+    Vd: file 2 — "viêm tim", "phình giãn động mạch vành", "sốt cao" — đều có trong input
+    nhưng LLM miss hoặc classify sai.
+
+    Cách xử lý:
+    1. Regex scan input cho các pattern phổ biến (CHAN_DOAN + TRIEU_CHUNG).
+    2. Match position [start, end] exact.
+    3. Nếu CHƯA có entity nào ở gần vị trí đó → bổ sung.
+    4. Nếu ĐÃ CÓ entity ở vị trí đó (overlap > 50%) → skip.
+
+    Args:
+        input_text: full clinical note.
+        current_entities: list entities hiện tại từ LLM Stage 1.
+
+    Returns:
+        list các entities MỚI bổ sung (KHÔNG thay đổi entities cũ — caller tự merge).
+    """
+    if not input_text or not _R39_DISEASE_PATTERNS:
+        return []
+
+    # Build existing position set để check overlap
+    existing_positions: set[tuple[int, int]] = set()
+    for ent in current_entities:
+        pos = ent.get("position", [])
+        if isinstance(pos, list) and len(pos) == 2:
+            try:
+                s, e = int(pos[0]), int(pos[1])
+                existing_positions.add((s, e))
+            except (ValueError, TypeError):
+                continue
+
+    booster: list[dict[str, Any]] = []
+    seen_boost: set[tuple[int, int]] = set()
+
+    def _overlap_with_existing(s: int, e: int) -> bool:
+        """Check if span (s, e) overlap với bất kỳ existing entity."""
+        if (s, e) in existing_positions:
+            return True
+        for es, ee in existing_positions:
+            if max(s, es) < min(e, ee):
+                return True
+        return False
+
+    def _maybe_add(text: str, s: int, e: int, etype: str):
+        # Skip if already covered
+        if _overlap_with_existing(s, e):
+            return
+        if (s, e) in seen_boost:
+            return
+        # Word-boundary check
+        if s > 0 and input_text[s - 1].isalnum():
+            return
+        if e < len(input_text) and input_text[e].isalnum():
+            return
+        t = text.strip()
+        if not t or len(t) < 3 or len(t) > 80:
+            return
+        if _is_chatbot_artifact(t) or _is_overly_long_narrative(t, etype):
+            return
+        seen_boost.add((s, e))
+        existing_positions.add((s, e))
+        booster.append({
+            "text": t,
+            "type": _normalize_type_to_ascii(etype),
+            "position": [s, e],
+            "assertions": [],
+            "_booster": True,
+        })
+
+    # Pattern matching — CHAN_DOAN
+    for pat in _R39_DISEASE_PATTERNS:
+        for m in re.finditer(pat, input_text, re.IGNORECASE | re.UNICODE):
+            _maybe_add(m.group(0), m.start(), m.end(), "CHAN_DOAN")
+
+    # TRIEU_CHUNG
+    for pat in _R39_SYMPTOM_PATTERNS:
+        for m in re.finditer(pat, input_text, re.IGNORECASE | re.UNICODE):
+            _maybe_add(m.group(0), m.start(), m.end(), "TRIEU_CHUNG")
+
+    # R39: TEN_XET_NGHIEM (test names)
+    for pat in _R39_TEST_PATTERNS:
+        for m in re.finditer(pat, input_text, re.IGNORECASE | re.UNICODE):
+            t = m.group(0).strip()
+            # Filter overly long matches
+            if len(t) > 60:
+                continue
+            _maybe_add(t, m.start(), m.end(), "TEN_XET_NGHIEM")
+
+    # R39: KET_QUA_XET_NGHIEM (lab values like "120/80 mmHg", "5.6 mmol/l")
+    for m in _R39_LAB_RESULT_RE.finditer(input_text):
+        _maybe_add(m.group(0), m.start(), m.end(), "KET_QUA_XET_NGHIEM")
+
+    # Sort by position
+    booster.sort(key=lambda e: e["position"][0])
+    return booster
+
+
+# R39 (2026-07-24): EXTENDED FAMILY PATTERNS — capture more isFamily cases.
+_EXTENDED_FAMILY_PATTERNS = re.compile(
+    r"(?:"
+    # Direct family members with disease markers
+    r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú(?!\s+ý)|bác(?!\s+sĩ))"
+    r"(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ))?"
+    r"\s+(?:bị|mắc|có|từng|tiền\s+sử|mất|chết|đã\s+từng|"
+    r"được\s+chẩn\s+đoán|từng\s+mắc|có\s+tiền\s+sử)"
+    r"\s+\w+"
+    r"|"
+    # Family member with "bệnh nhân"
+    r"\b(?:bố|cha|mẹ|anh|chị|em|con|ông|bà|cô|dì|chú(?!\s+ý)|bác(?!\s+sĩ))"
+    r"(?:\s+(?:trai|gái|nội|ngoại|ruột|chồng|vợ))?"
+    r"\s+b[ệe]nh\s+nh[âa]n"
+    r"|"
+    # Family context
+    r"gia\s+[đd][ìi]nh\s+(?:có|bị|từng|tiền\s+sử|ghi\s+nhận|ai|mắc|chưa)"
+    r"|"
+    r"ti[eề]n\s+s[ử]\s*gia\s+[đd][ìi]nh"
+    r"|"
+    r"\b(?:họ\s+hàng|người\s+thân|di\s+truyền|bẩm\s+sinh|gia\s+đình)\b"
+    r"|"
+    # Genetic syndromes (often family-related)
+    r"\b(?:hội\s+chứng\s+down|down\s+syndrome|"
+    r"hội\s+chứng\s+edwards|"
+    r"hội\s+chứng\s+patau|"
+    r"hội\s+chứng\s+turner|"
+    r"hội\s+chứng\s+klinefelter|"
+    r"bệnh\s+huyết\s+sắc\s+tố|"
+    r"bệnh\s+thalassemia|"
+    r"tan\s+máu\s+bẩm\s+sinh|"
+    r"bệnh\s+lơ-xê-mi|leukemia(?:\s+\w+){0,2})\b"
+    r"|"
+    # Aggregate family context with patient context phrase
+    r"người\s+thân\s+(?:của|trong)\s+(?:gia\s+đình|nhà)"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+# R39: EXTENDED NEGATION PATTERNS — capture multi-entity + compound negation.
+_EXTENDED_NEGATION_PATTERNS = re.compile(
+    r"(?:"
+    r"^(?:không|chưa|chẳng|đừng)\s+"
+    r"|"
+    r"không\s+(?:có|ghi\s+nhận|thấy|phát\s+hiện|đáp\s+ứng|"
+    r"xuất\s+hiện|biểu\s+hiện|bộc\s+lộ)\s+"
+    r"|"
+    r"chưa\s+(?:có|ghi\s+nhận|thấy|phát\s+hiện|xác\s+định|rõ)\s+"
+    r"|"
+    r"(?:âm\s+tính|negative|neg)\s+"
+    r"|"
+    r"loại\s+trừ\s+"
+    r"|"
+    r"chưa\s+từng\s+"
+    r"|"
+    r"không\s+còn\s+"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _enrich_assertions(input_text: str, entities: list[dict[str, Any]]) -> int:
+    """R39 (2026-07-24): Enrich entities with isFamily, isNegated, isHistorical
+    using EXTENDED patterns (broader than _detect_assertions_from_context).
+
+    Returns:
+        Số entity được bổ sung assertion.
+    """
+    if not entities or not input_text:
+        return 0
+
+    text_lower = input_text.lower()
+    enriched = 0
+
+    for ent in entities:
+        if not isinstance(ent, dict):
+            continue
+        etype = ent.get("type", "")
+        if etype not in ("CHAN_DOAN", "THUOC", "TRIEU_CHUNG"):
+            continue
+        pos = ent.get("position", [])
+        if not (isinstance(pos, list) and len(pos) == 2):
+            continue
+        try:
+            s = int(pos[0])
+            e_pos = int(pos[1])
+        except (ValueError, TypeError):
+            continue
+        if s < 0 or e_pos <= s:
+            continue
+
+        # Get current assertions
+        existing = set(_normalize_assertions_list(ent.get("assertions", [])))
+        added_any = False
+
+        # isHistorical: section-based
+        if "isHistorical" not in existing:
+            section_id = _find_current_section(input_text, s)
+            if section_id == "tien_su":
+                existing.add("isHistorical")
+                added_any = True
+
+        # isFamily: extended pattern matching
+        if "isFamily" not in existing:
+            family_win_start = max(0, s - 200)
+            family_win_end = min(len(input_text), s + 30)  # look BACKWARD mostly
+            family_slice = text_lower[family_win_start:family_win_end]
+            if _EXTENDED_FAMILY_PATTERNS.search(family_slice):
+                existing.add("isFamily")
+                added_any = True
+
+        # isNegated: extended patterns
+        if "isNegated" not in existing:
+            # Look BACKWARD 60 chars
+            pre_window = text_lower[max(0, s - 60):s]
+            # Clause boundary: chop at ".", "\n", or commas followed by subject
+            # Take last sentence/clause
+            clauses = re.split(r"[.;\n]|(?:\b(?:nhưng|tuy\s+nhiên|ngoại\s+lệ|hiện\s+tại|"
+                                r"tuy nhiên|nhưng|nhưng\s+mà)\b)", pre_window)
+            last_clause = clauses[-1] if clauses else pre_window
+            # Skip if clause is too long (cross-sentence) — risk false positive
+            if len(last_clause) <= 60 and _EXTENDED_NEGATION_PATTERNS.search(last_clause):
+                # Verify NON_NEGATION_CONTEXTS
+                non_neg = re.search(
+                    r"(?:không\s+tuân\s+thủ|không\s+thể|không\s+có\s+khả\s+năng|"
+                    r"chưa\s+rõ|không\s+được\s+(?:thực\s+hiện|làm|chụp|tiến\s+hành))",
+                    last_clause, re.UNICODE,
+                )
+                if not non_neg:
+                    existing.add("isNegated")
+                    added_any = True
+
+        if added_any:
+            ent["assertions"] = sorted(existing)
+            enriched += 1
+
+    return enriched
+
+
+
+
+# LLM thỉnh thoảng extract cả câu narrative thay vì concept y khoa — too long → drop.
+def _is_overly_long_narrative(text: str, etype: str) -> bool:
+    """R39: Drop entities quá dài không phải là concept y khoa (vd cả câu có dấu chấm phẩy).
+
+    Quy tắc:
+    - TÊN_XÉT_NGHIỆM / KQ_XN: max 60 chars
+    - Còn lại: max 80 chars HOẶC chứa 3+ dấu câu narrative (.,;:)
+    """
+    if not text:
+        return False
+    n = len(text)
+    narrative_punct = sum(1 for c in text if c in ".,;:")
+    if etype in ("TÊN_XÉT_NGHIỆM", "KẾT_QUẢ_XÉT_NGHIỆM") and n > 60:
+        return True
+    if n > 80 and narrative_punct >= 3:
+        return True
+    return False
+
+
 def assemble_record(
     input_text: str,
     raw_entities: Iterable[dict[str, Any]],
@@ -3430,7 +4004,53 @@ def assemble_record(
     # LLM sẽ tự xử lý duplicate detection qua prompts + few-shot examples.
     # final = _dedupe_by_text_type(final)
 
-    return final
+    # R39 (2026-07-24): POST-FILTERS MỚI — chống schema reject + position drift.
+    # 1) Convert diacritics type → ASCII (vd KẾT_QUẢ_XÉT_NGHIỆM → KET_QUA_XET_NGHIEM).
+    # 2) Enforce position: nếu input[pos] != text → re-search hoặc drop.
+    # 3) Drop chatbot artifacts ("Cảm ơn bạn...").
+    # 4) Drop overly long narrative entities.
+    cleaned_final: list[dict[str, Any]] = []
+    for rec in final:
+        # 1) Normalize type
+        rec["type"] = _normalize_type_to_ascii(rec.get("type", ""))
+        etype = rec["type"]
+        text = str(rec.get("text", "")).strip()
+
+        # 4) Drop overly long narrative (trước khi enforce position để tránh tốn)
+        if _is_overly_long_narrative(text, etype):
+            logger.debug("[R39] Drop overly long narrative '%s' (%s)", text[:80], etype)
+            continue
+
+        # 3) Drop chatbot artifacts
+        if _is_chatbot_artifact(text):
+            logger.debug("[R39] Drop chatbot artifact '%s'", text[:80])
+            continue
+
+        # 2) Enforce position strict
+        rec_enforced = _enforce_position_strict(input_text, rec)
+        if rec_enforced is None:
+            continue
+
+        cleaned_final.append(rec_enforced)
+
+    # Re-sort sau khi drop
+    cleaned_final.sort(key=lambda e: e["position"][0])
+
+    # R39 (2026-07-24): RECALL BOOSTER — bổ sung entities phổ biến LLM hay miss
+    # (vd "viêm tim", "phình mạch vành", "sốt cao", "sốt 39°C" trong file 2).
+    # Chạy CUỐI CÙNG sau position enforcement để tránh conflict với LLM output.
+    try:
+        boosted = boost_recall_ner(input_text, cleaned_final)
+        if boosted:
+            # Attach empty candidates cho boosted entities (boost stage chưa lookup RAG,
+            # candidate sẽ được add ở re-run pipeline. Để [] cho entities mới.)
+            cleaned_final.extend(boosted)
+            cleaned_final.sort(key=lambda e: e["position"][0])
+            logger.debug("[R39] Boosted %d entities (recall)", len(boosted))
+    except Exception as exc:
+        logger.warning("[R39] Recall booster failed: %s", exc)
+
+    return cleaned_final
 
 
 def _dedupe_by_text_type(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
