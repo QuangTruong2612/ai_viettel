@@ -872,10 +872,13 @@ def process_record(
         # TWO-STAGE PIPELINE (Stage 1: Mentions + Python Validate -> Stage 2: Classify)
         # ======================================================================
         raw_stage1: list[dict[str, Any]] = []
+        accumulated_previous_text = ""
         for chunk_idx, (chunk_text, chunk_offset) in enumerate(chunks):
             if not chunk_text.strip():
                 continue
-            chunk_prompt = build_stage1_user_prompt(chunk_text)
+            prev_summary = accumulated_previous_text[-2500:] if chunk_idx > 0 else ""
+            chunk_prompt = build_stage1_user_prompt(chunk_text, previous_chunks_summary=prev_summary)
+            accumulated_previous_text += chunk_text + "\n"
             _log_token_budget(rec_id, llm, chunk_prompt, adaptive_few_shot)
             try:
                 chunk_raw = _call_with_retry(
@@ -960,10 +963,13 @@ def process_record(
         # ======================================================================
         # SINGLE-PASS PIPELINE (Legacy mode for benchmarking via --no-two-stage)
         # ======================================================================
+        accumulated_single_text = ""
         for chunk_idx, (chunk_text, chunk_offset) in enumerate(chunks):
             if not chunk_text.strip():
                 continue
-            chunk_prompt = build_user_prompt(chunk_text)
+            prev_summary = accumulated_single_text[-2500:] if chunk_idx > 0 else ""
+            chunk_prompt = build_user_prompt(chunk_text, previous_chunks_summary=prev_summary)
+            accumulated_single_text += chunk_text + "\n"
             _log_token_budget(rec_id, llm, chunk_prompt, adaptive_few_shot)
             try:
                 chunk_raw = _call_with_retry(

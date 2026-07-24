@@ -852,8 +852,8 @@ def format_few_shot_stage2_messages(examples: list[dict]) -> list[dict[str, str]
     return msgs
 
 
-def build_user_prompt(input_text: str) -> str:
-    """Build user prompt với input text."""
+def build_user_prompt(input_text: str, previous_chunks_summary: str = "") -> str:
+    """Build user prompt với input text và tích lũy ngữ cảnh các chunk trước."""
     try:
         from src.postprocess import _get_duplicate_alert
         alert = _get_duplicate_alert(input_text)
@@ -861,6 +861,14 @@ def build_user_prompt(input_text: str) -> str:
         alert = ""
 
     alert_part = f"{alert}\n\n" if alert else ""
+
+    ctx_prefix = ""
+    if previous_chunks_summary.strip():
+        ctx_prefix = (
+            f"📌 NGỮ CẢNH TỔNG QUAN TÍCH LŨY TỪ CÁC ĐOẠN TRƯỚC (dùng để hiểu toàn cảnh từ Chunk 1 -> trước):\n"
+            f"\"\"\"\n{previous_chunks_summary.strip()}\n\"\"\"\n\n"
+            f"📌 VĂN BẢN ĐOẠN HIỆN TẠI CẦN TRÍCH XUẤT ENTITIES:\n"
+        )
 
     return (
         "🎯 NHIỆM VỤ: Trích xuất TOÀN BỘ thực thể y khoa từ hồ sơ bệnh án tiếng Việt dưới đây vào 5 loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM).\n\n"
@@ -872,7 +880,7 @@ def build_user_prompt(input_text: str) -> str:
         "5. KHÔNG CẦN ghi `position` — Python tự tính offset chính xác 100%.\n\n"
         "⚠️ CẤM: trích xuất thời gian độc lập (`3 ngày`, `20 giây`), lối sống (`rượu bia`), label header (`Tiền sử:`, `Chẩn đoán:`).\n\n"
         f"{alert_part}"
-        f"INPUT:\n{input_text}\n\n"
+        f"INPUT:\n{ctx_prefix}{input_text}\n\n"
         "OUTPUT JSON ARRAY (chỉ các trường text, type, assertions — không cần position, không kèm lời giải thích):"
     )
 
@@ -1039,20 +1047,21 @@ Trả về JSON array (KHÔNG kèm lời giải thích):
 ]
 """
 
-def build_stage1_user_prompt(input_text: str) -> str:
-    """Build user prompt cho Stage 1 Mention Extraction.
+def build_stage1_user_prompt(input_text: str, previous_chunks_summary: str = "") -> str:
+    """Build user prompt cho Stage 1 Mention Extraction với lũy kế ngữ cảnh các chunk trước.
 
-    R39 (2026-07-24): Enhanced với:
-    - Anti-hallucination rules (chỉ copy nguyên văn, không thêm space/case)
-    - Compound disease KHÔNG tách
-    - Drug-class generic DROP
-    - Standalone dose fragment DROP
-    - Brand names → THUỐC
-    - Acronym extraction mandatory
-    - Span overlap check (R39)
-    - Recall booster patterns (15 loại thường MISS)
-    - RECALL COUNT CHECKLIST (đếm section theo type)
+    - Chunk 1: trích xuất từ Chunk 1 text.
+    - Chunk 2: trích xuất từ Chunk 2 text, kèm ngữ cảnh tích lũy từ Chunk 1.
+    - Chunk 3: trích xuất từ Chunk 3 text, kèm ngữ cảnh tích lũy từ (Chunk 1 + Chunk 2).
     """
+    ctx_prefix = ""
+    if previous_chunks_summary.strip():
+        ctx_prefix = (
+            f"📌 NGỮ CẢNH TỔNG QUAN TÍCH LŨY TỪ CÁC ĐOẠN TRƯỚC (dùng để hiểu toàn cảnh từ Chunk 1 -> trước):\n"
+            f"\"\"\"\n{previous_chunks_summary.strip()}\n\"\"\"\n\n"
+            f"📌 VĂN BẢN ĐOẠN HIỆN TẠI CẦN TRÍCH XUẤT ENTITIES:\n"
+        )
+
     return (
         "🎯 NHIỆM VỤ: Tìm và trích xuất TRỌN VẸN và KIỆT ĐỂ tất cả các cụm từ y khoa (medical concept spans) trong văn bản lâm sàng dưới đây kèm vị trí character offset [start, end).\n\n"
         "🔥 9 QUY TẮC TRÍCH XUẤT LÂM SÀNG CỐT LÕI (BẮT BUỘC TUÂN THỦ TỪNG CHỮ):\n"
@@ -1103,7 +1112,7 @@ def build_stage1_user_prompt(input_text: str) -> str:
         "    - Câu giải thích bệnh từ chatbot AI (vd \"Đây là một bệnh di truyền...\").\n"
         "    - Lời khuyên/phác đồ trừu tượng (vd \"Cách ly...\", \"Bổ sung...\").\n\n"
         "15. ✅ **CHUNK OVERLAP HANDLING** (R39): Nếu input có dấu hiệu overlap giữa 2 chunk (vd \"...viêm phổi...\" ở chunk 1 và chunk 2), KEEP tất cả các occurrence. Stage 3 sẽ dedupe.\n\n"
-        f"INPUT:\n{input_text}\n\n"
+        f"INPUT:\n{ctx_prefix}{input_text}\n\n"
         "🚨 ĐỊNH DẠNG OUTPUT: Trả về JSON array (vd `[{{'text': '...', 'position': [start, end]}}, ...]`). KHÔNG thêm text nào trước/sau JSON. KHÔNG dùng markdown code block. KHÔNG giải thích. Nếu bệnh án có thông tin y khoa (sốt, đau, phát ban, thuốc, xét nghiệm, chẩn đoán...) → BẮT BUỘC extract, KHÔNG trả `[]` rỗng trừ khi input thực sự không có entity nào.\n\n"
         "OUTPUT JSON ARRAY:"
     )
