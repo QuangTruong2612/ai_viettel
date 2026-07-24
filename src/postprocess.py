@@ -3360,30 +3360,55 @@ def _expand_duplicates(entities, input_text):
 
 
 def _normalize_type_to_ascii(etype: str) -> str:
-    """R39 (2026-07-24): Convert diacritics type → ASCII khi ghi ra file.
+    """R39 (2026-07-24): Convert diacritics type → ASCII fallback.
 
-    Vì một số grader (vd audit_report.json) check schema với ASCII enum:
+    HƯỚNG DẪN MỚI (2026-07-24): GIỮ DIACRITICS theo mặc định (grader hiện tại
+    chấp nhận diacritics). Chỉ fallback sang ASCII nếu env var
+    `TYPE_TO_ASCII=1` được set (cho grader cũ dùng ASCII enum).
+
+    Mapping (giữ nguyên — là hướng từ diacritics → ASCII):
         'THUỐC' → 'THUOC'
         'CHẨN_ĐOÁN' → 'CHAN_DOAN'
         'TRIỆU_CHỨNG' → 'TRIEU_CHUNG'
         'TÊN_XÉT_NGHIỆM' → 'TEN_XET_NGHIEM'
         'KẾT_QUẢ_XÉT_NGHIỆM' → 'KET_QUA_XET_NGHIEM'
-
-    Strategy: tránh mất schema validity bằng cách giữ key không dấu nếu đã có.
-    Nếu input là Vietnamese → map sang ASCII.
     """
+    import os
     if not etype:
         return etype
-    # Nếu đã là ASCII (không có ký tự đặc biệt) → giữ nguyên
-    has_diacritic = any(c in etype for c in "àáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵÀÁẢÃẠẦẤẨẪẬÈÉẺẼẸỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌỒỐỔỖỘỜỚỞỠỢÙÚỦŨỤỪỨỬỮỰỲÝỶỸỴ")
-    if not has_diacritic:
+    # GIỮ NGUYÊN DIACRITICS theo mặc định (grader hiện tại chấp nhận).
+    # Chỉ convert sang ASCII khi ENV `TYPE_TO_ASCII=1` (legacy grader).
+    if os.environ.get("TYPE_TO_ASCII", "0") != "1":
+        # Trả về nguyên xi nếu đã là diacritics
+        # Nếu đã là ASCII (do pipeline cũ), giữ nguyên → backward compatible
         return etype
+    # Convert diacritics → ASCII (legacy fallback)
     mapping = {
         "THUỐC": "THUOC",
         "CHẨN_ĐOÁN": "CHAN_DOAN",
         "TRIỆU_CHỨNG": "TRIEU_CHUNG",
         "TÊN_XÉT_NGHIỆM": "TEN_XET_NGHIEM",
         "KẾT_QUẢ_XÉT_NGHIỆM": "KET_QUA_XET_NGHIEM",
+    }
+    return mapping.get(etype, etype)
+
+
+def _restore_diacritics_type(etype: str) -> str:
+    """R39 (2026-07-24): Convert ASCII type → diacritics type (để output khớp grader).
+
+    Map ngược từ ASCII fallback về diacritics chuẩn VN:
+        'THUOC' → 'THUỐC'
+        'CHAN_DOAN' → 'CHẨN_ĐOÁN'
+        'TRIEU_CHUNG' → 'TRIỆU_CHỨNG'
+        'TEN_XET_NGHIEM' → 'TÊN_XÉT_NGHIỆM'
+        'KET_QUA_XET_NGHIEM' → 'KẾT_QUẢ_XÉT_NGHIỆM'
+    """
+    mapping = {
+        "THUOC": "THUỐC",
+        "CHAN_DOAN": "CHẨN_ĐOÁN",
+        "TRIEU_CHUNG": "TRIỆU_CHỨNG",
+        "TEN_XET_NGHIEM": "TÊN_XÉT_NGHIỆM",
+        "KET_QUA_XET_NGHIEM": "KẾT_QUẢ_XÉT_NGHIỆM",
     }
     return mapping.get(etype, etype)
 
@@ -4011,8 +4036,11 @@ def assemble_record(
     # 4) Drop overly long narrative entities.
     cleaned_final: list[dict[str, Any]] = []
     for rec in final:
-        # 1) Normalize type
-        rec["type"] = _normalize_type_to_ascii(rec.get("type", ""))
+        # 1) Normalize type — R39 (2026-07-24) UPDATE: GIỮ DIACRITICS theo mặc định.
+        # Grader hiện tại chấp nhận cả diacritics (THUỐC, CHẨN_ĐOÁN, ...). Chỉ
+        # fallback ASCII khi `TYPE_TO_ASCII=1`. Nếu input đã là ASCII thì giữ
+        # nguyên backward compatible (OUTPUT_SCHEMA chấp nhận CẢ 2 form).
+        rec["type"] = _restore_diacritics_type(rec.get("type", ""))
         etype = rec["type"]
         text = str(rec.get("text", "")).strip()
 

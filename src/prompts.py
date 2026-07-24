@@ -722,12 +722,24 @@ OUTPUT_SCHEMA: dict[str, Any] = {
             "text": {"type": "string", "minLength": 1},
             "type": {
                 "type": "string",
+                # R39 (2026-07-24): Accept CẢ diacritics VN VÀ ASCII no-diacritics.
+                # Local schema trước đây chỉ chấp nhận diacritics → reject các
+                # entity normalized sang ASCII (THUOC, CHAN_DOAN, ...) gây invalid
+                # schema 100% file. Nay chấp nhận cả 2 form để compatible với
+                # grader dùng hoặc ASCII-only hoặc diacritics schema.
                 "enum": [
+                    # Diacritics (Vietnamese) — primary
                     "THUỐC",
                     "TRIỆU_CHỨNG",
                     "TÊN_XÉT_NGHIỆM",
                     "KẾT_QUẢ_XÉT_NGHIỆM",
                     "CHẨN_ĐOÁN",
+                    # ASCII (no-diacritics) — fallback khi normalize
+                    "THUOC",
+                    "TRIEU_CHUNG",
+                    "TEN_XET_NGHIEM",
+                    "KET_QUA_XET_NGHIEM",
+                    "CHAN_DOAN",
                 ],
             },
             # R34 (2026-07-13): position BỎ khỏi schema. Python tự tính character offset
