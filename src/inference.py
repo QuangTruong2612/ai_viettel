@@ -232,9 +232,10 @@ def _call_with_retry(
                 #   ăn vào max_tokens budget và làm chậm inference đáng kể.
                 extra_body={
                     "keep_alive": getattr(llm.config, "keep_alive", "0"),
-                    "num_ctx": getattr(llm.config, "num_ctx", 8192),
-                    "num_gpu": getattr(llm.config, "num_gpu", -1),
-                    "think": False,
+                    "options": {
+                        "num_ctx": getattr(llm.config, "num_ctx", 8192),
+                        "num_gpu": getattr(llm.config, "num_gpu", -1),
+                    }
                 },
             )
             content = resp.choices[0].message.content or ""
@@ -1116,8 +1117,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--target-ctx",
         type=int,
-        default=8192,
-        help="Context length Ollama (default 8192 an toàn cho 8B).",
+        default=4096,
+        help="Context length Ollama (default 2048 cực kỳ an toàn cho 8B trên GPU yếu).",
     )
     parser.add_argument(
         "--no-two-stage",
