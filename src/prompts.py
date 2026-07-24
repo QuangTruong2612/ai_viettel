@@ -889,153 +889,74 @@ def build_user_prompt(input_text: str, previous_chunks_summary: str = "") -> str
 # TWO-STAGE PIPELINE PROMPTS
 # ==============================================================================
 
-STAGE1_PROMPT = f"""Bạn là chuyên gia NER y khoa tiếng Việt với 20+ năm kinh nghiệm. Nhiệm vụ: trích xuất TẤT CẢ entities từ bệnh án vào 5 loại (THUỐC, CHẨN_ĐOÁN, TRIỆU_CHỨNG, TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM).
+STAGE1_PROMPT = """Bạn là chuyên gia trích xuất thực thể y tế (Medical NER).
+Nhiệm vụ: Trích xuất TẤT CẢ các cụm từ y khoa từ bệnh án.
 
 ═══════════════════════════════════════════════════════════════
-PHẦN 1 — TRIẾT LÝ CỐT LÕI (CORE PRINCIPLES)
+QUY TẮC TRÍCH XUẤT
 ═══════════════════════════════════════════════════════════════
 
-🎯 4 NGUYÊN TẮC BẤT BIẾN:
+1. CHÍNH XÁC TEXT: Mỗi entity phải là một substring có thật trong văn bản gốc. KHÔNG sửa lỗi chính tả, KHÔNG đổi case.
+2. KHÔNG CHỒNG LẤN (NO OVERLAP): Nếu đã lấy cụm dài (vd: "phình động mạch vành") thì KHÔNG được lấy cụm ngắn bên trong (vd: "động mạch vành").
+3. BỘ LỌC RÁC (KHÔNG TRÍCH XUẤT CÁC TỪ SAU):
+   - Thời gian/Lối sống: "trong tuần qua", "rượu bia", "thuốc lá".
+   - Quá trình sinh học độc lập: "tan huyết", "đông máu", "oxy hóa".
+   - Tế bào độc lập: "hồng cầu", "bạch cầu".
+   - Tác nhân gây bệnh độc lập: "đậu tằm", "băng phiến".
+   - Nhóm thuốc chung chung: "kháng sinh", "NSAID", "thuốc hạ sốt".
+   - Tự sự / Phủ định "K": "K dùng", "K tiếp xúc". (Ngoại lệ: "K vú", "K phổi" là bệnh thì phải lấy).
+4. NHỮNG TỪ BẮT BUỘC TRÍCH XUẤT:
+   - Các từ viết tắt bệnh lý: "THA", "ĐTĐ", "NMCT", "COPD".
+   - Tên thuốc cụ thể kèm liều: "aspirin 325mg", "Panadol 500mg".
+   - Triệu chứng cốt lõi: "đau ngực", "sốt" (bỏ từ dẫn "cảm thấy", "bị").
 
-(N1) **CHÍNH XÁC TEXT**: Mỗi entity text PHẢI là substring chính xác `input_text[start:end]`.
-  - KHÔNG thêm space vào từ dính (vd "ảo giácxuất hiện" → giữ "ảo giácxuất hiện").
-  - KHÔNG đổi case ("Buồn nôn" → giữ "Buồn nôn").
-  - KHÔNG hallucinate entities không xuất hiện trong input.
-
-(N2) **RECALL TỐI ĐA**: Mọi khái niệm y khoa trong input PHẢI được extract.
-  - Bệnh án chi tiết > 2000 chars → CẦN ≥ 25 entities.
-  - Bệnh án < 1000 chars → CẦN ≥ 8 entities.
-  - KHÔNG bao giờ trả [] rỗng khi input có thông tin y khoa.
-
-(N3) **TYPE CHÍNH XÁC**: dựa trên bản chất y khoa & 5 câu hỏi vàng (xem PHẦN 3).
-
-(N4) **NO SPAN OVERLAP (R39)**: Mỗi cụm từ chỉ thuộc TỐI ĐA 1 entity.
-  - Nếu đã extract "phình giãn động mạch vành" → KHÔNG extract "động mạch vành" riêng.
-  - Khi 2 spans chồng lấn nhau → XOÁ span ngắn hơn.
-
-═══════════════════════════════════════════════════════════════
-PHẦN 2 — BẢNG CLASSIFICATION PATTERN
-═══════════════════════════════════════════════════════════════
-
-| Pattern của entity | Type | Khi nào |
-|---|---|---|
-| Compound `<verb> X` (X = organ) | CHẨN_ĐOÁN | "viêm X", "ung thư X", "suy X", "gãy X", "phình X", "hẹp X", "tắc mạch X", "huyết khối X" |
-| Named disease / Acronym | CHẨN_ĐOÁN | THA, ĐTĐ, NMCT, COPD, RLLL, CKD, Kawasaki, Parkinson... |
-| Cardiac / Vascular inflammatory | CHẨN_ĐOÁN | "viêm cơ tim", "viêm màng tim", "phình/hẹp mạch", "thuyên tắc" |
-| Bệnh có verb "thiếu" (blood/enzyme) | CHẨN_ĐOÁN | "thiếu men G6PD", "thiếu máu tan huyết" |
-| Đau X / Sốt / Ho / Khó thở / Vàng da | TRIỆU_CHỨNG | Bệnh nhân cảm nhận được |
-| Substance alone (G6PD, men X) | TÊN_XÉT_NGHIỆM | Đứng riêng không có verb bệnh lý (tên chỉ định test) |
-| Drug name cụ thể (Panadol, aspirin 325mg x 1) | THUỐC | Brand name hoặc INN + liều (nếu có) |
-| Test name (CT, X-quang, siêu âm, ECG) | TÊN_XÉT_NGHIỆM | Chỉ định cận lâm sàng |
-| Số + đơn vị (120/80 mmHg, 38.5°C, 96%) | KẾT_QUẢ_XÉT_NGHIỆM | Lab value / vital signs với unit |
-
-═══════════════════════════════════════════════════════════════
-PHẦN 3 — 5 CÂU HỎI VÀNG & BỘ LỌC SEMANTIC REASONING
-═══════════════════════════════════════════════════════════════
-
-{_GOLD_QUESTIONS}
-
-{_ICD_CHAPTER_SEMANTICS}
-
-## QUY TẮC LỌC NOISE (DỰA TRÊN 5 CÂU HỎI VÀNG):
-1. **[Q1] Thời gian / Lối sống / Chatbot → DROP**: "trong tuần qua", "cách 3 ngày", "rượu bia", "thuốc lá", "Cảm ơn bạn đã hỏi..." → DROP.
-2. **[Q2-Q3] Tế bào / Quá trình đứng riêng mô tả cơ chế → DROP**: "hồng cầu", "bạch cầu", "oxy hóa", "tan huyết", "phá hủy" đứng một mình trong câu giải thích cơ chế → DROP. (Bệnh nhân KHÔNG cảm nhận được). NGOẠI LỆ: "thiếu máu tan huyết", "giảm tiểu cầu" là CHẨN_ĐOÁN hợp lệ.
-3. **[Q4] Tác nhân gây bệnh (Triggers) → DROP**: "đậu tằm", "băng phiến", "long não", "phấn hoa" (đứng riêng làm nguyên nhân) → DROP. Biểu hiện bệnh ("vàng da", "sốt") → TRIỆU_CHỨNG ✓.
-4. **Drug-Class generic → DROP**: "kháng sinh", "corticoid", "NSAID", "thuốc hạ sốt" (nhóm thuốc, không tên cụ thể) → DROP. Cụ thể "aspirin", "metoprolol" → THUỐC ✓.
-5. **Standalone dose / Qualifier → DROP**: "30 mg", "không đặc hiệu" đứng riêng → DROP.
-6. **Core symptom extraction**: Cắt bỏ verb dẫn ("cảm thấy", "xuất hiện", "bị") và thời gian kéo dài. Lấy core: "mệt mỏi", "đau ngực", "khó thở".
-7. **[Q6] "K dùng" / Phủ định "K" → DROP**: "K dùng" = "không dùng" (mệnh đề tự sự) → DROP. "K" + động từ/lối sống/mẹ cho bú ("K dùng thuốc nam", "Mẹ đang cho con bú") → DROP. NGOẠI LỆ: "K" + cơ quan ("K vú", "K phổi", "K dạ dày") = Ung thư → CHẨN_ĐOÁN ✓.
-
-## QUY TẮC PHỤ:
-- **Duplicates (R10 STRICT)**: Mỗi lần xuất hiện ở vị trí khác nhau trong input = 1 entity riêng biệt với position `[start, end)`.
-- **Thuốc**: Giữ trọn vẹn đuôi liều `x N` (`aspirin 325mg x 1`). Bỏ lời dặn hành chính trong ngoặc.
-- **Viết tắt y khoa**: BẮT BUỘC extract (`THA`, `ĐTĐ`, `NMCT`, `COPD`, `ECG`). KHÔNG mở rộng viết tắt trong text.
-
-═══════════════════════════════════════════════════════════════
-PHẦN 4 — CÁCH LÀM (BẮT BUỘC 2 BƯỚC CÓ COT)
-═══════════════════════════════════════════════════════════════
-
-## BƯỚC 1 — CHAIN-OF-THOUGHT (REASONING SCRATCHPAD):
-Trước khi xuất JSON, quét qua 7 section bệnh án (Lý do vào viện, Tiền sử, Diễn biến, Khám, Cận lâm sàng, Chẩn đoán, Điều trị) và ghi chú ngắn:
-```
-SECTION 1 (Tiền sử): Found N entities [...]
-SECTION 2 (Khám & CLS): Found M entities [...]
-SECTION 3 (Chẩn đoán & Điều trị): Found K entities [...]
-SELF-CHECK: Total = N+M+K entities. Spans exact match? Overlap checked?
-```
-
-## BƯỚC 2 — JSON OUTPUT:
-```json
-[
-  {{"text": "exact_span", "position": [start, end)}},
-  ...
-]
-```
-- `position` là `[start, end)` Python convention (end EXCLUSIVE).
-- CHỈ trả về JSON array sau scratchpad.
+# ĐỊNH DẠNG ĐẦU RA BẮT BUỘC:
+Chỉ trả về MỘT mảng JSON duy nhất. TUYỆT ĐỐI KHÔNG giải thích, KHÔNG viết thêm bất kỳ đoạn text hay markdown scratchpad nào.
 """
 
-STAGE2_PROMPT = f"""Bạn là chuyên gia phân loại thực thể y tế lâm sàng chuẩn quốc tế (i2b2/n2c2).
+STAGE2_PROMPT = f"""Bạn là chuyên gia phân loại thực thể y tế lâm sàng.
 
 ═══════════════════════════════════════════════════════════════
-PHẦN 1 — NGUYÊN TẮC BẤT BIẾN (CORE PRINCIPLES)
+QUY TẮC PHÂN LOẠI & GÁN THUỘC TÍNH (ASSERTION)
 ═══════════════════════════════════════════════════════════════
 
-(N1) **CHÍNH XÁC TEXT**: Giữ nguyên `text` từ input. KHÔNG sửa spelling, KHÔNG đổi case.
-(N2) **BẢO TOÀN SỐ LƯỢNG**: MỖI mention ở input PHẢI có đúng 1 entry tương ứng ở output.
-(N3) **5 TYPE DỰA TRÊN THỰC BẢN LÂM SÀNG**:
-     - CHẨN_ĐOÁN | TRIỆU_CHỨNG | THUỐC | TÊN_XÉT_NGHIỆM | KẾT_QUẢ_XÉT_NGHIỆM
-(N4) **ASSERTIONS CHÍNH XÁC**:
-     - isNegated: Khẳng định KHÔNG TỒN TẠI (vd: "không ho", "chưa phát hiện", "âm tính", "loại trừ"). Nếu KẾT_QUẢ_XÉT_NGHIỆM là "âm tính" -> entity KẾT_QUẢ_XÉT_NGHIỆM KHÔNG có isNegated, mà CHẨN_ĐOÁN đứng trước nó mới có isNegated (Vd: "Cúm A: âm tính" -> "Cúm A" (CHẨN_ĐOÁN, isNegated), "âm tính" (KẾT_QUẢ, [])).
-     - isHistorical: Đã xảy ra trong QUÁ KHỨ (tiền sử) và KHÔNG PHẢI là lý do nhập viện đợt này. Nếu là đợt cấp đang điều trị → KHÔNG historical.
-     - isFamily: Thuộc về người thân ("bố", "mẹ", "di truyền").
-(N5) **TYPE=NULL (DROP) KHI LÀ NOISE**: Rác/thời gian/lối sống/tác nhân/quá trình sinh học/bộ phận cơ thể → `type: null`.
+1. 5 LOẠI THỰC THỂ (TYPE):
+- CHẨN_ĐOÁN: Bệnh lý, hội chứng, tổn thương, kết luận bất thường ("Viêm phổi", "Thiếu máu tan huyết", "Nhiễm khuẩn", "Suy thận").
+- TRIỆU_CHỨNG: Cảm giác chủ quan hoặc dấu hiệu khách quan ("Đau ngực", "Ho", "Sốt", "Vàng da").
+- THUỐC: Tên thuốc cụ thể ("aspirin 325mg", "Panadol"). Nếu là nhóm thuốc ("kháng sinh", "NSAID") -> TYPE: null (DROP).
+- TÊN_XÉT_NGHIỆM: Tên xét nghiệm, thủ thuật ("G6PD", "AST", "X-quang ngực", "ECG"). Nếu "Thiếu men G6PD" -> CHẨN_ĐOÁN.
+- KẾT_QUẢ_XÉT_NGHIỆM: Trị số, kết quả ("120/80 mmHg", "âm tính", "bình thường").
 
-═══════════════════════════════════════════════════════════════
-PHẦN 2 — QUY TẮC Ranh giới (Boundary Rules)
-═══════════════════════════════════════════════════════════════
+2. BỘ LỌC RÁC (DROP) - TRẢ VỀ TYPE: null:
+- Quá trình hóa sinh: "tan huyết", "đông máu", "oxy hóa", "chuyển hóa".
+- Thành phần máu/nguyên nhân: "hồng cầu", "bạch cầu", "đậu tằm", "băng phiến", "rượu bia", "thuốc lá".
+- Từ viết tắt K + Động từ: "K dùng", "K tiếp xúc". (Ngoại lệ: "K phổi", "K vú" -> CHẨN_ĐOÁN).
+- Bộ phận cơ thể đứng lẻ: "ngực", "đầu", "bụng".
 
-{_GOLD_QUESTIONS}
+3. 3 LOẠI THUỘC TÍNH (ASSERTIONS):
+- isNegated: Khẳng định KHÔNG TỒN TẠI (vd: "không ho", "chưa phát hiện", "âm tính"). (Chú ý: Nếu KẾT QUẢ là "âm tính", gán isNegated cho CHẨN ĐOÁN đi kèm).
+- isHistorical: Đã xảy ra trong QUÁ KHỨ (tiền sử) và KHÔNG phải đợt cấp đang điều trị.
+- isFamily: Bệnh của người thân ("bố", "mẹ", "ông", "di truyền").
 
-{_ICD_CHAPTER_SEMANTICS}
+# VÍ DỤ ĐẦU RA CHO 8B MODEL:
+Nếu Input có: `1. text="sốt" position=[10,13]` và `2. text="không viêm phổi" position=[20,35]`
+Output phải là JSON (KHÔNG GIẢI THÍCH):
+[
+  {{"text": "sốt", "type": "TRIỆU_CHỨNG", "assertions": []}},
+  {{"text": "không viêm phổi", "type": "CHẨN_ĐOÁN", "assertions": ["isNegated"]}}
+]
 
-## QUY TẮC PHÂN BIỆT:
-1. **[Triệu chứng vs Chẩn đoán]**:
-   - Chủ quan (cảm giác) & Khách quan (dấu hiệu) → **TRIỆU_CHỨNG** ("Đau ngực", "Ho", "Buồn nôn", "Vàng da", "Đau đầu")
-   - Kết luận bệnh lý / Bệnh có ICD → **CHẨN_ĐOÁN** ("Viêm phổi", "Thiếu máu tan huyết", "Nhiễm khuẩn", "Suy thận", "Tràn dịch")
-2. **[Tên xét nghiệm vs Kết quả vs Chẩn đoán]** (Đặc biệt với Enzyme):
-   - "G6PD", "AST", "X-quang ngực", "ECG" → **TÊN_XÉT_NGHIỆM**
-   - "Thiếu men G6PD", "G6PD deficiency" → **CHẨN_ĐOÁN** (Bệnh lý di truyền)
-   - "120/80 mmHg", "38.5°C", "dương tính", "bình thường", "nhịp xoang đều" → **KẾT_QUẢ_XÉT_NGHIỆM**
-3. **[Thuốc cụ thể vs Nhóm thuốc]**:
-   - Tên thuốc cụ thể (có/không liều) → **THUỐC** ("aspirin 325mg", "metoprolol 25mg", "Panadol")
-   - Nhóm thuốc → **DROP** ("kháng sinh", "corticoid", "thuốc hạ sốt", "NSAID")
-4. **Noise / Process / Trigger → DROP** (`type: null`):
-   - Quá trình hóa sinh: "tan huyết", "đông máu", "oxy hóa", "chuyển hóa".
-   - Thành phần chung chung: "hồng cầu", "bạch cầu", "tiểu cầu".
-   - Tác nhân gây bệnh: "đậu tằm", "băng phiến", "long não", "ăn đậu tằm".
-   - Lối sống / Tuổi / Hành động: "rượu bia", "thuốc lá", "trong tuần qua", "Mẹ đang cho bú".
-   - Cơ quan độc lập: "ngực", "bụng", "đầu" (không tính từ bệnh lý).
-5. **Từ viết tắt "K"**:
-   - `K` + cơ quan ("K vú", "K phổi") → **CHẨN_ĐOÁN**
-   - `K` + động từ / tự sự ("K dùng", "K tiếp xúc") → **DROP**
-
-# ĐẦU VÀO
-Văn bản gốc đầy đủ (để hiểu ngữ cảnh):
+# ĐẦU VÀO THỰC TẾ
+Văn bản gốc:
 <input>
 {{input_text}}
 </input>
 
-Danh sách mentions cần phân loại:
+Danh sách mentions:
 {{mentions_list}}
 
 # ĐẦU RA
-Trả về JSON array (KHÔNG kèm lời giải thích):
-[
-  {{"text": "...", "type": "THUỐC|CHẨN_ĐOÁN|TRIỆU_CHỨNG|TÊN_XÉT_NGHIỆM|KẾT_QUẢ_XÉT_NGHIỆM", "assertions": ["isNegated", "isHistorical", "isFamily"]}},
-  ...
-]
-"""
+Trả về duy nhất JSON array, KHÔNG kèm text giải thích:"""
 
 def build_stage1_user_prompt(input_text: str, previous_chunks_summary: str = "") -> str:
     """Build user prompt cho Stage 1 Mention Extraction với lũy kế ngữ cảnh các chunk trước.
@@ -1053,27 +974,24 @@ def build_stage1_user_prompt(input_text: str, previous_chunks_summary: str = "")
         )
 
     return (
-        "🎯 NHIỆM VỤ: Trích xuất TRỌN VẸN và KIỆT ĐỂ tất cả các cụm từ y khoa (medical concept spans) trong văn bản lâm sàng dưới đây kèm vị trí character offset [start, end).\n\n"
-        "🔥 9 QUY TẮC TRÍCH XUẤT LÂM SÀNG CỐT LÕI (BẮT BUỘC TUÂN THỦ TỪNG CHỮ):\n"
-        "1. TRIỆU CHỨNG LÕI NGẮN GỌN: CHỈ lấy core symptom (`đau ngực`, `khó thở`, `mệt mỏi`, `sốt`). TUYỆT ĐỐI KHÔNG bốc thêm cụm từ tự sự / hoàn cảnh phía sau (`khi leo cầu thang`, `lúc nhập viện`) hoặc tiền tố lời kể (`còn cảm giác`, `xuất hiện`, `bệnh nhân thấy`).\n"
-        "2. TÁCH CỤM TRIỆU CHỨNG KÉP: Nếu có cảm giác + giải phẫu (`đau thắt ngực vùng trước tim`), tách thành 2 spans (`đau thắt ngực` VÀ `thắt ngực vùng trước tim`) HOẶC lấy nguyên cụm nhưng không thừa. KHÔNG gộp chung các triệu chứng rời rạc.\n"
-        "3. BỎ ĐỘNG TỪ THỦ THUẬT: Khi lấy TÊN_XÉT_NGHIỆM, TUYỆT ĐỐI KHÔNG lấy động từ chỉ định (`chụp`, `đo`, `làm`). Vd: `chụp X-quang` -> `X-quang`. Cụm xét nghiệm chuẩn (`siêu âm tim`, `phân tích nước tiểu`) thì GIỮ NGUYÊN.\n"
-        "4. THUỐC ĐỦ ĐUÔI LIỀU LƯỢNG: `aspirin 325mg po bid`, `paracetamol 500mg x 1` phải lấy đủ đuôi liều/tần suất, KHÔNG bỏ chữ `x 1` hay `bid`.\n"
-        "5. LẶP LẠI BAO NHIÊU LẦN - LẤY BẤY NHIÊU: Một entity lặp lại nhiều lần phải được trích xuất đủ số lần với positions tương ứng.\n"
-        "6. BẮT BUỘC TRÍCH XUẤT TỪ VIẾT TẮT Y KHOA: Bắt buộc lấy `THA`, `ĐTĐ`, `NMCT`, `COPD`, `CKD`, `ECG`... như những thực thể bình thường.\n"
-        "7. 🚨 LOẠI TRỪ RÁC (NOISE) - TUYỆT ĐỐI KHÔNG EXTRACT:\n"
-        "   - Quá trình hóa sinh / sinh học: `tan huyết`, `đông máu`, `oxy hóa`, `khử oxy`, `phá hủy`, `chuyển hóa`.\n"
-        "   - Tế bào đứng độc lập: `hồng cầu`, `bạch cầu`, `tiểu cầu`.\n"
-        "   - Nguyên nhân / Tác nhân: `đậu tằm`, `băng phiến`, `long não`, `phấn hoa`, `ăn đậu tằm`.\n"
-        "   - Lối sống / Thời gian: `rượu bia`, `thuốc lá`, `trong tuần qua`, `cách đây 3 ngày`.\n"
-        "   - Nhóm thuốc chung chung: `kháng sinh`, `NSAID`, `corticoid`, `thuốc hạ sốt`.\n"
-        "   - Cơ quan độc lập (không tính từ bệnh lý): `ngực`, `bụng`, `đầu`, `chân`, `tay`.\n"
-        "8. ENZYME & BỆNH DI TRUYỀN:\n"
-        "   - `Glucose-6-Phosphate Dehydrogenase`, `G6PD`, `AST`, `men G6PD` → PHẢI EXTRACT (sẽ là TÊN_XÉT_NGHIỆM).\n"
-        "   - `Thiếu men G6PD`, `thiếu máu tan huyết` → PHẢI EXTRACT (sẽ là CHẨN_ĐOÁN).\n"
-        "9. 🚨 TUYỆT ĐỐI KHÔNG SPAN OVERLAP: Mỗi cụm từ chỉ nằm trong 1 entity. Nếu span ngắn nằm trọn trong span dài (vd `động mạch vành` nằm trong `phình động mạch vành`) → XÓA span ngắn.\n\n"
+        "🎯 NHIỆM VỤ: Trích xuất TRỌN VẸN các cụm từ y khoa trong văn bản lâm sàng kèm vị trí [start, end).\n\n"
+        "🔥 QUY TẮC DÀNH CHO BẠN:\n"
+        "1. CHỈ LẤY CỐT LÕI: Lấy `đau ngực`, `khó thở`. KHÔNG lấy `bệnh nhân thấy đau ngực`.\n"
+        "2. KHÔNG LẤY TỪ CHỈ ĐỊNH: Lấy `X-quang`, không lấy `chụp X-quang`. Nhưng giữ nguyên `siêu âm tim`.\n"
+        "3. THUỐC ĐỦ LIỀU: Lấy `aspirin 325mg po bid` trọn vẹn.\n"
+        "4. TỪ VIẾT TẮT: Bắt buộc lấy `THA`, `ĐTĐ`, `COPD`, `ECG`.\n"
+        "5. 🚨 DROP (KHÔNG TRÍCH XUẤT): `tan huyết`, `đông máu`, `oxy hóa`, `hồng cầu`, `đậu tằm`, `kháng sinh`.\n"
+        "6. 🚨 KHÔNG CHỒNG LẤN: Nếu có `phình động mạch vành`, KHÔNG lấy riêng `động mạch vành`.\n\n"
+        "# VÍ DỤ ĐẦU RA MONG MUỐN:\n"
+        "Văn bản: 'Bệnh nhân sốt cao, có tiền sử THA. Uống Panadol 500mg.'\n"
+        "Output JSON:\n"
+        "[\n"
+        "  {\"text\": \"sốt cao\", \"position\": [10, 17]},\n"
+        "  {\"text\": \"THA\", \"position\": [33, 36]},\n"
+        "  {\"text\": \"Panadol 500mg\", \"position\": [44, 57]}\n"
+        "]\n\n"
         f"INPUT:\n{ctx_prefix}{input_text}\n\n"
-        "🚨 ĐỊNH DẠNG OUTPUT: JSON array (`[{{'text': '...', 'position': [start, end]}}, ...]`). KHÔNG dùng markdown block. KHÔNG giải thích. Nếu có thông tin y khoa, KHÔNG trả mảng rỗng.\n"
+        "🚨 OUTPUT JSON ARRAY (KHÔNG markdown block, KHÔNG text giải thích, CHỈ JSON):"
     )
 
 def build_stage2_user_prompt(input_text: str, mentions: list[dict]) -> str:
