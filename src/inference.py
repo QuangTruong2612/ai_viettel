@@ -1109,17 +1109,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-few-shot",
         type=int,
-        default=35,
-        help="Số few-shot examples TỐI ĐA (default 35 = tổng số examples hiện có). "
-             "Cap runtime 12-20 examples (sweet spot 12). "
-             "Test thực nghiệm: 12→37, 24→30-35, 35→<30 entities.",
+        default=3,
+        help="Số few-shot examples TỐI ĐA. Set về 3 cho 8B models để tránh tràn context.",
     )
     
     parser.add_argument(
         "--target-ctx",
         type=int,
-        default=65536,
-        help="Context length Ollama (default 65536 = nhiều few-shot hơn). Nếu budget âm → ép 1 few-shot.",
+        default=8192,
+        help="Context length Ollama (default 8192 an toàn cho 8B).",
     )
     parser.add_argument(
         "--no-two-stage",
@@ -1218,15 +1216,15 @@ def main(argv: list[str] | None = None) -> int:
         s2_path = _PROJECT_ROOT / "data" / "examples_stage2.jsonl"
 
     if use_two_stage and s1_path.exists() and s2_path.exists():
-        s1_ex = load_few_shot(s1_path)
-        s2_ex = load_few_shot(s2_path)
+        s1_ex = load_few_shot(s1_path)[:args.max_few_shot]
+        s2_ex = load_few_shot(s2_path)[:args.max_few_shot]
         # R38 (2026-07-23) REVERTED: Chỉ load từ stage1.jsonl và stage2.jsonl.
         # Việc merge thêm files khác gây noise — LLM phải tự quyết định qua prompts.
         few_shot = format_few_shot_messages(s1_ex)
         few_shot_stage2 = format_few_shot_stage2_messages(s2_ex)
         logger.info("Two-Stage Pipeline mode: loaded %d S1 and %d S2 few-shot examples.", len(s1_ex), len(s2_ex))
     else:
-        all_examples = load_few_shot()
+        all_examples = load_few_shot()[:args.max_few_shot]
         # R38 (2026-07-23) REVERTED: Không merge extra files.
         few_shot = format_few_shot_messages(all_examples)
         few_shot_stage2 = None
@@ -1238,7 +1236,8 @@ def main(argv: list[str] | None = None) -> int:
     # R37 (2026-07-16): Load Stage 3 few-shot (8 hardcoded examples cho LLM học
     # verdict format + ICD/RxNorm code conventions từ Stage 1/2 context).
     # Stage 3 default ON + few-shot default ON; opt-out chung bằng LLM_DISABLE_STAGE3=1.
-    stage3_few_shot = format_few_shot_stage3_messages()
+    # Cap số lượng ví dụ xuống tối đa 4 examples (8 msgs) cho 8B models.
+    stage3_few_shot = format_few_shot_stage3_messages()[:8]
     logger.info(
         "Stage 3 few-shot loaded: %d msgs (%d examples)",
         len(stage3_few_shot),
